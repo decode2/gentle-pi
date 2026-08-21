@@ -8,6 +8,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 const root = join(fileURLToPath(new URL("..", import.meta.url)));
 
 const requiredPaths = [
+  "bin/gentle-pi-models.mjs",
   "assets/orchestrator.md",
   "assets/orchestrator-delegation.md",
   "assets/orchestrator-memory.md",
@@ -52,6 +53,9 @@ const requiredPaths = [
   "extensions/sdd-init.ts",
   "extensions/skill-registry.ts",
   "lib/gentle-ai-binary.ts",
+  "lib/model-routing-agents.ts",
+  "lib/model-routing-authority.ts",
+  "lib/model-routing-contract.ts",
   "lib/git-commit-transaction.ts",
   "lib/native-review-cli.ts",
   "lib/provider-contract-bundle.ts",
@@ -60,6 +64,8 @@ const requiredPaths = [
   "lib/review-relay-contract.ts",
   "lib/sdd-preflight.ts",
 	"runtime/gentle-ai-binary.mjs",
+	"runtime/gentle-pi-models-loader.mjs",
+	"runtime/gentle-pi-models.ts",
 	"runtime/git-commit-transaction.mjs",
 	"runtime/native-review-cli.mjs",
 	"runtime/review-integration-v2.mjs",
@@ -261,15 +267,17 @@ export function extractGeneratedRuntimeSources(packageRoot) {
 // entries in `requiredPaths`. Deliberately not a `lib/`-driven walk: most
 // `lib/` modules are intentionally unpaired with a generated runtime file.
 export function reconcileGeneratedRuntimeSources(packageRoot, sources, paths) {
-  const runtimeRoot = join(packageRoot, "runtime");
+  const runtimeRoot = join(packageRoot, "runtime"), handAuthored = new Set(["gentle-pi-models-loader"]);
   const runtimeBasenames = existsSync(runtimeRoot)
     ? readdirSync(runtimeRoot)
         .filter((name) => name.endsWith(".mjs"))
         .map((name) => name.slice(0, -".mjs".length))
+        .filter((name) => !handAuthored.has(name))
     : [];
   const requiredRuntimeBasenames = paths
     .filter((relativePath) => relativePath.startsWith("runtime/") && relativePath.endsWith(".mjs"))
-    .map((relativePath) => relativePath.slice("runtime/".length, -".mjs".length));
+    .map((relativePath) => relativePath.slice("runtime/".length, -".mjs".length))
+    .filter((name) => !handAuthored.has(name));
 
   const sourceSet = new Set(sources);
   const runtimeSet = new Set(runtimeBasenames);

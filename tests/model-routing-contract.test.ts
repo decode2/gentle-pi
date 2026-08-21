@@ -41,7 +41,7 @@ test("negotiates contract v1 and supported operations", () => {
 	assert.deepEqual(capabilities({ contract: MODEL_ROUTING_CONTRACT }), {
 		contract: MODEL_ROUTING_CONTRACT,
 		supported: true,
-		operations: ["capabilities", "inspect", "validate"],
+		operations: ["capabilities", "inspect", "validate", "apply"],
 	});
 	assert.equal(capabilities({ contract: "gentle-pi.model-routing/v2" }).supported, false);
 });

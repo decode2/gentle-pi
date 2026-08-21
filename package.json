@@ -22,7 +22,11 @@
     "type": "git",
     "url": "git+https://github.com/Gentleman-Programming/gentle-pi.git"
   },
+  "bin": {
+    "gentle-pi-models": "./bin/gentle-pi-models.mjs"
+  },
   "files": [
+    "bin/",
     "assets/",
     "contracts/",
     "docs/",

@@ -2,11 +2,11 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { AuthStorage, DefaultResourceLoader, ModelRegistry, type AuthStorageBackend } from "@earendil-works/pi-coding-agent";
 import { getModel, getModels, getProviders, getSupportedThinkingLevels } from "@earendil-works/pi-ai";
-import { THINKING_LEVELS, normalizeModelConfig, normalizeModelId, readModelConfigFileAsync, resolveModelRoutingTarget, type AgentModelConfig, type AgentRoutingEntry, type ModelConfigTarget, type ModelRoutingRoots, type ThinkingLevel } from "./model-routing-authority.ts";
+import { THINKING_LEVELS, normalizeModelConfig, normalizeModelId, readModelConfigFileAsync, resolveModelRoutingTarget, writeModelConfigFileAsync, type AgentModelConfig, type AgentRoutingEntry, type ModelConfigTarget, type ModelRoutingRoots, type ThinkingLevel } from "./model-routing-authority.ts";
 import type { AgentEntry, ModelRoutingAgentDiscovery } from "./model-routing-agents.ts";
 
 export const MODEL_ROUTING_CONTRACT = "gentle-pi.model-routing/v1" as const;
-export const MODEL_ROUTING_OPERATIONS = ["capabilities", "inspect", "validate"] as const;
+export const MODEL_ROUTING_OPERATIONS = ["capabilities", "inspect", "validate", "apply"] as const;
 export type ModelRoutingOperation = (typeof MODEL_ROUTING_OPERATIONS)[number];
 export type ModelRoutingDiagnostic = { code: string; message: string; severity: "error" | "warning" | "info"; path?: string };
 export type ModelRoutingSdkModel = Record<string, unknown>;
@@ -18,10 +18,12 @@ export interface ModelRoutingModelRuntime {
 	find?: (provider: string, id: string) => ModelRoutingSdkModel | undefined | Promise<ModelRoutingSdkModel | undefined>;
 	refresh?: (options?: { signal?: AbortSignal }) => void | Promise<void>;
 }
+export interface ModelRoutingMaterializationResult { affected: string[]; succeeded: string[]; failed: Array<{ target: string; message: string }> }
 export interface ModelRoutingDependencies {
 	runtime?: ModelRoutingModelRuntime;
 	createRuntime?: (context: ModelRoutingContext, loadExtensions: boolean) => ModelRoutingModelRuntime | Promise<ModelRoutingModelRuntime>;
 	discoverAgents?: ModelRoutingAgentDiscovery;
+	materialize?: (context: ModelRoutingContext, config: AgentModelConfig, options: { dryRun: boolean }) => ModelRoutingMaterializationResult | Promise<ModelRoutingMaterializationResult>;
 }
 export interface ModelRoutingRequest {
 	contract?: unknown;
@@ -52,6 +54,10 @@ export interface ModelRoutingInspection {
 }
 export interface ModelRoutingValidationRequest extends ModelRoutingRequest { draft: unknown }
 export interface ModelRoutingValidationResult { contract: typeof MODEL_ROUTING_CONTRACT; ok: boolean; diagnostics: ModelRoutingDiagnostic[] }
+export interface ModelRoutingApplyResult {
+	contract: typeof MODEL_ROUTING_CONTRACT; ok: boolean; outcome: "success" | "validation-failure" | "unavailable-runtime" | "persistence-failure" | "partial";
+	target?: ModelConfigTarget; configPath?: string; saved: boolean; diagnostics: ModelRoutingDiagnostic[]; materialization?: ModelRoutingMaterializationResult;
+}
 
 const diag = (code: string, message: string, severity: ModelRoutingDiagnostic["severity"] = "error", path?: string): ModelRoutingDiagnostic => ({ code, message, severity, ...(path ? { path } : {}) });
 const object = (value: unknown): value is Record<string, unknown> => typeof value === "object" && value !== null && !Array.isArray(value);
@@ -150,11 +156,24 @@ export async function inspectModelRouting(request: ModelRoutingRequest, dependen
 	const models = await catalog(source, diagnostics);
 	return { contract: MODEL_ROUTING_CONTRACT, context, targets: { global, project }, assignments: selected.assignments, agents, providers: models.providers, models: models.models, diagnostics };
 }
-function draft(value: unknown): AgentModelConfig | undefined { if (!object(value)) return undefined; const normalized = normalizeModelConfig(value); return normalized && !Object.keys(value).some((key) => !(key in normalized)) ? normalized : undefined; }
-export async function validateModelRouting(request: ModelRoutingValidationRequest, dependencies: ModelRoutingDependencies = {}): Promise<ModelRoutingValidationResult> {
+function draft(value: unknown, diagnostics?: ModelRoutingDiagnostic[]): AgentModelConfig | undefined {
+	const reject = (path = "draft") => diagnostics?.push(diag("malformed-draft", "The draft must be a normalized agent assignment object.", "error", path));
+	if (!object(value)) { reject(); return undefined; }
+	for (const [agent, entry] of Object.entries(value)) {
+		if (!object(entry)) { reject(agent); return undefined; }
+		for (const field of Object.keys(entry)) if (field !== "model" && field !== "thinking" || field === "model" && normalizeModelId(entry[field]) !== entry[field] || field === "thinking" && !THINKING_LEVELS.includes(entry[field] as ThinkingLevel)) { reject(`${agent}.${field}`); return undefined; }
+	}
+	const normalized = normalizeModelConfig(value), invalidAgent = normalized && Object.keys(value).find((key) => !(key in normalized));
+	if (!normalized) { reject(); return undefined; }
+	if (invalidAgent) { reject(invalidAgent); return undefined; }
+	return normalized;
+}
+type ModelRoutingValidationOptions = { validateModels?: boolean };
+async function validateModelRoutingInternal(request: ModelRoutingValidationRequest, dependencies: ModelRoutingDependencies = {}, options: ModelRoutingValidationOptions = {}): Promise<ModelRoutingValidationResult> {
 	const diagnostics: ModelRoutingDiagnostic[] = []; if (!supportedContract(request.contract)) diagnostics.push(diag("unsupported-contract", `Unsupported model-routing contract: ${String(request.contract)}.`, "error", "contract"));
-	const config = draft(request.draft); if (!config) diagnostics.push(diag("malformed-draft", "The draft must be a normalized agent assignment object.", "error", "draft"));
+	const config = draft(request.draft, diagnostics);
 	const context = contextOf(request, diagnostics); if (diagnostics.length || !config || !context) return { contract: MODEL_ROUTING_CONTRACT, ok: false, diagnostics };
+	if (options.validateModels === false) return { contract: MODEL_ROUTING_CONTRACT, ok: true, diagnostics };
 	let source: ModelRoutingModelRuntime; try { source = await runtime(context, request, dependencies, diagnostics); } catch { runtimeFailure(diagnostics); return { contract: MODEL_ROUTING_CONTRACT, ok: false, diagnostics }; }
 	await refresh(source, request, diagnostics); const cataloged = await catalog(source, diagnostics), byId = new Map(cataloged.models.map((entry) => [entry.canonicalId, entry]));
 	for (const [agent, entry] of Object.entries(config)) if (entry.model) {
@@ -164,6 +183,50 @@ export async function validateModelRouting(request: ModelRoutingValidationReques
 	}
 	return { contract: MODEL_ROUTING_CONTRACT, ok: !diagnostics.some((entry) => entry.severity === "error"), diagnostics };
 }
+export async function validateModelRouting(request: ModelRoutingValidationRequest, dependencies: ModelRoutingDependencies = {}): Promise<ModelRoutingValidationResult> {
+	return validateModelRoutingInternal(request, dependencies);
+}
+export async function applyModelRouting(request: ModelRoutingValidationRequest, dependencies: ModelRoutingDependencies = {}, options: ModelRoutingValidationOptions = {}): Promise<ModelRoutingApplyResult> {
+	const validation = await validateModelRoutingInternal(request, dependencies, options);
+	const diagnostics = [...validation.diagnostics];
+	if (!validation.ok) return { contract: MODEL_ROUTING_CONTRACT, ok: false, outcome: "validation-failure", saved: false, diagnostics };
+	const context = contextOf(request, diagnostics), config = draft(request.draft);
+	if (!context || !config) return { contract: MODEL_ROUTING_CONTRACT, ok: false, outcome: "validation-failure", saved: false, diagnostics };
+	if (!dependencies.materialize) {
+		diagnostics.push(diag("materializer-unavailable", "The host did not provide the canonical model materializer.", "error", "materialize"));
+		return { contract: MODEL_ROUTING_CONTRACT, ok: false, outcome: "unavailable-runtime", target: request.target, configPath: context[request.target].configPath, saved: false, diagnostics };
+	}
+	const resolved = context[request.target], existing = await readModelConfigFileAsync(resolved.configPath);
+	if (existing.status === "invalid") {
+		diagnostics.push(diag("invalid-existing-config", "The existing routing document is invalid and was left untouched.", "error", resolved.configPath));
+		return { contract: MODEL_ROUTING_CONTRACT, ok: false, outcome: "persistence-failure", target: request.target, configPath: resolved.configPath, saved: false, diagnostics };
+	}
+	const merged: AgentModelConfig = { ...(existing.status === "valid" ? existing.config : {}), ...Object.fromEntries(Object.entries(config).map(([name, entry]) => [name, { ...entry }])) };
+	let materialization: ModelRoutingMaterializationResult;
+	try { materialization = await dependencies.materialize(context, config, { dryRun: true }); }
+	catch (error) {
+		diagnostics.push(diag("materialization-preflight-failed", error instanceof Error ? error.message : String(error), "error", "materialize"));
+		return { contract: MODEL_ROUTING_CONTRACT, ok: false, outcome: "persistence-failure", target: request.target, configPath: resolved.configPath, saved: false, diagnostics };
+	}
+	if (materialization.failed.length > 0) {
+		diagnostics.push(diag("materialization-preflight-failed", "Existing materialization targets are invalid; saved config was not changed.", "error", "materialize"));
+		return { contract: MODEL_ROUTING_CONTRACT, ok: false, outcome: "persistence-failure", target: request.target, configPath: resolved.configPath, saved: false, diagnostics, materialization };
+	}
+	try { await writeModelConfigFileAsync(resolved.configPath, merged); }
+	catch (error) {
+		diagnostics.push(diag("config-persistence-failed", error instanceof Error ? error.message : String(error), "error", resolved.configPath));
+		return { contract: MODEL_ROUTING_CONTRACT, ok: false, outcome: "persistence-failure", target: request.target, configPath: resolved.configPath, saved: false, diagnostics };
+	}
+	try { materialization = await dependencies.materialize(context, config, { dryRun: false }); }
+	catch (error) { materialization = { affected: [], succeeded: [], failed: [{ target: "materialize", message: error instanceof Error ? error.message : String(error) }] }; }
+	if (materialization.failed.length > 0) {
+		diagnostics.push(diag("partial-materialization", "Routing was saved, but materialization did not fully succeed.", "error", "materialize"));
+		return { contract: MODEL_ROUTING_CONTRACT, ok: false, outcome: "partial", target: request.target, configPath: resolved.configPath, saved: true, diagnostics, materialization };
+	}
+	return { contract: MODEL_ROUTING_CONTRACT, ok: true, outcome: "success", target: request.target, configPath: resolved.configPath, saved: true, diagnostics, materialization };
+}
+
 export const getModelRoutingCapabilities = capabilities;
 export const inspect = inspectModelRouting;
 export const validate = validateModelRouting;
+export const apply = applyModelRouting;

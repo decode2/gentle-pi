@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -50,6 +50,32 @@ try {
 		stdio: "inherit",
 	});
 	const packageRoot = join(installDirectory, "node_modules", "gentle-pi");
+	const modelsBin = join(installDirectory, "node_modules", ".bin", process.platform === "win32" ? "gentle-pi-models.cmd" : "gentle-pi-models");
+	const modelsInvocation = process.platform === "win32"
+		? { file: process.execPath, args: [join(packageRoot, "bin", "gentle-pi-models.mjs")] }
+		: { file: modelsBin, args: [] };
+	const modelsProbe = spawnSync(modelsInvocation.file, modelsInvocation.args, {
+		cwd: installDirectory,
+		input: `${JSON.stringify({ version: 1, contract: "gentle-pi.model-routing/v1", operation: "capabilities" })}\n`,
+		encoding: "utf8",
+	});
+	if (modelsProbe.error) throw new Error(`installed gentle-pi-models executable did not start: ${modelsProbe.error.message}`);
+	if (modelsProbe.status !== 0) throw new Error(`installed gentle-pi-models executable exited with status ${modelsProbe.status}: ${modelsProbe.stderr}`);
+	if (modelsProbe.stderr !== "") throw new Error(`installed gentle-pi-models executable wrote stderr: ${JSON.stringify(modelsProbe.stderr)}`);
+	const modelsOutput = modelsProbe.stdout.split(/\r?\n/);
+	if (modelsOutput.at(-1) === "") modelsOutput.pop();
+	if (modelsOutput.length !== 1 || modelsOutput[0] === "") throw new Error("installed gentle-pi-models executable did not return exactly one JSON response");
+	const modelsResponse = JSON.parse(modelsOutput[0]);
+	if (
+		modelsResponse.version !== 1 ||
+		modelsResponse.contract !== "gentle-pi.model-routing/v1" ||
+		modelsResponse.operation !== "capabilities" ||
+		modelsResponse.exitClass !== "success" ||
+		modelsResponse.ok !== true ||
+		modelsResponse.result?.contract !== "gentle-pi.model-routing/v1" ||
+		modelsResponse.result?.supported !== true ||
+		JSON.stringify(modelsResponse.result?.operations) !== JSON.stringify(["capabilities", "inspect", "validate", "apply"])
+	) throw new Error("installed gentle-pi-models executable returned incompatible capabilities");
 	const runner = join(packageRoot, "scripts", "run-git-commit-transaction.mjs");
 	const result = JSON.parse(execFileSync(process.execPath, [runner, "self-test"], { cwd: installDirectory, encoding: "utf8" }));
 	if (result.schema !== "gentle-pi.git-commit-transaction-runner-self-test/v1" || !Array.isArray(result.states) || !result.states.includes("prepared") || !result.states.includes("committed")) {

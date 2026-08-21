@@ -151,6 +151,7 @@ import {
 import type { ReviewCollectInputV3, ReviewConsentEnvelope, ReviewStatusV3 } from "../lib/review-integration-v2.ts";
 import { assertDistinctCorrectionEvidence, resolveCorrectionStep, type CorrectionEvidence, type CorrectionOutcome, type CorrectionStep } from "../lib/review-correction-lifecycle.ts";
 import { recordReviewConsentLatch } from "../lib/review-consent-latch.ts";
+import { applyModelRouting, MODEL_ROUTING_CONTRACT } from "../lib/model-routing-contract.ts";
 import {
 	agentModelProfileConfigPath, modelConfigPath,
 	normalizeModelConfig,
@@ -165,6 +166,7 @@ import {
 	type AgentModelConfig,
 	type AgentRoutingEntry,
 	type AgentSource,
+	type ModelConfigTarget,
 	type ThinkingLevel,
 } from "../lib/model-routing-authority.ts";
 
@@ -1352,43 +1354,31 @@ async function listBuiltinAgentNamesAsync(cwd: string): Promise<Set<string>> {
 	return names;
 }
 
-function listDiscoverableAgents(cwd: string): AgentEntry[] {
-	const globalAgentHome = gentlePiAgentHome();
-	const builtinDirs = builtinAgentDirs(cwd);
+export function listDiscoverableAgents(cwd: string, agentDir = gentlePiAgentHome(), target?: ModelConfigTarget): AgentEntry[] {
 	const agents = [
-		...builtinDirs.flatMap((dir) => listAgentsFromDir(dir, "builtin")),
-		...listAgentsFromDir(join(globalAgentHome, "agents"), "user"),
-		...listAgentsFromDir(join(globalAgentHome, "subagents"), "user"),
+		...builtinAgentDirs(cwd).flatMap((dir) => listAgentsFromDir(dir, "builtin")),
+		...listAgentsFromDir(join(agentDir, "agents"), "user"),
+		...listAgentsFromDir(join(agentDir, "subagents"), "user"),
 		...listAgentsFromDir(join(homedir(), ".agents"), "user"),
 		...listAgentsFromDir(join(cwd, ".agents"), "project"),
 		...listAgentsFromDir(join(cwd, ".pi", "agents"), "project"),
 		...listAgentsFromDir(join(cwd, ".pi", "subagents"), "project"),
 	];
 	const byName = new Map<string, AgentEntry>();
-	for (const agent of agents) byName.set(agent.name, agent);
+	for (const agent of target === undefined ? agents : agents.filter((entry) => target === "project" ? entry.source === "project" : entry.source !== "project")) byName.set(agent.name, agent);
 	return orderDiscoverableAgents(Array.from(byName.values()));
 }
 
-async function listDiscoverableAgentsAsync(cwd: string): Promise<AgentEntry[]> {
-	const globalAgentHome = gentlePiAgentHome();
-	const builtinDirs = builtinAgentDirs(cwd);
-	const agents: AgentEntry[] = [];
-	for (const dir of builtinDirs) {
-		agents.push(...(await listAgentsFromDirAsync(dir, "builtin")));
-	}
+async function listDiscoverableAgentsAsync(cwd: string, agentDir = gentlePiAgentHome(), target?: ModelConfigTarget): Promise<AgentEntry[]> {
+	const builtinDirs = builtinAgentDirs(cwd), agents: AgentEntry[] = [];
+	for (const dir of builtinDirs) agents.push(...(await listAgentsFromDirAsync(dir, "builtin")));
 	const otherDirs: Array<[string, AgentSource]> = [
-		[join(globalAgentHome, "agents"), "user"],
-		[join(globalAgentHome, "subagents"), "user"],
-		[join(homedir(), ".agents"), "user"],
-		[join(cwd, ".agents"), "project"],
-		[join(cwd, ".pi", "agents"), "project"],
-		[join(cwd, ".pi", "subagents"), "project"],
+		[join(agentDir, "agents"), "user"], [join(agentDir, "subagents"), "user"], [join(homedir(), ".agents"), "user"],
+		[join(cwd, ".agents"), "project"], [join(cwd, ".pi", "agents"), "project"], [join(cwd, ".pi", "subagents"), "project"],
 	];
-	for (const [dir, source] of otherDirs) {
-		agents.push(...(await listAgentsFromDirAsync(dir, source)));
-	}
+	for (const [dir, source] of otherDirs) agents.push(...(await listAgentsFromDirAsync(dir, source)));
 	const byName = new Map<string, AgentEntry>();
-	for (const agent of agents) byName.set(agent.name, agent);
+	for (const agent of target === undefined ? agents : agents.filter((entry) => target === "project" ? entry.source === "project" : entry.source !== "project")) byName.set(agent.name, agent);
 	return orderDiscoverableAgents(Array.from(byName.values()));
 }
 
@@ -1576,9 +1566,10 @@ async function updateSubagentModelProfileAsync(
 	name: string,
 	entry: AgentRoutingEntry | undefined,
 	options: { preserveExisting?: boolean } = {},
+	agentDir?: string,
 ): Promise<boolean> {
 	return updateSubagentModelProfileAtPathAsync(
-		agentModelProfileConfigPath(cwd, source),
+		agentModelProfileConfigPath(cwd, source, agentDir ? { agentHome: agentDir } : undefined),
 		name,
 		entry,
 		options,
@@ -1592,7 +1583,7 @@ export function applyModelConfig(
 	let updated = 0;
 	let skipped = 0;
 	const seenAgents = new Set<string>();
-	for (const agent of listDiscoverableAgents(cwd)) {
+	for (const agent of listDiscoverableAgents(cwd, gentlePiAgentHome(), "global")) {
 		seenAgents.add(agent.name);
 		const entry = config[agent.name];
 		if (entry === undefined) {
@@ -1625,46 +1616,44 @@ export function applyModelConfig(
 	return { updated, skipped };
 }
 
+export interface ModelMaterializationOptions { target?: ModelConfigTarget; agentDir?: string; dryRun?: boolean }
+export interface ModelMaterializationResult { updated: number; skipped: number; affected: string[]; succeeded: string[]; failed: Array<{ target: string; message: string }> }
+
 export async function applyModelConfigAsync(
 	cwd: string,
 	config: AgentModelConfig,
-): Promise<{ updated: number; skipped: number }> {
-	let updated = 0;
-	let skipped = 0;
-	const seenAgents = new Set<string>();
-	for (const agent of await listDiscoverableAgentsAsync(cwd)) {
-		seenAgents.add(agent.name);
-		const entry = config[agent.name];
-		if (entry === undefined) {
-			skipped += 1;
-			continue;
-		}
-		if (await updateSubagentModelProfileAsync(cwd, agent.source, agent.name, entry))
-			updated += 1;
-		else skipped += 1;
-		if (agent.source === "builtin") continue;
-		if (!agent.filePath || !(await pathExists(agent.filePath))) {
-			skipped += 1;
-			continue;
-		}
-		const original = await readFile(agent.filePath, "utf8");
-		const next = updateFrontmatterRouting(original, entry);
-		if (next === original) {
-			skipped += 1;
-			continue;
-		}
-		await writeFile(agent.filePath, next);
-		updatePackageManagedSddAgentOwnership(agent.filePath, original, next);
-		updated += 1;
+	options: ModelMaterializationOptions = {},
+): Promise<ModelMaterializationResult> {
+	const target = options.target, agentDir = options.agentDir ?? gentlePiAgentHome(), dryRun = options.dryRun === true;
+	let updated = 0, skipped = 0;
+	const agents = await listDiscoverableAgentsAsync(cwd, agentDir, target), seenAgents = new Set(agents.map((agent) => agent.name));
+	const plans = [...agents.filter((agent) => config[agent.name] !== undefined).map((agent) => ({ agent, entry: config[agent.name]! }))];
+	for (const [name, entry] of Object.entries(config)) if (!seenAgents.has(name) && isClearRoutingEntry(entry)) plans.push({ agent: { name, source: target === "project" ? "project" : "user" }, entry });
+	const affected = plans.flatMap(({ agent }) => [agentModelProfileConfigPath(cwd, agent.source, { agentHome: agentDir }), ...(agent.source === "builtin" || !agent.filePath || !existsSync(agent.filePath) ? [] : [agent.filePath])]);
+	const failed: Array<{ target: string; message: string }> = [];
+	for (const path of [...new Set(affected)]) if (existsSync(path)) {
+		try {
+			if (path.endsWith("subagents.json")) {
+				const parsed: unknown = JSON.parse(await readFile(path, "utf8"));
+				if (!isRecord(parsed) || (parsed.model_profiles !== undefined && !isRecord(parsed.model_profiles))) throw new Error("document must contain an object model_profiles");
+			} else await readFile(path, "utf8");
+		} catch (error) { failed.push({ target: path, message: error instanceof Error ? error.message : String(error) }); }
 	}
-	for (const [name, entry] of Object.entries(config)) {
-		if (!seenAgents.has(name) && isClearRoutingEntry(entry)) {
-			if (await updateSubagentModelProfileAsync(cwd, "user", name, entry))
-				updated += 1;
-			else skipped += 1;
-		}
+	if (failed.length > 0 || dryRun) return { updated: 0, skipped: plans.length, affected: [...new Set(affected)], succeeded: [], failed };
+	const succeeded: string[] = [];
+	for (const { agent, entry } of plans) {
+		const profilePath = agentModelProfileConfigPath(cwd, agent.source, { agentHome: agentDir });
+		try {
+			if (await updateSubagentModelProfileAsync(cwd, agent.source, agent.name, entry, {}, agentDir)) { updated += 1; succeeded.push(profilePath); } else skipped += 1;
+		} catch (error) { failed.push({ target: profilePath, message: error instanceof Error ? error.message : String(error) }); continue; }
+		if (agent.source === "builtin" || !agent.filePath || !(await pathExists(agent.filePath))) { if (agent.source !== "builtin") skipped += 1; continue; }
+		try {
+			const original = await readFile(agent.filePath, "utf8"), next = updateFrontmatterRouting(original, entry);
+			if (next === original) { skipped += 1; succeeded.push(agent.filePath); continue; }
+			await writeFile(agent.filePath, next); updatePackageManagedSddAgentOwnership(agent.filePath, original, next); updated += 1; succeeded.push(agent.filePath);
+		} catch (error) { failed.push({ target: agent.filePath, message: error instanceof Error ? error.message : String(error) }); }
 	}
-	return { updated, skipped };
+	return { updated, skipped, affected: [...new Set(affected)], succeeded, failed };
 }
 
 export async function applySavedModelConfig(
@@ -1677,6 +1666,23 @@ export async function applySavedModelConfig(
 	return applyModelConfigAsync(
 		ctx.cwd,
 		result.status === "valid" ? result.config : {},
+	);
+}
+
+async function applyInteractiveModelConfig(ctx: ExtensionContext, config: AgentModelConfig) {
+	const agentDir = gentlePiAgentHome(), normalized = normalizeModelConfig(config);
+	return applyModelRouting(
+		{ contract: MODEL_ROUTING_CONTRACT, cwd: ctx.cwd, agentDir, target: "global", draft: normalized ?? config },
+		{
+			runtime: {
+				getAll: () => ctx.modelRegistry.getAll() as never,
+				getAvailable: () => ctx.modelRegistry.getAvailable() as never,
+				find: (provider, id) => ctx.modelRegistry.find(provider, id) as never,
+			},
+			discoverAgents: (cwd, explicitAgentDir) => listDiscoverableAgents(cwd, explicitAgentDir, "global"),
+			materialize: (_context, selected, options) => applyModelConfigAsync(ctx.cwd, selected, { agentDir, dryRun: options.dryRun }),
+		},
+		{ validateModels: false },
 	);
 }
 
@@ -2313,13 +2319,23 @@ async function handleModelsCommand(ctx: ExtensionContext): Promise<void> {
 		result = await showSddModelPanel(ctx, config);
 	}
 	if (result.type !== "save") return;
-	writeModelConfig(ctx.cwd, result.config);
-	const applyResult = await applyModelConfigAsync(ctx.cwd, result.config);
+	const applyResult = await applyInteractiveModelConfig(ctx, result.config);
+	if (!applyResult.ok) {
+		ctx.ui.notify(
+			[
+				`el Gentleman could not apply model routing (${applyResult.outcome}).`,
+				`Global config: ${modelConfigPath(ctx.cwd)}`,
+				...applyResult.diagnostics.map((entry) => `${entry.code}: ${entry.message}`),
+			].join("\n"),
+			"warning",
+		);
+		return;
+	}
 	ctx.ui.notify(
 		[
 			"el Gentleman global model config saved.",
 			`Global config: ${modelConfigPath(ctx.cwd)}`,
-			`Agents updated: ${applyResult.updated}`,
+			`Agents updated: ${applyResult.materialization?.succeeded.length ?? 0}`,
 			...describeModelConfig(ctx.cwd, result.config),
 		].join("\n"),
 		"info",
