@@ -317,7 +317,7 @@ function openHeldPartial(path, lifecycle) {
 	});
 }
 
-function classify(records, { pipeName, concurrent }) {
+function classify(records, { pipeName, concurrent, allowElevatedDiagnostic = false }) {
 	if (records.some((record) => record.status === "blocked")) return "BLOCKED";
 	const one = (stage, status, predicate = () => true) => {
 		const matches = records.filter((record) => record.stage === stage);
@@ -327,8 +327,10 @@ function classify(records, { pipeName, concurrent }) {
 	const pipeTerminal = pipeEvents.length === 2 && pipeEvents[0].status === "ready" && pipeEvents[1].status === "observed" &&
 		(!pipeName || (pipeEvents[0].details?.pipeName === pipeName && pipeEvents[1].details?.pipeName === pipeName)) &&
 		pipeEvents[1].details?.acceptedConnections >= 2 && pipeEvents[1].details?.concurrentAcceptEvidence === true;
+	const elevatedException = one("elevated-diagnostic-exception", "observed", (details) => details?.runtimeElevated === true && details?.unprivilegedValidation === false && details?.productSupport === false);
+	const tokenObserved = one("token-elevation", "observed", (details) => details?.elevated === false || (details?.elevated === true && allowElevatedDiagnostic === true && elevatedException));
 	const required = one("environment", "observed") &&
-		one("token-elevation", "observed", (details) => details?.elevated === false) &&
+		tokenObserved &&
 		one("pipe-security-overload", "supported") &&
 		one("metadata-directory", "observed", (details) => details?.protectedDacl === true && Array.isArray(details.allowSids) && details.allowSids.length === 1 && details.allowSids[0] === "current-account") &&
 		one("native-capability", "supported") &&
@@ -355,7 +357,8 @@ async function runProbe(lifecycle) {
 	try {
 		tempRoot = await mkdtemp(join(tmpdir(), "gentle-pi-windows-transport-"));
 		const pipeName = `gentle_pi_probe_${randomBytes(12).toString("hex")}`;
-		const host = startHost({ pipeName, tempRoot, deadlineMs: HOST_DEADLINE_MS }, lifecycle);
+		const allowElevatedDiagnostic = elevatedDiagnosticOptIn(process.env.WINDOWS_TRANSPORT_DIAGNOSTIC_ALLOW_ELEVATED);
+		const host = startHost({ pipeName, tempRoot, deadlineMs: HOST_DEADLINE_MS, allowElevatedDiagnostic }, lifecycle);
 		const ready = await within("host readiness", host.ready, HOST_READY_DEADLINE_MS, lifecycle);
 		if (ready.details?.pipeName !== pipeName) throw new Error("host returned an unexpected pipe name");
 		const held = await within("held partial connection", openHeldPartial(`\\\\.\\pipe\\${pipeName}`, lifecycle), 1_750, lifecycle);
@@ -366,7 +369,7 @@ async function runProbe(lifecycle) {
 		const result = host.records.filter((record) => record.stage === "pipe-host" && record.status !== "ready").at(-1);
 		const concurrent = result?.details?.acceptedConnections >= 2 && result?.details?.concurrentAcceptEvidence === true;
 		emitConcurrentAccept(result, concurrent);
-		return { classification: classify(host.records, { pipeName, concurrent }), tempRoot, records: host.records };
+		return { classification: classify(host.records, { pipeName, concurrent, allowElevatedDiagnostic }), tempRoot, records: host.records, elevatedDiagnostic: allowElevatedDiagnostic && host.records.some((record) => record.stage === "elevated-diagnostic-exception" && record.status === "observed") };
 	} catch (error) {
 		const records = lifecycle.host?.records ?? [];
 		let classification = classify(records, { pipeName: undefined, concurrent: false });
@@ -448,6 +451,36 @@ function selfTestPrivacy() {
 	return noSentinel && normalObserved ? 0 : 1;
 }
 
+function elevatedDiagnosticOptIn(value) { return value === "true"; }
+
+function selfTestElevatedDiagnostic() {
+	const pipeName = "elevated-diagnostic-test-pipe";
+	const base = (token, exception) => [
+		{ stage: "environment", status: "observed", details: {} }, token,
+		{ stage: "pipe-security-overload", status: "supported", details: {} },
+		{ stage: "metadata-directory", status: "observed", details: { protectedDacl: true, allowSids: ["current-account"] } },
+		{ stage: "native-capability", status: "supported", details: {} },
+		{ stage: "metadata-publication", status: "observed", details: { requiredMetadataCapability: true, junctionProbe: "rejected_by_handle_attribute" } },
+		...(exception ? [exception] : []),
+		{ stage: "pipe-host", status: "ready", details: { pipeName } },
+		{ stage: "pipe-host", status: "observed", details: { pipeName, acceptedConnections: 2, concurrentAcceptEvidence: true } },
+	];
+	const observedElevated = { stage: "token-elevation", status: "observed", details: { elevated: true } };
+	const exception = { stage: "elevated-diagnostic-exception", status: "observed", details: { runtimeElevated: true, unprivilegedValidation: false, productSupport: false } };
+	const blockedElevated = { stage: "token-elevation", status: "blocked", details: { elevated: true } };
+	const cases = [
+		["default_elevated_blocked", base(blockedElevated), false, "BLOCKED"],
+		["opt_in_elevated_diagnostic_only", base(observedElevated, exception), true, "PASS"],
+		["malformed_flag_fails_closed", base(observedElevated, exception), elevatedDiagnosticOptIn("truthy"), "UNSUPPORTED"],
+		["unknown_token_blocked", base({ stage: "token-elevation", status: "blocked", details: {} }), true, "BLOCKED"],
+		["non_elevated_normal", base({ stage: "token-elevation", status: "observed", details: { elevated: false } }), false, "PASS"],
+	];
+	const results = cases.map(([name, records, allowElevatedDiagnostic, expected]) => ({ name, expected, actual: classify(records, { pipeName, concurrent: true, allowElevatedDiagnostic }) }));
+	const pass = results.every((result) => result.actual === result.expected);
+	emit("self-test-elevated-diagnostic", pass ? "GREEN" : "RED", { results });
+	return pass ? 0 : 1;
+}
+
 function selfTestClassification() {
 	const pipeName = "classification-test-pipe";
 	const records = [
@@ -482,6 +515,7 @@ async function main() {
 	if (process.argv.includes("--self-test-deadline")) return selfTestDeadline();
 	if (process.argv.includes("--self-test-diagnostics")) return selfTestDiagnostics();
 	if (process.argv.includes("--self-test-privacy")) return selfTestPrivacy();
+	if (process.argv.includes("--self-test-elevated-diagnostic")) return selfTestElevatedDiagnostic();
 	if (process.argv.includes("--self-test-classification")) return selfTestClassification();
 	const lifecycle = new Lifecycle();
 	let hardExit = false;
@@ -501,6 +535,7 @@ async function main() {
 		reason: result.reason,
 		cleanup: cleanupResult,
 		limitations: { pipeDaclReadback: "unverified", ancestorReparseTOCTOU: "unverified", secondUserDenial: "unverified", fileIdentityStability: "unverified" },
+		capabilityScope: result.elevatedDiagnostic ? "elevated diagnostic capabilities only; unprivileged validation false; product support false" : "non-elevated experimental feasibility only; not product support",
 		meaning: classification === "PASS" ? "experimental feasibility only; not product support" : "blocked or unsupported feasibility result",
 	});
 	if (!cleanupResult.child.settled || !cleanupResult.rootRemoved) {

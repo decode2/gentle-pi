@@ -123,7 +123,7 @@ if ($null -eq $configLine -or [Text.Encoding]::UTF8.GetByteCount($configLine) -g
 }
 try { $config = $configLine | ConvertFrom-Json -ErrorAction Stop }
 catch { Emit "input" "blocked" @{ reason = "invalid_configuration_json" }; exit 0 }
-if ($null -eq $config -or $config.pipeName -notmatch '^[A-Za-z0-9_-]{12,96}$' -or $config.tempRoot -notmatch '^[A-Za-z]:\\' -or -not ($config.deadlineMs -is [int] -or $config.deadlineMs -is [long]) -or $config.deadlineMs -lt 1000 -or $config.deadlineMs -gt 6500) {
+if ($null -eq $config -or $config.pipeName -notmatch '^[A-Za-z0-9_-]{12,96}$' -or $config.tempRoot -notmatch '^[A-Za-z]:\\' -or -not ($config.deadlineMs -is [int] -or $config.deadlineMs -is [long]) -or $config.deadlineMs -lt 1000 -or $config.deadlineMs -gt 6500 -or $config.PSObject.Properties.Name -notcontains "allowElevatedDiagnostic" -or $config.allowElevatedDiagnostic -isnot [bool]) {
     Emit "input" "blocked" @{ reason = "configuration_outside_allowlist" }; exit 0
 }
 
@@ -141,8 +141,12 @@ if (-not $nativeReady) {
 }
 try {
     $isElevated = Get-TokenElevation
-    Emit "token-elevation" ($(if ($isElevated) { "blocked" } else { "observed" })) @{ elevated = $isElevated; source = "OpenProcessToken + GetTokenInformation(TokenElevation)"; action = "read-only token inspection" }
-    if ($isElevated) { Emit "experiment" "blocked" @{ reason = "elevated token is outside this feasibility experiment; no downgrade, RunAs, user, or policy workaround attempted" }; exit 0 }
+    if ($isElevated -and -not $config.allowElevatedDiagnostic) {
+        Emit "token-elevation" "blocked" @{ elevated = $true; source = "OpenProcessToken + GetTokenInformation(TokenElevation)"; action = "read-only token inspection" }
+        Emit "experiment" "blocked" @{ reason = "elevated token is outside this feasibility experiment without the explicit diagnostic exception; no downgrade, RunAs, user, or policy workaround attempted" }; exit 0
+    }
+    Emit "token-elevation" "observed" @{ elevated = $isElevated; source = "OpenProcessToken + GetTokenInformation(TokenElevation)"; action = "read-only token inspection" }
+    if ($isElevated) { Emit "elevated-diagnostic-exception" "observed" @{ runtimeElevated = $true; unprivilegedValidation = $false; productSupport = $false; scope = "elevated diagnostic capabilities only" } }
 } catch {
     Emit "token-elevation" "blocked" @{ reason = "token elevation could not be verified"; error = $_.Exception.GetType().Name }
     exit 0

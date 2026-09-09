@@ -25,7 +25,9 @@ jobs:
         shell: cmd
         run: node tests/windows-transport-feasibility/probe.mjs --startup-control
 
-      - name: Run Windows PowerShell 5.1 named-pipe feasibility probe
+      - name: Run Windows PowerShell 5.1 named-pipe feasibility probe (elevated diagnostic exception)
         if: success()
         shell: cmd
+        env:
+          WINDOWS_TRANSPORT_DIAGNOSTIC_ALLOW_ELEVATED: "true"
         run: node tests/windows-transport-feasibility/probe.mjs
