@@ -13,7 +13,9 @@ const HOST_READY_DEADLINE_MS = 5_000;
 const PROBE_DEADLINE_MS = 12_000;
 const CLEANUP_DEADLINE_MS = 900;
 const STDERR_LIMIT_BYTES = 4 * 1024;
+const STARTUP_CONTROL_DEADLINE_MS = 30_000;
 const hostScript = fileURLToPath(new URL("./host.ps1", import.meta.url));
+const startupScript = fileURLToPath(new URL("./startup.ps1", import.meta.url));
 
 let testOutputSink;
 const emit = (stage, status, details = {}) => {
@@ -28,6 +30,8 @@ function windowsPowerShell51Path() {
 	if (!systemRoot || !win32.isAbsolute(systemRoot)) throw new Error("SystemRoot is not an absolute Windows path");
 	return win32.join(systemRoot, "System32", "WindowsPowerShell", "v1.0", "powershell.exe");
 }
+
+const windowsPowerShellFileArgs = (script) => ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", script];
 
 function parseJsonLine(line) {
 	if (Buffer.byteLength(line) > MAX_LINE_BYTES) throw new Error("host emitted an oversized line");
@@ -142,7 +146,7 @@ function emitConcurrentAccept(result, concurrent) {
 }
 
 function startHost(config, lifecycle) {
-	const child = spawn(windowsPowerShell51Path(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", hostScript], {
+	const child = spawn(windowsPowerShell51Path(), windowsPowerShellFileArgs(hostScript), {
 		shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
 	});
 	const records = [], state = { spawned: false, spawnError: null, stdinError: null, exit: null, stderrBytes: 0, stderrTail: Buffer.alloc(0), stderrTruncated: false };
@@ -174,6 +178,103 @@ function startHost(config, lifecycle) {
 	const host = { child, records, ready, exited, state, pendingStdoutBytes: () => Buffer.byteLength(partial) };
 	lifecycle.host = host;
 	return host;
+}
+
+function launchStaticControl(executable, args) {
+	const child = spawn(executable, args, { shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+	const records = [], state = { spawned: false, spawnError: null, stdinError: null, exit: null, stderrBytes: 0, stderrTail: Buffer.alloc(0), stderrTruncated: false, stdoutBytes: 0, pendingStdoutBytes: 0, stdoutExceeded: false };
+	let partial = "";
+	const exited = childExit(child);
+	child.once("spawn", () => { state.spawned = true; });
+	child.stdout.on("data", (chunk) => {
+		state.stdoutBytes += chunk.length;
+		if (state.stdoutBytes > MAX_OUTPUT_BYTES) { state.stdoutExceeded = true; try { child.kill("SIGTERM"); } catch {} return; }
+		partial += chunk.toString("utf8");
+		for (;;) {
+			const newline = partial.indexOf("\n"); if (newline < 0) break;
+			const line = partial.slice(0, newline); partial = partial.slice(newline + 1);
+			try { records.push(parseJsonLine(line)); } catch { state.stdoutExceeded = true; try { child.kill("SIGTERM"); } catch {} }
+		}
+		state.pendingStdoutBytes = Buffer.byteLength(partial);
+		if (state.pendingStdoutBytes > MAX_LINE_BYTES) { state.stdoutExceeded = true; try { child.kill("SIGTERM"); } catch {} }
+	});
+	child.stderr.on("data", (chunk) => appendStderr(state, chunk));
+	child.stdin.once("error", (error) => { state.stdinError = safeCode(error.code, "stdin-error"); });
+	child.once("error", (error) => { state.spawnError = safeCode(error.code, "spawn-error"); });
+	exited.then((exit) => { state.exit = exit; });
+	child.stdin.end();
+	return { child, records, state, exited };
+}
+
+function startupMarker(record) {
+	const details = record?.details;
+	return record?.stage === "startup-control" && record?.status === "observed" && details?.protocol === "ascii-jsonl-v1" &&
+		typeof details.powershellVersion === "string" && /^[0-9.]+$/.test(details.powershellVersion) &&
+		typeof details.dotNetVersion === "string" && /^[0-9.]+$/.test(details.dotNetVersion) && Number.isInteger(details.elapsedMs) && details.elapsedMs >= 0;
+}
+
+function destroyOwnedStdio(child) {
+	for (const stream of [child.stdin, child.stdout, child.stderr]) { try { stream?.destroy(); } catch {} }
+}
+
+async function observeStaticControl(launched, deadlineMs) {
+	const started = Date.now();
+	let exit = await Promise.race([launched.exited, sleep(deadlineMs).then(() => undefined)]), timedOut = !exit;
+	if (timedOut) { exit = await terminateOwnedChild(launched.child, 750); destroyOwnedStdio(launched.child); }
+	else exit = { ...exit, settled: true, forced: false };
+	const marker = launched.records.find(startupMarker);
+	return {
+		success: !timedOut && !launched.state.stdoutExceeded && exit.settled === true && exit.code === 0 && Boolean(marker),
+		timedOut,
+		childSettled: exit.settled === true,
+		elapsedMs: Date.now() - started,
+		exitCode: Number.isInteger(exit.code) ? exit.code : null,
+		signal: safeCode(exit.signal, null),
+		stdoutBytes: launched.state.stdoutBytes,
+		stderrBytes: launched.state.stderrBytes,
+		pendingStdoutBytes: launched.state.pendingStdoutBytes,
+		recordCount: launched.records.length,
+		spawned: launched.state.spawned,
+		spawnError: launched.state.spawnError,
+		stdinError: launched.state.stdinError,
+		stderrTruncated: launched.state.stderrTruncated,
+		marker: marker ? safeHostDetails(marker.details) : null,
+	};
+}
+
+function forceExitSoon() {
+	setTimeout(() => process.exit(1), 25).unref();
+}
+
+function finishStartupControl(result) {
+	const clean = result.childSettled === true;
+	emit("startup-control", result.success && clean ? "observed" : "unsupported", { ...result, cleanup: clean ? "owned-child-settled" : "owned-child-unsettled; force exit scheduled", meaning: "launcher control only; not product or transport feasibility" });
+	if (!clean) forceExitSoon();
+	return result.success && clean ? 0 : 1;
+}
+
+async function runStartupControl() {
+	if (process.platform !== "win32") {
+		emit("startup-control", "unsupported", { reason: "Windows-only startup control" });
+		return 1;
+	}
+	let launched;
+	const watchdog = setTimeout(() => {
+		if (launched) { try { launched.child.kill("SIGTERM"); } catch {}; destroyOwnedStdio(launched.child); }
+		emit("startup-control", "unsupported", { reason: "startup-control-total-deadline", cleanup: "owned-child-unsettled; force exit scheduled" });
+		forceExitSoon();
+	}, STARTUP_CONTROL_DEADLINE_MS + 850);
+	try {
+		launched = launchStaticControl(windowsPowerShell51Path(), windowsPowerShellFileArgs(startupScript));
+		const result = await observeStaticControl(launched, STARTUP_CONTROL_DEADLINE_MS);
+		clearTimeout(watchdog);
+		return finishStartupControl(result);
+	} catch (error) {
+		clearTimeout(watchdog);
+		if (launched) destroyOwnedStdio(launched.child);
+		emit("startup-control", "unsupported", { reason: safeCode(error?.code, "startup-control-failure"), cleanup: launched ? "owned-child-unsettled; no cleanup claim" : "no-child" });
+		return 1;
+	}
 }
 
 function connectJsonl(path, request, lifecycle) {
@@ -302,6 +403,37 @@ function selfTestDiagnostics() {
 	return pass ? 0 : 1;
 }
 
+async function selfTestLauncher() {
+	const marker = JSON.stringify({ stage: "startup-control", status: "observed", details: { protocol: "ascii-jsonl-v1", powershellVersion: "5.1", dotNetVersion: "4.8", elapsedMs: 0 } });
+	const successful = await observeStaticControl(launchStaticControl(process.execPath, ["-e", `process.stdout.write(${JSON.stringify(`${marker}\n`)})`]), 500);
+	const noOutput = await observeStaticControl(launchStaticControl(process.execPath, ["-e", "process.exit(0)" ]), 500);
+	const deadlineResult = await observeStaticControl(launchStaticControl(process.execPath, ["-e", "setInterval(() => {}, 1000)" ]), 150);
+	const cases = [
+		["launcher_success_marker", successful.success === true && successful.exitCode === 0 && successful.stdoutBytes > 0],
+		["launcher_no_output_is_unsupported", noOutput.success === false && noOutput.exitCode === 0 && noOutput.recordCount === 0],
+		["launcher_deadline_kills_owned_child", deadlineResult.success === false && deadlineResult.timedOut === true && deadlineResult.exitCode === null && deadlineResult.signal !== null],
+	];
+	const pass = cases.every(([, result]) => result);
+	emit("self-test-launcher", pass ? "GREEN" : "RED", { cases: cases.map(([name, result]) => ({ name, result })) });
+	return pass ? 0 : 1;
+}
+
+async function selfTestStartupUnsettledChild() {
+	setInterval(() => {}, 1_000);
+	return finishStartupControl({ success: false, childSettled: false, timedOut: true, elapsedMs: 0, exitCode: null, signal: null, stdoutBytes: 0, stderrBytes: 0, pendingStdoutBytes: 0, recordCount: 0, spawned: true, spawnError: null, stdinError: null, stderrTruncated: false, marker: null });
+}
+
+async function selfTestStartupUnsettled() {
+	const child = spawn(process.execPath, [fileURLToPath(import.meta.url), "--self-test-startup-unsettled-child"], { stdio: ["ignore", "pipe", "pipe"] });
+	const started = Date.now();
+	const exit = await Promise.race([childExit(child), sleep(250).then(() => undefined)]);
+	const hung = !exit;
+	if (hung) await terminateOwnedChild(child, 300);
+	const pass = !hung && exit.code === 1 && Date.now() - started <= 400;
+	emit("self-test-startup-unsettled", pass ? "GREEN" : "RED", { hung, exitCode: exit?.code ?? null, elapsedMs: Date.now() - started });
+	return pass ? 0 : 1;
+}
+
 function selfTestPrivacy() {
 	const sentinel = "PRIVATE_PATH_SENTINEL";
 	const privateMessage = `C:\\${sentinel}\\token_${sentinel}_/home/${sentinel}`;
@@ -343,6 +475,10 @@ function selfTestClassification() {
 }
 
 async function main() {
+	if (process.argv.includes("--self-test-startup-unsettled-child")) return selfTestStartupUnsettledChild();
+	if (process.argv.includes("--self-test-startup-unsettled")) return selfTestStartupUnsettled();
+	if (process.argv.includes("--startup-control")) return runStartupControl();
+	if (process.argv.includes("--self-test-launcher")) return selfTestLauncher();
 	if (process.argv.includes("--self-test-deadline")) return selfTestDeadline();
 	if (process.argv.includes("--self-test-diagnostics")) return selfTestDiagnostics();
 	if (process.argv.includes("--self-test-privacy")) return selfTestPrivacy();

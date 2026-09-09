@@ -21,6 +21,11 @@ jobs:
         with:
           node-version: "24"
 
+      - name: Run Windows PowerShell 5.1 startup control
+        shell: cmd
+        run: node tests/windows-transport-feasibility/probe.mjs --startup-control
+
       - name: Run Windows PowerShell 5.1 named-pipe feasibility probe
+        if: success()
         shell: cmd
         run: node tests/windows-transport-feasibility/probe.mjs
