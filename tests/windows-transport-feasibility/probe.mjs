@@ -9,11 +9,17 @@ import { fileURLToPath } from "node:url";
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_LINE_BYTES = 16 * 1024;
 const HOST_DEADLINE_MS = 5_500;
-const PROBE_DEADLINE_MS = 7_000;
+const HOST_READY_DEADLINE_MS = 5_000;
+const PROBE_DEADLINE_MS = 12_000;
 const CLEANUP_DEADLINE_MS = 900;
+const STDERR_LIMIT_BYTES = 4 * 1024;
 const hostScript = fileURLToPath(new URL("./host.ps1", import.meta.url));
 
-const emit = (stage, status, details = {}) => process.stdout.write(`${JSON.stringify({ stage, status, details })}\n`);
+let testOutputSink;
+const emit = (stage, status, details = {}) => {
+	const line = JSON.stringify({ stage, status, details });
+	if (testOutputSink) testOutputSink.push(line); else process.stdout.write(`${line}\n`);
+};
 const diagnostic = (message) => process.stderr.write(`${String(message).slice(0, 1_000)}\n`);
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -85,36 +91,87 @@ class Lifecycle {
 	}
 }
 
+function safeCode(value, fallback) {
+	return typeof value === "string" && /^[A-Z0-9_-]{1,48}$/.test(value) ? value : fallback;
+}
+
+function safeHostDetails(value, depth = 0) {
+	if (depth > 3) return "omitted";
+	if (value === null || typeof value === "boolean" || typeof value === "number") return value;
+	if (typeof value === "string") return value.length > 256 || /[\\/]|[A-Za-z]:/.test(value) ? "redacted" : value;
+	if (Array.isArray(value)) return value.slice(0, 16).map((entry) => safeHostDetails(entry, depth + 1));
+	if (!value || typeof value !== "object") return "omitted";
+	const safe = {};
+	for (const [key, entry] of Object.entries(value).slice(0, 32)) {
+		if (/^(message|path|username|token|secret|password)$/i.test(key)) { safe[key] = "redacted"; continue; }
+		safe[key] = key === "error" ? safeCode(entry, "host-error") : safeHostDetails(entry, depth + 1);
+	}
+	return safe;
+}
+
+function appendStderr(state, chunk) {
+	state.stderrBytes += chunk.length;
+	const retained = Buffer.concat([state.stderrTail, chunk]);
+	state.stderrTruncated ||= retained.length > STDERR_LIMIT_BYTES;
+	state.stderrTail = retained.subarray(Math.max(0, retained.length - STDERR_LIMIT_BYTES));
+}
+
+function processDiagnostic(host) {
+	const state = host.state, exit = state.exit ?? {};
+	return {
+		spawned: state.spawned,
+		spawnError: state.spawnError,
+		exitCode: Number.isInteger(exit.code) ? exit.code : null,
+		signal: safeCode(exit.signal, null),
+		recordCount: host.records.length,
+		pendingStdoutBytes: host.pendingStdoutBytes(),
+		stdinError: state.stdinError,
+		stderrBytes: state.stderrBytes,
+		stderrTruncated: state.stderrTruncated,
+		stderrCategory: state.stderrBytes === 0 ? "empty" : "nonempty-retained-without-raw-output",
+	};
+}
+
+function isServerReady(record) {
+	return record.stage === "pipe-host" && record.status === "ready";
+}
+
+function emitConcurrentAccept(result, concurrent) {
+	const terminalStatus = ["observed", "unsupported", "blocked"].includes(result?.status) ? result.status : "missing";
+	emit("concurrent-accept", concurrent ? "observed" : "unsupported", { concurrent, terminalStatus, terminalCategory: result ? "host-terminal-record" : "missing" });
+}
+
 function startHost(config, lifecycle) {
 	const child = spawn(windowsPowerShell51Path(), ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", hostScript], {
 		shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
 	});
-	const records = [];
+	const records = [], state = { spawned: false, spawnError: null, stdinError: null, exit: null, stderrBytes: 0, stderrTail: Buffer.alloc(0), stderrTruncated: false };
 	let outputBytes = 0, partial = "", resolveReady, rejectReady;
 	const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
 	const exited = childExit(child);
 	const reject = (error) => { try { rejectReady(error); } catch {} };
+	child.once("spawn", () => { state.spawned = true; });
 	child.stdout.on("data", (chunk) => {
 		outputBytes += chunk.length;
 		if (outputBytes > MAX_OUTPUT_BYTES) { reject(new Error("host stdout exceeded bound")); lifecycle.abort(new Error("host stdout exceeded bound")); return; }
 		partial += chunk.toString("utf8");
 		for (;;) {
-			const newline = partial.indexOf("\n");
-			if (newline < 0) break;
+			const newline = partial.indexOf("\n"); if (newline < 0) break;
 			const line = partial.slice(0, newline); partial = partial.slice(newline + 1);
 			try {
-				const record = parseJsonLine(line); records.push(record); emit(`host:${record.stage}`, record.status, record.details);
-				if (record.stage === "pipe-host" && record.status === "ready") resolveReady(record);
+				const record = parseJsonLine(line); records.push(record); emit(`host:${record.stage}`, record.status, safeHostDetails(record.details));
+				if (isServerReady(record)) resolveReady(record);
 			} catch (error) { reject(error); lifecycle.abort(error); }
 		}
 		if (Buffer.byteLength(partial) > MAX_LINE_BYTES) { reject(new Error("host stdout line exceeded bound")); lifecycle.abort(new Error("host stdout line exceeded bound")); }
 	});
-	child.stderr.on("data", (chunk) => diagnostic(`host stderr: ${chunk.toString("utf8").slice(0, 1_000)}`));
-	child.once("error", reject);
-	exited.then(() => reject(new Error("host exited before ready")));
+	child.stderr.on("data", (chunk) => appendStderr(state, chunk));
+	child.stdin.once("error", (error) => { state.stdinError = safeCode(error.code, "stdin-error"); });
+	child.once("error", (error) => { state.spawnError = safeCode(error.code, "spawn-error"); reject(error); });
+	exited.then((exit) => { state.exit = exit; reject(new Error("host exited before server readiness")); });
 	lifecycle.signal.addEventListener("abort", () => { try { child.kill("SIGTERM"); } catch {} }, { once: true });
 	child.stdin.end(`${JSON.stringify(config)}\n`);
-	const host = { child, records, ready, exited };
+	const host = { child, records, ready, exited, state, pendingStdoutBytes: () => Buffer.byteLength(partial) };
 	lifecycle.host = host;
 	return host;
 }
@@ -198,7 +255,7 @@ async function runProbe(lifecycle) {
 		tempRoot = await mkdtemp(join(tmpdir(), "gentle-pi-windows-transport-"));
 		const pipeName = `gentle_pi_probe_${randomBytes(12).toString("hex")}`;
 		const host = startHost({ pipeName, tempRoot, deadlineMs: HOST_DEADLINE_MS }, lifecycle);
-		const ready = await within("host readiness", host.ready, 2_500, lifecycle);
+		const ready = await within("host readiness", host.ready, HOST_READY_DEADLINE_MS, lifecycle);
 		if (ready.details?.pipeName !== pipeName) throw new Error("host returned an unexpected pipe name");
 		const held = await within("held partial connection", openHeldPartial(`\\\\.\\pipe\\${pipeName}`, lifecycle), 1_750, lifecycle);
 		const reply = await within("independent request", connectJsonl(`\\\\.\\pipe\\${pipeName}`, { id: "independent-request", op: "ping", payload: "bounded" }, lifecycle), 2_250, lifecycle);
@@ -207,17 +264,13 @@ async function runProbe(lifecycle) {
 		const exit = await within("host result", host.exited, 1_500, lifecycle);
 		const result = host.records.filter((record) => record.stage === "pipe-host" && record.status !== "ready").at(-1);
 		const concurrent = result?.details?.acceptedConnections >= 2 && result?.details?.concurrentAcceptEvidence === true;
-		emit("concurrent-accept", concurrent ? "observed" : "unsupported", { hostResult: result?.details ?? null, exit });
+		emitConcurrentAccept(result, concurrent);
 		return { classification: classify(host.records, { pipeName, concurrent }), tempRoot, records: host.records };
 	} catch (error) {
 		const records = lifecycle.host?.records ?? [];
 		let classification = classify(records, { pipeName: undefined, concurrent: false });
-		if (!records.some((record) => record.stage === "pipe-host" && record.status === "ready") && records.length === 0) {
-			emit("host-execution", "BLOCKED", { reason: "host did not reach a machine-readable stage; script execution refusal is not worked around" });
-			classification = "BLOCKED";
-		}
 		if (classification === "PASS") classification = "UNSUPPORTED";
-		return { classification, reason: String(error).slice(0, 240), tempRoot, records };
+		return { classification, reason: safeCode(error?.code, "host-readiness-or-transport-failure"), tempRoot, records };
 	}
 }
 
@@ -229,6 +282,38 @@ async function selfTestDeadline() {
 	const pass = result.settled === true && elapsedMs <= 450;
 	emit("self-test-deadline", pass ? "PASS" : "UNSUPPORTED", { elapsedMs, child: result });
 	return pass ? 0 : 1;
+}
+
+function selfTestDiagnostics() {
+	const state = { spawned: true, spawnError: null, stdinError: "EPIPE", exit: { code: 23, signal: null }, stderrBytes: 0, stderrTail: Buffer.alloc(0), stderrTruncated: false };
+	appendStderr(state, Buffer.alloc(STDERR_LIMIT_BYTES + 17, 120));
+	const host = { state, records: [{ stage: "host-startup", status: "observed", details: { protocol: "ascii-jsonl-v1" } }], pendingStdoutBytes: () => 7 };
+	const details = processDiagnostic(host);
+	const cases = [
+		["early_startup_is_not_server_ready", isServerReady(host.records[0]) === false],
+		["zero_stage_is_neutral_unsupported", classify([], { pipeName: "test", concurrent: false }) === "UNSUPPORTED"],
+		["explicit_capability_blocked_wins", classify([{ stage: "token-elevation", status: "blocked", details: {} }], { pipeName: "test", concurrent: false }) === "BLOCKED"],
+		["stderr_is_bounded_without_raw_tail", details.stderrBytes === STDERR_LIMIT_BYTES + 17 && details.stderrTruncated === true && state.stderrTail.length === STDERR_LIMIT_BYTES && details.stderrCategory === "nonempty-retained-without-raw-output"],
+		["exit_code_is_retained", details.exitCode === 23 && details.stdinError === "EPIPE"],
+		["timing_covers_sequential_budget", HOST_READY_DEADLINE_MS === 5_000 && PROBE_DEADLINE_MS >= HOST_READY_DEADLINE_MS + HOST_DEADLINE_MS + 1_500],
+	];
+	const pass = cases.every(([, result]) => result);
+	emit("self-test-diagnostics", pass ? "GREEN" : "RED", { cases: cases.map(([name, result]) => ({ name, result })) });
+	return pass ? 0 : 1;
+}
+
+function selfTestPrivacy() {
+	const sentinel = "PRIVATE_PATH_SENTINEL";
+	const privateMessage = `C:\\${sentinel}\\token_${sentinel}_/home/${sentinel}`;
+	const captured = [];
+	testOutputSink = captured;
+	try { emitConcurrentAccept({ status: "observed", details: { message: privateMessage } }, true); }
+	finally { testOutputSink = undefined; }
+	const record = JSON.parse(captured[0]);
+	const noSentinel = !captured[0].includes(sentinel);
+	const normalObserved = record.stage === "concurrent-accept" && record.status === "observed" && record.details.concurrent === true && record.details.terminalStatus === "observed" && record.details.terminalCategory === "host-terminal-record";
+	emit("self-test-privacy", noSentinel && normalObserved ? "GREEN" : "RED", { noSentinel, normalObserved });
+	return noSentinel && normalObserved ? 0 : 1;
 }
 
 function selfTestClassification() {
@@ -259,6 +344,8 @@ function selfTestClassification() {
 
 async function main() {
 	if (process.argv.includes("--self-test-deadline")) return selfTestDeadline();
+	if (process.argv.includes("--self-test-diagnostics")) return selfTestDiagnostics();
+	if (process.argv.includes("--self-test-privacy")) return selfTestPrivacy();
 	if (process.argv.includes("--self-test-classification")) return selfTestClassification();
 	const lifecycle = new Lifecycle();
 	let hardExit = false;
@@ -272,6 +359,7 @@ async function main() {
 	clearTimeout(runWatchdog);
 	const cleanupResult = await cleanup(lifecycle, result.tempRoot);
 	clearTimeout(totalWatchdog);
+	if (lifecycle.host) emit("process-diagnostic", "observed", processDiagnostic(lifecycle.host));
 	const classification = cleanupResult.child.settled && cleanupResult.rootRemoved ? result.classification : "UNSUPPORTED";
 	emit("final", classification, {
 		reason: result.reason,
@@ -288,7 +376,7 @@ async function main() {
 }
 
 const exitCode = await main().catch((error) => {
-	emit("final", "UNSUPPORTED", { reason: String(error).slice(0, 240), meaning: "unhandled probe failure" });
+	emit("final", "UNSUPPORTED", { reason: safeCode(error?.code, "probe-internal-failure"), meaning: "unhandled probe failure" });
 	return 1;
 });
 process.exitCode = exitCode;

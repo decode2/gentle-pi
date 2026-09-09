@@ -1,13 +1,18 @@
 # Windows PowerShell 5.1 feasibility host. It receives one bounded JSON configuration
 # line from stdin and emits JSONL only; no configuration is interpolated into source.
 $ErrorActionPreference = "Stop"
-$OutputEncoding = [Text.UTF8Encoding]::new($false)
+$ConsoleUtf8 = [Text.UTF8Encoding]::new($false)
+$OutputEncoding = $ConsoleUtf8
+[Console]::InputEncoding = $ConsoleUtf8
+[Console]::OutputEncoding = $ConsoleUtf8
 $Utf8 = [Text.UTF8Encoding]::new($false, $true)
 $MaxLineBytes = 16384
 
 function Emit([string] $stage, [string] $status, $details) {
     [Console]::Out.WriteLine(([ordered]@{ stage = $stage; status = $status; details = $details } | ConvertTo-Json -Compress -Depth 6))
 }
+
+Emit "host-startup" "observed" @{ protocol = "ascii-jsonl-v1"; powershellVersion = $PSVersionTable.PSVersion.ToString() }
 
 function DescribeAllowSids($rules, [string] $currentSidValue) {
     $values = @()
