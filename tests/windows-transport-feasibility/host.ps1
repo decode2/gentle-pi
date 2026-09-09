@@ -169,7 +169,7 @@ try {
     [IO.Directory]::CreateDirectory($metadata, $metadataSecurity) | Out-Null
     $metadataAcl = Get-Acl -LiteralPath $metadata
     $rules = $metadataAcl.GetAccessRules($true, $true, [Security.Principal.SecurityIdentifier])
-    Emit "metadata-directory" "observed" @{ protectedDacl = $metadataAcl.AreAccessRulesProtected; allowSids = (DescribeAllowSids ($rules | Where-Object { $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow }) $currentSid.Value); inheritedRules = @($rules | Where-Object { $_.IsInherited }).Count; creation = "Directory.CreateDirectory(path, DirectorySecurity)" }
+    Emit "metadata-directory" "observed" @{ protectedDacl = $metadataAcl.AreAccessRulesProtected; allowSids = @(DescribeAllowSids ($rules | Where-Object { $_.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow }) $currentSid.Value); inheritedRules = @($rules | Where-Object { $_.IsInherited }).Count; creation = "Directory.CreateDirectory(path, DirectorySecurity)" }
 } catch {
     Emit "metadata-directory" "unsupported" @{ error = $_.Exception.GetType().Name; message = $_.Exception.Message.Substring(0, [Math]::Min(240, $_.Exception.Message.Length)) }
     exit 0
