@@ -134,11 +134,14 @@ catch { $policy["error"] = "unavailable" }
 $pipeOptions = [Enum]::GetNames([System.IO.Pipes.PipeOptions])
 Emit "environment" "observed" @{ powershellVersion = $PSVersionTable.PSVersion.ToString(); dotNetVersion = [Environment]::Version.ToString(); languageMode = [string]$ExecutionContext.SessionState.LanguageMode; executionPolicy = $policy; currentUserOnlyAvailable = ($pipeOptions -contains "CurrentUserOnly"); account = "current account" }
 
+Emit "native-probe-initialization" "starting" @{ operation = "Add-NativeProbeType" }
 $nativeReady = Add-NativeProbeType
 if (-not $nativeReady) {
+    Emit "native-probe-initialization" "unsupported" @{ operation = "Add-NativeProbeType"; dependency = "static Add-Type C# PInvoke; requires FullLanguage and an available compiler" }
     Emit "token-elevation" "blocked" @{ reason = "TokenElevation PInvoke unavailable"; dependency = "static Add-Type C# PInvoke; requires FullLanguage and an available compiler" }
     exit 0
 }
+Emit "native-probe-initialization" "observed" @{ operation = "Add-NativeProbeType" }
 try {
     $isElevated = Get-TokenElevation
     if ($isElevated -and -not $config.allowElevatedDiagnostic) {

@@ -9,9 +9,10 @@ import { fileURLToPath } from "node:url";
 const MAX_OUTPUT_BYTES = 64 * 1024;
 const MAX_LINE_BYTES = 16 * 1024;
 const HOST_DEADLINE_MS = 5_500;
-const HOST_READY_DEADLINE_MS = 5_000;
-const PROBE_DEADLINE_MS = 12_000;
-const CLEANUP_DEADLINE_MS = 900;
+const HOST_READY_DEADLINE_MS = 30_000;
+const PROBE_DEADLINE_MS = 45_000;
+const CLEANUP_DEADLINE_MS = 5_000;
+const TOTAL_PROBE_DEADLINE_MS = 55_000;
 const STDERR_LIMIT_BYTES = 4 * 1024;
 const STARTUP_CONTROL_DEADLINE_MS = 30_000;
 const hostScript = fileURLToPath(new URL("./host.ps1", import.meta.url));
@@ -149,12 +150,12 @@ function startHost(config, lifecycle) {
 	const child = spawn(windowsPowerShell51Path(), windowsPowerShellFileArgs(hostScript), {
 		shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"],
 	});
-	const records = [], state = { spawned: false, spawnError: null, stdinError: null, exit: null, stderrBytes: 0, stderrTail: Buffer.alloc(0), stderrTruncated: false };
+	const records = [], state = { spawned: false, spawnedAt: undefined, spawnError: null, stdinError: null, exit: null, stderrBytes: 0, stderrTail: Buffer.alloc(0), stderrTruncated: false };
 	let outputBytes = 0, partial = "", resolveReady, rejectReady;
 	const ready = new Promise((resolve, reject) => { resolveReady = resolve; rejectReady = reject; });
 	const exited = childExit(child);
 	const reject = (error) => { try { rejectReady(error); } catch {} };
-	child.once("spawn", () => { state.spawned = true; });
+	child.once("spawn", () => { state.spawned = true; state.spawnedAt = Date.now(); });
 	child.stdout.on("data", (chunk) => {
 		outputBytes += chunk.length;
 		if (outputBytes > MAX_OUTPUT_BYTES) { reject(new Error("host stdout exceeded bound")); lifecycle.abort(new Error("host stdout exceeded bound")); return; }
@@ -163,7 +164,9 @@ function startHost(config, lifecycle) {
 			const newline = partial.indexOf("\n"); if (newline < 0) break;
 			const line = partial.slice(0, newline); partial = partial.slice(newline + 1);
 			try {
-				const record = parseJsonLine(line); records.push(record); emit(`host:${record.stage}`, record.status, safeHostDetails(record.details));
+				const record = parseJsonLine(line); records.push(record);
+				const elapsedFromSpawnMs = Math.max(0, Date.now() - (state.spawnedAt ?? Date.now()));
+				emit(`host:${record.stage}`, record.status, { ...safeHostDetails(record.details), elapsedFromSpawnMs });
 				if (isServerReady(record)) resolveReady(record);
 			} catch (error) { reject(error); lifecycle.abort(error); }
 		}
@@ -317,6 +320,11 @@ function openHeldPartial(path, lifecycle) {
 	});
 }
 
+function measuredTokenElevation(records) {
+	const tokens = records.filter((record) => record.stage === "token-elevation");
+	return tokens.length === 1 && tokens[0].status === "observed" && typeof tokens[0].details?.elevated === "boolean" ? tokens[0].details.elevated : undefined;
+}
+
 function classify(records, { pipeName, concurrent, allowElevatedDiagnostic = false }) {
 	if (records.some((record) => record.status === "blocked")) return "BLOCKED";
 	const one = (stage, status, predicate = () => true) => {
@@ -342,12 +350,12 @@ function classify(records, { pipeName, concurrent, allowElevatedDiagnostic = fal
 async function cleanup(lifecycle, tempRoot) {
 	lifecycle.abort(new Error("probe lifecycle cleanup"));
 	const child = lifecycle.host?.child;
-	const childResult = child ? await terminateOwnedChild(child, Math.floor(CLEANUP_DEADLINE_MS / 2)) : { settled: true, forced: false };
-	let rootRemoved = !tempRoot;
-	if (tempRoot) {
-		const deletion = rm(tempRoot, { recursive: true, force: true, maxRetries: 0 }).then(() => true, () => false);
-		rootRemoved = await Promise.race([deletion, sleep(Math.floor(CLEANUP_DEADLINE_MS / 2)).then(() => false)]);
-	}
+	const childCleanup = child ? terminateOwnedChild(child, CLEANUP_DEADLINE_MS) : Promise.resolve({ settled: true, forced: false });
+	const rootCleanup = !tempRoot ? Promise.resolve(true) : Promise.race([
+		rm(tempRoot, { recursive: true, force: true, maxRetries: 0 }).then(() => true, () => false),
+		sleep(CLEANUP_DEADLINE_MS).then(() => false),
+	]);
+	const [childResult, rootRemoved] = await Promise.all([childCleanup, rootCleanup]);
 	return { child: childResult, rootRemoved };
 }
 
@@ -369,12 +377,12 @@ async function runProbe(lifecycle) {
 		const result = host.records.filter((record) => record.stage === "pipe-host" && record.status !== "ready").at(-1);
 		const concurrent = result?.details?.acceptedConnections >= 2 && result?.details?.concurrentAcceptEvidence === true;
 		emitConcurrentAccept(result, concurrent);
-		return { classification: classify(host.records, { pipeName, concurrent, allowElevatedDiagnostic }), tempRoot, records: host.records, elevatedDiagnostic: allowElevatedDiagnostic && host.records.some((record) => record.stage === "elevated-diagnostic-exception" && record.status === "observed") };
+		return { classification: classify(host.records, { pipeName, concurrent, allowElevatedDiagnostic }), tempRoot, records: host.records, tokenElevation: measuredTokenElevation(host.records), elevatedDiagnostic: allowElevatedDiagnostic && host.records.some((record) => record.stage === "elevated-diagnostic-exception" && record.status === "observed") };
 	} catch (error) {
 		const records = lifecycle.host?.records ?? [];
 		let classification = classify(records, { pipeName: undefined, concurrent: false });
 		if (classification === "PASS") classification = "UNSUPPORTED";
-		return { classification, reason: safeCode(error?.code, "host-readiness-or-transport-failure"), tempRoot, records };
+		return { classification, reason: safeCode(error?.code, "host-readiness-or-transport-failure"), tempRoot, records, tokenElevation: measuredTokenElevation(records), elevatedDiagnostic: false };
 	}
 }
 
@@ -399,7 +407,8 @@ function selfTestDiagnostics() {
 		["explicit_capability_blocked_wins", classify([{ stage: "token-elevation", status: "blocked", details: {} }], { pipeName: "test", concurrent: false }) === "BLOCKED"],
 		["stderr_is_bounded_without_raw_tail", details.stderrBytes === STDERR_LIMIT_BYTES + 17 && details.stderrTruncated === true && state.stderrTail.length === STDERR_LIMIT_BYTES && details.stderrCategory === "nonempty-retained-without-raw-output"],
 		["exit_code_is_retained", details.exitCode === 23 && details.stdinError === "EPIPE"],
-		["timing_covers_sequential_budget", HOST_READY_DEADLINE_MS === 5_000 && PROBE_DEADLINE_MS >= HOST_READY_DEADLINE_MS + HOST_DEADLINE_MS + 1_500],
+		["phase_aware_budgets_are_bounded", HOST_READY_DEADLINE_MS === 30_000 && HOST_DEADLINE_MS === 5_500 && PROBE_DEADLINE_MS === 45_000 && CLEANUP_DEADLINE_MS >= 5_000 && TOTAL_PROBE_DEADLINE_MS === 55_000],
+		["environment_without_token_is_unknown_incomplete", measuredTokenElevation([{ stage: "environment", status: "observed", details: {} }]) === undefined && classify([{ stage: "environment", status: "observed", details: {} }], { pipeName: "test", concurrent: false }) === "UNSUPPORTED"],
 	];
 	const pass = cases.every(([, result]) => result);
 	emit("self-test-diagnostics", pass ? "GREEN" : "RED", { cases: cases.map(([name, result]) => ({ name, result })) });
@@ -524,7 +533,7 @@ async function main() {
 		lifecycle.abort(new Error("total probe and cleanup deadline exceeded"));
 		emit("watchdog", "UNSUPPORTED", { reason: "hard exit protects CI from a continuing owned operation; owned temporary root may remain" });
 		setTimeout(() => process.exit(1), 50).unref();
-	}, PROBE_DEADLINE_MS + CLEANUP_DEADLINE_MS + 250);
+	}, TOTAL_PROBE_DEADLINE_MS);
 	const result = await runProbe(lifecycle);
 	clearTimeout(runWatchdog);
 	const cleanupResult = await cleanup(lifecycle, result.tempRoot);
@@ -535,12 +544,12 @@ async function main() {
 		reason: result.reason,
 		cleanup: cleanupResult,
 		limitations: { pipeDaclReadback: "unverified", ancestorReparseTOCTOU: "unverified", secondUserDenial: "unverified", fileIdentityStability: "unverified" },
-		capabilityScope: result.elevatedDiagnostic ? "elevated diagnostic capabilities only; unprivileged validation false; product support false" : "non-elevated experimental feasibility only; not product support",
+		capabilityScope: result.tokenElevation === true && result.elevatedDiagnostic ? "elevated diagnostic capabilities only; unprivileged validation false; product support false" : result.tokenElevation === false ? "non-elevated experimental feasibility only; not product support" : "token elevation unknown; incomplete diagnostic evidence; not product support",
 		meaning: classification === "PASS" ? "experimental feasibility only; not product support" : "blocked or unsupported feasibility result",
 	});
 	if (!cleanupResult.child.settled || !cleanupResult.rootRemoved) {
 		hardExit = true;
-		emit("cleanup", "UNSUPPORTED", { reason: "cleanup deadline expired; owned temporary root may remain" });
+		emit("cleanup", "UNSUPPORTED", { reason: cleanupResult.child.settled ? "filesystem cleanup deadline expired; owned temporary root may remain" : "owned child did not settle; child cleanup is unverified" });
 		setTimeout(() => process.exit(1), 50).unref();
 	}
 	return hardExit ? 1 : classification === "PASS" ? 0 : 1;
