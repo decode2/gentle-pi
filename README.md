@@ -76,6 +76,7 @@ Most coding-agent sessions fail for operational reasons, not model reasons:
 | **Lazy SDD preflight**         | Confirms SDD mode, artifact store, delivery strategy, and review budget on the first SDD invocation of every interactive session, including saved preferences.              |
 | **Subagent orchestration**     | Keeps one parent session responsible while child agents explore, implement, test, or review with focused context.                             |
 | **Strict TDD support**         | When project config declares a test command, apply/verify phases must record RED → GREEN → TRIANGULATE → REFACTOR evidence.                   |
+| **First-party questionnaire** | Offers an opt-in `ask_user_question` tool for structured choices in the interactive TUI. |
 | **Closed choice prompts** | Per-option hover/click/wheel in fullscreen; keyboard selection in either TUI mode. |
 | **Native pointer regions** | Compose hover, press, click, and wheel behavior around public TUI components. |
 | **Agent overlay close control** | Adds a header close button that adapts to available width. |
@@ -147,8 +148,26 @@ pi install npm:pi-intercom
 pi install npm:gentle-engram
 pi install npm:pi-web-access
 pi install npm:pi-lens
-pi install npm:@juicesharp/rpiv-ask-user-question
 ```
+
+### First-party questionnaire (opt-in)
+
+`gentle-pi` ships `ask_user_question`, but it remains disabled until its owner is explicitly selected. Create this file under the resolved Pi agent home:
+
+```text
+<resolved agent home>/gentle-ai/question-owner.json
+```
+
+```json
+{
+  "schema": "gentle-pi.question-owner/v1",
+  "owner": "gentle-pi"
+}
+```
+
+The agent home resolves in this order: `GENTLE_PI_AGENT_HOME`, `PI_CODING_AGENT_DIR`, then `~/.pi/agent`. Missing, unreadable, or malformed configuration fails closed: the extension does not register the tool or write configuration. Use `"owner": "legacy-external"` to suppress only gentle-pi's first-party registration while another extension supplies the tool; `"disabled"` likewise suppresses only the first-party registration. Neither setting reserves a name, unregisters, or disables an external tool.
+
+The first-party tool is available only in the interactive TUI. If Pi already exposes an `ask_user_question` tool when the session starts, gentle-pi does not register another one. Pi has no atomic tool-name reservation, so a plugin loaded later can still create a dynamic collision. Public RPC support remains deferred because Pi's RPC editor has no abort or timeout capability.
 
 Then start Pi in a project:
 
@@ -871,6 +890,8 @@ To opt out:
 | Path                           | Purpose                                                                                                    |
 | ------------------------------ | ---------------------------------------------------------------------------------------------------------- |
 | `extensions/gentle-ai.ts`      | Injects identity, orchestrates native review authority, refreshes delegation/review assets at startup and SDD on demand, registers commands, applies model/persona config, and enforces runtime safety. |
+| `extensions/ask-user-question.ts` | Registers the opt-in, owner-gated interactive-TUI `ask_user_question` tool. |
+| `lib/questions/` | Questionnaire request validation, owner gating, presentation state, response formatting, and TUI presentation components. |
 | `lib/native-review-cli.ts`     | Strict package-local adapter for Gentle AI START, FINALIZE, VALIDATE, SDD binding, and status contracts.     |
 | `lib/review-integration-v2.ts` | Strict consumer decoder for negotiated capabilities, operations, target status, projections, repair, and failures against contract `review-integration/v2` (active today).  |
 | `lib/review-candidate-view.ts` | Builds immutable changed-scope actor views while preserving full-tree, path, mode, symlink, and index integrity. |

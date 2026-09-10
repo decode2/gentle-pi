@@ -1,14 +1,32 @@
 #!/usr/bin/env node
 
 import assert from "node:assert/strict";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
-import { existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdtempSync, mkdirSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { basename, dirname, join } from "node:path";
+import { basename, dirname, join, relative, sep } from "node:path";
+import test from "node:test";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const root = fileURLToPath(new URL("..", import.meta.url));
+const QUESTIONNAIRE_RESOURCE_PATHS = [
+	"extensions/ask-user-question.ts",
+	"lib/questions/contract.ts",
+	"lib/questions/option-control.ts",
+	"lib/questions/owner-config.ts",
+	"lib/questions/owner-gate.ts",
+	"lib/questions/presentation-state.ts",
+	"lib/questions/response.ts",
+	"lib/questions/rpc-presentation-driver.ts",
+	"lib/questions/tui-presentation-driver.ts",
+	"lib/questions/tui-presentation-view.ts",
+	"lib/questions/validation.ts",
+];
+
+if (process.env.GENTLE_PI_QUESTIONNAIRE_RESOURCE_TEST === "1") {
+	await runQuestionnaireResourceTest();
+} else {
 const temporary = mkdtempSync(join(tmpdir(), "gentle-pi-packed-runner-"));
 const packDirectory = join(temporary, "pack");
 const installDirectory = join(temporary, "install");
@@ -110,4 +128,66 @@ try {
 	process.stdout.write(`packed package E2E passed (gentle-pi ${packageManifest.version ?? "unknown"}; Gentle AI ${decoded.packageVersion ?? "unknown"})\n`);
 } finally {
 	rmSync(temporary, { recursive: true, force: true });
+}
+}
+
+async function runQuestionnaireResourceTest() {
+	await test("package resource verifier rejects a fixture missing every questionnaire source", () => {
+		const temporaryFixtureRoot = mkdtempSync(join(tmpdir(), "gentle-pi-questionnaire-resource-"));
+		try {
+		const controlRoot = join(temporaryFixtureRoot, "control");
+		const missingResourceRoot = join(temporaryFixtureRoot, "missing-questionnaire-resources");
+		const agentHome = join(temporaryFixtureRoot, "agent");
+		const piAgentHome = join(temporaryFixtureRoot, "pi-agent");
+		mkdirSync(agentHome);
+		mkdirSync(piAgentHome);
+		const fixtureEnv = { ...process.env, GENTLE_PI_AGENT_HOME: agentHome, PI_CODING_AGENT_DIR: piAgentHome };
+
+		copyResourceFixture(controlRoot);
+		const control = runResourceVerifier(controlRoot, fixtureEnv);
+		assert.equal(control.error, undefined, `control verifier did not start: ${formatVerifierOutput(control)}`);
+		assert.equal(control.signal, null, `control verifier must not time out: ${formatVerifierOutput(control)}`);
+		assert.equal(control.status, 0, `control fixture must pass the real package verifier: ${formatVerifierOutput(control)}`);
+
+		copyResourceFixture(missingResourceRoot, new Set(QUESTIONNAIRE_RESOURCE_PATHS));
+		const missing = runResourceVerifier(missingResourceRoot, fixtureEnv);
+		assert.equal(missing.error, undefined, `missing-resource verifier did not start: ${formatVerifierOutput(missing)}`);
+		assert.equal(missing.signal, null, `missing-resource verifier must not time out: ${formatVerifierOutput(missing)}`);
+		assert.notEqual(missing.status, 0, "package verifier must reject a fixture missing questionnaire resources");
+		const output = `${missing.stdout}\n${missing.stderr}`;
+		for (const path of QUESTIONNAIRE_RESOURCE_PATHS) {
+			assert.ok(output.includes(`- ${path}`), `verifier must report ${path} as missing`);
+		}
+		} finally {
+			// This path is created above by mkdtempSync; retained evidence is outside it.
+			rmSync(temporaryFixtureRoot, { recursive: true, force: true });
+		}
+	});
+}
+
+function copyResourceFixture(destination, omittedPaths = new Set()) {
+	const excludedRoots = new Set([".git", "node_modules", ".lab-checks", ".gentle-ai"]);
+	cpSync(root, destination, {
+		recursive: true,
+		filter(source) {
+			const relativePath = relative(root, source).split(sep).join("/");
+			if (relativePath === "") return true;
+			if (excludedRoots.has(relativePath.split("/", 1)[0])) return false;
+			return !omittedPaths.has(relativePath);
+		},
+	});
+}
+
+function runResourceVerifier(fixtureRoot, env) {
+	return spawnSync(process.execPath, ["--experimental-strip-types", join(fixtureRoot, "scripts", "verify-package-files.mjs")], {
+		cwd: fixtureRoot,
+		encoding: "utf8",
+		timeout: 45_000,
+		killSignal: "SIGTERM",
+		env,
+	});
+}
+
+function formatVerifierOutput(result) {
+	return [result.stdout, result.stderr].filter(Boolean).join("\n").trim() || "(no output)";
 }
