@@ -71,7 +71,7 @@ try {
 }));
 	if (packed.length !== 1 || typeof packed[0]?.filename !== "string") throw new Error("npm pack did not return one tarball");
 	const tarball = join(packDirectory, packed[0].filename);
-	writeFileSync(join(installDirectory, "package.json"), JSON.stringify({ name: "gentle-pi-packed-runner-test", private: true }), "utf8");
+	writeFileSync(join(installDirectory, "package.json"), JSON.stringify({ name: "gentle-pi-packed-runner-test", private: true, dependencies: { typebox: "1.1.38" } }), "utf8");
 	runNpm(["install", "--ignore-scripts=false", "--no-audit", "--no-fund", "--package-lock=false", "--omit=dev", "--legacy-peer-deps", tarball], {
 		cwd: installDirectory,
 		stdio: "inherit",
@@ -83,6 +83,8 @@ try {
 	assert.equal(existsSync(join(installDirectory, ".pi", "settings.json")), false);
 	const packageRoot = join(installDirectory, "node_modules", "gentle-pi");
 	assert.ok(existsSync(join(packageRoot, "scripts", "install-tui-mode-setting.mjs")));
+	assertQuestionnaireResourceVerifier();
+	assertPackedQuestionnaireSmoke({ packageRoot, installDirectory, agentHome, piAgentHome, isolatedEnv });
 	const { nativeReviewAbandonAuthorization } = await import(pathToFileURL(join(packageRoot, "runtime", "native-review-cli.mjs")).href);
 	const abandonAuthorization = nativeReviewAbandonAuthorization({
 		lineage: "review-abc",
@@ -132,8 +134,11 @@ try {
 }
 
 async function runQuestionnaireResourceTest() {
-	await test("package resource verifier rejects a fixture missing every questionnaire source", () => {
-		const temporaryFixtureRoot = mkdtempSync(join(tmpdir(), "gentle-pi-questionnaire-resource-"));
+	await test("package resource verifier rejects a fixture missing every questionnaire source", assertQuestionnaireResourceVerifier);
+}
+
+function assertQuestionnaireResourceVerifier() {
+	const temporaryFixtureRoot = mkdtempSync(join(tmpdir(), "gentle-pi-questionnaire-resource-"));
 		try {
 		const controlRoot = join(temporaryFixtureRoot, "control");
 		const missingResourceRoot = join(temporaryFixtureRoot, "missing-questionnaire-resources");
@@ -158,11 +163,135 @@ async function runQuestionnaireResourceTest() {
 		for (const path of QUESTIONNAIRE_RESOURCE_PATHS) {
 			assert.ok(output.includes(`- ${path}`), `verifier must report ${path} as missing`);
 		}
-		} finally {
-			// This path is created above by mkdtempSync; retained evidence is outside it.
-			rmSync(temporaryFixtureRoot, { recursive: true, force: true });
-		}
+	} finally {
+		// This path is created above by mkdtempSync; retained evidence is outside it.
+		rmSync(temporaryFixtureRoot, { recursive: true, force: true });
+	}
+}
+
+function assertPackedQuestionnaireSmoke({ packageRoot, installDirectory, agentHome, piAgentHome, isolatedEnv }) {
+	assert.ok(existsSync(join(installDirectory, "node_modules", "typebox", "package.json")), "packed consumer must provide its direct typebox dependency");
+	const graphRoot = join(installDirectory, "packed-questionnaire-source");
+	const graphDigest = copyPackedQuestionnaireSourceGraph(packageRoot, graphRoot);
+	const harnessPath = join(installDirectory, "packed-questionnaire-smoke.mjs");
+	writeFileSync(harnessPath, packedQuestionnaireHarnessSource(), "utf8");
+	const control = runPackedQuestionnaireHarness(harnessPath, graphRoot, isolatedEnv, agentHome, piAgentHome);
+	assert.equal(control.error, undefined, `packed questionnaire smoke did not start: ${formatVerifierOutput(control)}`);
+	assert.equal(control.signal, null, `packed questionnaire smoke must not time out: ${formatVerifierOutput(control)}`);
+	assert.equal(control.status, 0, `packed questionnaire smoke failed: ${formatVerifierOutput(control)}`);
+
+	const missingEntryRoot = join(installDirectory, "packed-questionnaire-source-missing-entry");
+	copyPackedQuestionnaireSourceGraph(packageRoot, missingEntryRoot, new Set(["extensions/ask-user-question.ts"]));
+	const sensitivity = runPackedQuestionnaireHarness(harnessPath, missingEntryRoot, isolatedEnv, agentHome, piAgentHome);
+	assert.equal(sensitivity.error, undefined, `packed questionnaire sensitivity probe did not start: ${formatVerifierOutput(sensitivity)}`);
+	assert.equal(sensitivity.signal, null, `packed questionnaire sensitivity probe must not time out: ${formatVerifierOutput(sensitivity)}`);
+	assert.notEqual(sensitivity.status, 0, "missing packed questionnaire entry must fail the smoke assertion");
+	const sensitivityOutput = formatVerifierOutput(sensitivity);
+	assert.ok(sensitivityOutput.includes("ERR_MODULE_NOT_FOUND"), "missing entry sensitivity probe must fail module resolution");
+	assert.ok(sensitivityOutput.includes("ask-user-question.ts"), "missing entry sensitivity probe must identify the omitted packed entry");
+	process.stdout.write(`packed questionnaire missing-entry sensitivity exit ${sensitivity.status}\n${sensitivityOutput}\n`);
+	process.stdout.write(`packed questionnaire graph equality verified (14 files; sha256:${graphDigest})\n`);
+	process.stdout.write("packed questionnaire registration smoke and missing-entry sensitivity passed\n");
+}
+
+function copyPackedQuestionnaireSourceGraph(packageRoot, destination, omittedPaths = new Set()) {
+	const sourcePaths = [
+		"extensions/ask-user-question.ts",
+		"lib/agent-home.ts",
+		"lib/native-fullscreen-interaction.ts",
+		"lib/native-pointer-region.ts",
+		...QUESTIONNAIRE_RESOURCE_PATHS.slice(1),
+	];
+	const digests = [];
+	for (const sourcePath of sourcePaths) {
+		if (omittedPaths.has(sourcePath)) continue;
+		const source = join(packageRoot, sourcePath);
+		const destinationPath = join(destination, sourcePath);
+		assert.ok(existsSync(source), `packed tarball is missing ${sourcePath}`);
+		mkdirSync(dirname(destinationPath), { recursive: true });
+		cpSync(source, destinationPath);
+		const sourceDigest = createHash("sha256").update(readFileSync(source)).digest("hex");
+		assert.equal(createHash("sha256").update(readFileSync(destinationPath)).digest("hex"), sourceDigest, `copied packed source must preserve ${sourcePath}`);
+		digests.push(`${sourcePath}:${sourceDigest}`);
+	}
+	return createHash("sha256").update(digests.join("\n")).digest("hex");
+}
+
+function runPackedQuestionnaireHarness(harnessPath, sourceRoot, isolatedEnv, agentHome, piAgentHome) {
+	return spawnSync(process.execPath, ["--experimental-strip-types", harnessPath], {
+		cwd: dirname(harnessPath),
+		encoding: "utf8",
+		timeout: 45_000,
+		killSignal: "SIGTERM",
+		env: {
+			...isolatedEnv,
+			GENTLE_PI_AGENT_HOME: agentHome,
+			PI_CODING_AGENT_DIR: piAgentHome,
+			GENTLE_PI_QUESTIONNAIRE_EXTENSION: join(sourceRoot, "extensions", "ask-user-question.ts"),
+		},
 	});
+}
+
+function packedQuestionnaireHarnessSource() {
+	return [
+		'import assert from "node:assert/strict";',
+		'import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";',
+		'import { dirname, join } from "node:path";',
+		'import { pathToFileURL } from "node:url";',
+		'const extensionPath = process.env.GENTLE_PI_QUESTIONNAIRE_EXTENSION;',
+		'const agentHome = process.env.GENTLE_PI_AGENT_HOME;',
+		'assert.equal(typeof extensionPath, "string");',
+		'assert.equal(typeof agentHome, "string");',
+		'const ownerPath = join(agentHome, "gentle-ai", "question-owner.json");',
+		'function createHost(inventory = []) {',
+		'  const handlers = [];',
+		'  const tools = [];',
+		'  let inventoryCalls = 0;',
+		'  return {',
+		'    handlers, tools, inventoryCalls: () => inventoryCalls,',
+		'    pi: {',
+		'      on(event, handler) { if (event === "session_start") handlers.push(handler); },',
+		'      getAllTools() { inventoryCalls++; return inventory.map((name) => ({ name })); },',
+		'      registerTool(tool) { tools.push(tool); },',
+		'      events: { emit() {} },',
+		'    },',
+		'  };',
+		'}',
+		'async function freshExtension(label) {',
+		'  const module = await import(`${pathToFileURL(extensionPath).href}?${label}`);',
+		'  assert.equal(typeof module.default, "function", "packed default export must be callable");',
+		'  return module.default;',
+		'}',
+		'async function start(extension, host, mode) {',
+		'  extension(host.pi);',
+		'  assert.equal(host.handlers.length, 1, "extension must register one session callback");',
+		'  await host.handlers[0]({}, { mode, ui: { custom: async () => undefined } });',
+		'}',
+		'const beforeMissingOwner = readdirSync(agentHome).sort();',
+		'const noOwner = createHost();',
+		'await start(await freshExtension("no-owner"), noOwner, "tui");',
+		'assert.deepEqual(noOwner.tools, [], "missing owner must not register a questionnaire tool");',
+		'assert.equal(existsSync(ownerPath), false, "missing owner must not create configuration");',
+		'assert.deepEqual(readdirSync(agentHome).sort(), beforeMissingOwner, "missing owner must not mutate the isolated Pi home");',
+		'mkdirSync(dirname(ownerPath), { recursive: true });',
+		'writeFileSync(ownerPath, JSON.stringify({ schema: "gentle-pi.question-owner/v1", owner: "gentle-pi" }), "utf8");',
+		'const tuiOwner = createHost();',
+		'const tuiExtension = await freshExtension("tui-owner");',
+		'await start(tuiExtension, tuiOwner, "tui");',
+		'await tuiOwner.handlers[0]({}, { mode: "tui", ui: { custom: async () => undefined } });',
+		'assert.equal(tuiOwner.tools.length, 1, "valid TUI owner must register exactly once");',
+		'assert.equal(tuiOwner.tools[0].name, "ask_user_question");',
+		'assert.equal(typeof tuiOwner.tools[0].execute, "function");',
+		'const incumbent = createHost(["ask_user_question"]);',
+		'await start(await freshExtension("incumbent"), incumbent, "tui");',
+		'assert.deepEqual(incumbent.tools, [], "incumbent tool must block first-party registration");',
+		'assert.equal(incumbent.inventoryCalls(), 1);',
+		'const rpc = createHost();',
+		'await start(await freshExtension("rpc"), rpc, "rpc");',
+		'assert.deepEqual(rpc.tools, [], "RPC mode must not register the questionnaire tool");',
+		'assert.equal(rpc.inventoryCalls(), 0);',
+		'process.stdout.write("packed questionnaire registration smoke passed\\n");',
+	].join("\n");
 }
 
 function copyResourceFixture(destination, omittedPaths = new Set()) {
