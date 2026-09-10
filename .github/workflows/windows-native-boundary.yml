@@ -1,0 +1,27 @@
+name: Windows native boundary
+
+on:
+  push:
+    branches:
+      - test/windows-native-boundary-ci
+
+permissions:
+  contents: read
+
+jobs:
+  windows-native-boundary:
+    if: github.repository == 'decode2/gentle-pi'
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: Run Windows native boundary fixture
+        shell: cmd
+        run: node --experimental-strip-types --test tests/windows-native-boundary.test.ts
