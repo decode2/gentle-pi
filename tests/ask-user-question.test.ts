@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createAskUserQuestionExtension, type AskUserQuestionDependencies } from "../extensions/ask-user-question.ts";
 import type { QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
@@ -6,6 +7,20 @@ import type { QuestionPresentationDriver } from "../lib/questions/contract.ts";
 
 type SessionHandler = (event: unknown, ctx: { mode: string; ui: { custom: unknown } }) => Promise<void> | void;
 type RegisteredTool = { name: string; parameters: { properties?: Record<string, unknown> }; execute: (...args: unknown[]) => Promise<unknown> };
+type EventRecord = { channel: string; payload: unknown };
+type EventContract = {
+	sourceEventContractOracle: {
+		valid: {
+			input: { questions: Array<{ question: string; header: string; options: Array<{ label: string; description: string; preview?: string }> }> };
+			promptPayload: unknown;
+			pendingEvents: Array<{ channel: string; payload: unknown }>;
+			releaseEvent: EventRecord;
+		};
+	};
+	observedRegistrarNoQuestionsEnvelope: { input: unknown; events: EventRecord[]; errorEnvelope: unknown };
+};
+
+const eventContract = JSON.parse(readFileSync(new URL("./fixtures/questions/legacy-2.9.0/event-contract.json", import.meta.url), "utf8")) as EventContract;
 
 function owner(ownerName: "gentle-pi" | "legacy-external" | "disabled"): QuestionOwnerConfigResolution {
 	return ownerName === "gentle-pi"
@@ -16,13 +31,13 @@ function owner(ownerName: "gentle-pi" | "legacy-external" | "disabled"): Questio
 function host(inventory: string[] = []) {
 	const sessionStarts: SessionHandler[] = [];
 	const tools: RegisteredTool[] = [];
-	const events: Array<{ channel: string; active: boolean }> = [];
+	const events: EventRecord[] = [];
 	let inventoryCalls = 0;
 	const pi = {
 		on(event: string, handler: SessionHandler) { if (event === "session_start") sessionStarts.push(handler); },
 		registerTool(tool: RegisteredTool) { tools.push(tool); },
 		getAllTools() { inventoryCalls++; return inventory.map((name) => ({ name })); },
-		events: { emit(channel: string, data: { active: boolean }) { events.push({ channel, active: data.active }); } },
+		events: { emit(channel: string, payload: unknown) { events.push({ channel, payload }); } },
 	};
 	return { pi, sessionStarts, tools, events, inventoryCalls: () => inventoryCalls };
 }
@@ -111,7 +126,177 @@ test("correlates and aborts one TUI request, balances status, and rejects concur
 	finish?.();
 	await first;
 	assert.deepEqual(subject.events, [
-		{ channel: "rpiv:ask-user:blocked", active: true },
-		{ channel: "rpiv:ask-user:blocked", active: false },
+		{
+			channel: "rpiv:ask-user:prompt",
+			payload: {
+				questions: [{
+					question: "Proceed?",
+					header: "Proceed",
+					multiSelect: false,
+					options: [
+						{ label: "Yes", description: "Continue", hasPreview: false },
+						{ label: "No", description: "Stop", hasPreview: false },
+					],
+				}],
+			},
+		},
+		{ channel: "rpiv:ask-user:blocked", payload: { active: true } },
+		{ channel: "rpiv:ask-user:blocked", payload: { active: false } },
 	]);
+});
+
+test("emits the legacy prompt before one blocked bracket and releases before each outer completion", async () => {
+	const valid = eventContract.sourceEventContractOracle.valid;
+	const [question] = valid.input.questions;
+	assert.ok(question, "the committed legacy event oracle supplies one valid question");
+	const pendingEvents = valid.pendingEvents.map((event) => ({
+		...event,
+		payload: event.payload === "promptPayload" ? valid.promptPayload : event.payload,
+	}));
+	const cases = [
+		{
+			name: "selected",
+			action: { kind: "resolve" as const, outcome: { cancelled: false, answers: [{ questionIndex: 0, question: question.question, kind: "option", answer: question.options[0]!.label }] } },
+		},
+		{ name: "cancelled", action: { kind: "resolve" as const, outcome: { cancelled: true, answers: [] } } },
+		{ name: "driver rejection", action: { kind: "reject" as const, error: new Error("scripted-dialog-rejection") } },
+	];
+
+	for (const scenario of cases) {
+		let entered!: () => void;
+		const enteredGate = new Promise<void>((resolve) => { entered = resolve; });
+		let release!: (action: (typeof cases)[number]["action"]) => void;
+		const driver: QuestionPresentationDriver = { present: (request) => new Promise((resolve, reject) => {
+			entered();
+			release = (action) => {
+				if (action.kind === "reject") reject(action.error);
+				else resolve({ correlationId: request.correlationId, ...action.outcome });
+			};
+		}) };
+		const subject = host();
+		createAskUserQuestionExtension(dependencies(owner("gentle-pi"), driver))(subject.pi as never);
+		await start(subject, "tui");
+		const execution = subject.tools[0]!.execute(`legacy-event-${scenario.name}`, valid.input, new AbortController().signal, undefined, { mode: "tui", ui: { custom: async () => undefined } });
+		let eventCountAtOuterCompletion = -1;
+		const completionMarker = execution.then(
+			() => { eventCountAtOuterCompletion = subject.events.length; },
+			() => { eventCountAtOuterCompletion = subject.events.length; },
+		);
+
+		await enteredGate;
+		assert.deepEqual(subject.events, pendingEvents, `${scenario.name}: only prompt then active blocking is observable while pending`);
+		release(scenario.action);
+		if (scenario.action.kind === "reject") await assert.rejects(() => execution, /scripted-dialog-rejection/);
+		else await execution;
+		await completionMarker;
+		assert.deepEqual(subject.events, [...pendingEvents, valid.releaseEvent], `${scenario.name}: exactly one release follows the prompt bracket`);
+		assert.equal(eventCountAtOuterCompletion, subject.events.length, `${scenario.name}: release precedes the caller-visible completion`);
+	}
+});
+
+test("returns the observed no_questions envelope without emitting questionnaire events", async () => {
+	const invalid = eventContract.observedRegistrarNoQuestionsEnvelope;
+	const subject = host();
+	createAskUserQuestionExtension(dependencies(owner("gentle-pi"), { present: async () => { throw new Error("invalid input reached the presentation driver"); } }))(subject.pi as never);
+	await start(subject, "tui");
+	const result = await subject.tools[0]!.execute("legacy-event-invalid", invalid.input, new AbortController().signal, undefined, { mode: "tui", ui: { custom: async () => undefined } });
+	assert.deepEqual(result, invalid.errorEnvelope);
+	assert.deepEqual(subject.events, invalid.events);
+});
+
+const legacyOptions = [{ label: "Yes", description: "Continue" }, { label: "No", description: "Stop" }];
+const legacyQuestion = (question = "Proceed?", header = "Proceed", options = legacyOptions) => ({ question, header, options });
+const legacyErrorCases = [
+	{ code: "no_questions", message: "At least one question is required", input: { questions: [] } },
+	{ code: "too_many_questions", message: "At most 4 questions are allowed per invocation", input: { questions: Array.from({ length: 5 }, (_, index) => legacyQuestion(`Question ${index}?`)) } },
+	{ code: "duplicate_question", message: "Question text must be unique within an invocation", input: { questions: [legacyQuestion(), legacyQuestion("Proceed?", "Again")] } },
+	{ code: "empty_options", message: "Each question requires at least 2 options", input: { questions: [legacyQuestion("Proceed?", "Proceed", [legacyOptions[0]!])] } },
+	{ code: "reserved_label", message: "Option label is reserved (Other, Type something., Next)", input: { questions: [legacyQuestion("Proceed?", "Proceed", [{ label: "Next", description: "Reserved" }, legacyOptions[1]!])] } },
+	{ code: "duplicate_option_label", message: "Option labels must be unique within a question", input: { questions: [legacyQuestion("Proceed?", "Proceed", [legacyOptions[0]!, { label: "Yes", description: "Repeated" }])] } },
+] as const;
+
+function legacyErrorEnvelope(code: string, message: string) {
+	return { content: [{ type: "text", text: `Error: ${message}` }], details: { answers: [], cancelled: true, error: code } };
+}
+
+// U1 observed these validator inputs at legacy runtime; order is source-derived, not extra runtime evidence.
+test("returns legacy validation envelopes without events or presentation", async (t) => {
+	for (const legacy of legacyErrorCases) {
+		await t.test(legacy.code, async () => {
+			let driverCalls = 0;
+			const subject = host();
+			createAskUserQuestionExtension(dependencies(owner("gentle-pi"), { present: async () => {
+				driverCalls++;
+				throw new Error("legacy-invalid input reached the presentation driver");
+			} }))(subject.pi as never);
+			await start(subject, "tui");
+			const result = await subject.tools[0]!.execute(`legacy-${legacy.code}`, legacy.input, new AbortController().signal, undefined, { mode: "tui", ui: { custom: async () => undefined } });
+			assert.deepEqual(result, legacyErrorEnvelope(legacy.code, legacy.message));
+			assert.equal(driverCalls, 0);
+			assert.deepEqual(subject.events, []);
+		});
+	}
+});
+
+test("returns the observed no_ui envelope from a non-TUI execution without registering RPC", async () => {
+	let driverCalls = 0;
+	const subject = host();
+	createAskUserQuestionExtension(dependencies(owner("gentle-pi"), { present: async () => {
+		driverCalls++;
+		throw new Error("no_ui input reached the presentation driver");
+	} }))(subject.pi as never);
+	await start(subject, "tui");
+	const result = await subject.tools[0]!.execute("legacy-no-ui", { questions: [legacyQuestion()] }, new AbortController().signal, undefined, { mode: "rpc", ui: { custom: async () => undefined } });
+	assert.deepEqual(result, legacyErrorEnvelope("no_ui", "UI not available (running in non-interactive mode)"));
+	assert.equal(driverCalls, 0);
+	assert.deepEqual(subject.events, []);
+});
+
+const canonicalFallbackCases = [
+	{ name: "header length", input: { questions: [legacyQuestion("Proceed?", "x".repeat(17))] }, message: "Question limits are invalid" },
+	{ name: "too many options", input: { questions: [legacyQuestion("Proceed?", "Proceed", [...legacyOptions, { label: "Maybe", description: "Later" }, { label: "Never", description: "No" }, { label: "Extra", description: "Fallback" }])] }, message: "Question limits are invalid" },
+	{ name: "missing header", input: { questions: [{ question: "Proceed?", options: legacyOptions }] }, message: "Question text and header must be strings" },
+] as const;
+
+test("keeps canonical-only invalid inputs on the invalid_input fallback", async (t) => {
+	for (const fallback of canonicalFallbackCases) {
+		await t.test(fallback.name, async () => {
+			let driverCalls = 0;
+			const subject = host();
+			createAskUserQuestionExtension(dependencies(owner("gentle-pi"), { present: async () => {
+				driverCalls++;
+				throw new Error("canonical fallback reached the presentation driver");
+			} }))(subject.pi as never);
+			await start(subject, "tui");
+			const result = await subject.tools[0]!.execute(`canonical-${fallback.name}`, fallback.input, new AbortController().signal, undefined, { mode: "tui", ui: { custom: async () => undefined } });
+			assert.deepEqual(result, legacyErrorEnvelope("invalid_input", fallback.message));
+			assert.equal(driverCalls, 0);
+			assert.deepEqual(subject.events, []);
+		});
+	}
+});
+
+test("keeps sparse direct inputs on the canonical invalid_input fallback", async (t) => {
+	const sparseQuestions = new Array(1);
+	const sparseOptions = new Array(2);
+	const sparseCases = [
+		{ name: "questions hole", input: { questions: sparseQuestions }, message: "Question text and header must be strings", hole: sparseQuestions },
+		{ name: "options hole", input: { questions: [{ question: "Proceed?", header: "Proceed", options: sparseOptions }] }, message: "Option fields are invalid", hole: sparseOptions },
+	];
+	for (const sparse of sparseCases) {
+		await t.test(sparse.name, async () => {
+			assert.equal(0 in sparse.hole, false, "the reproducer must retain an array hole");
+			let driverCalls = 0;
+			const subject = host();
+			createAskUserQuestionExtension(dependencies(owner("gentle-pi"), { present: async () => {
+				driverCalls++;
+				throw new Error("sparse input reached the presentation driver");
+			} }))(subject.pi as never);
+			await start(subject, "tui");
+			const result = await subject.tools[0]!.execute(`sparse-${sparse.name}`, sparse.input, new AbortController().signal, undefined, { mode: "tui", ui: { custom: async () => undefined } });
+			assert.deepEqual(result, legacyErrorEnvelope("invalid_input", sparse.message));
+			assert.equal(driverCalls, 0);
+			assert.deepEqual(subject.events, []);
+		});
+	}
 });

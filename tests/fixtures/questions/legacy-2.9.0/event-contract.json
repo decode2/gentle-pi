@@ -1,0 +1,74 @@
+{
+  "metadata": {
+    "artifactPin": {
+      "package": "@juicesharp/rpiv-ask-user-question",
+      "version": "2.9.0",
+      "rawTraceSha256": "05680a8b5a310fd64663c60aef964c447222f12af9f5e17bc258a6ae2843c7c6",
+      "sourceReference": {
+        "artifactPath": "events.ts",
+        "parentSourceVersion": "2.9.0"
+      }
+    },
+    "assertionScope": {
+      "observedLegacyTraceProjections": "Raw-observed legacy event order and payload projections.",
+      "sourceEventContractOracle": "Legacy public event shape and normalization rules from events.ts.",
+      "adaptedFirstPartyTestInputs": "Inputs adapted for first-party coverage; they are not raw legacy error observations.",
+      "observedRegistrarNoQuestionsEnvelope": "Observed legacy no_questions envelope, asserted by the first-party event regression."
+    }
+  },
+  "sourceEventContractOracle": {
+    "channels": {
+      "prompt": "rpiv:ask-user:prompt",
+      "blocked": "rpiv:ask-user:blocked"
+    },
+    "valid": {
+      "inputOrigin": "adapted-first-party-test-input",
+      "input": {
+        "questions": [
+          {
+            "question": "Choose a path?",
+            "header": "Path",
+            "options": [
+              { "label": "First", "description": "first", "preview": "" },
+              { "label": "Second", "description": "second", "preview": "nonempty-preview-not-in-event-payload" }
+            ]
+          }
+        ]
+      },
+      "promptPayload": {
+        "questions": [
+          {
+            "question": "Choose a path?",
+            "header": "Path",
+            "multiSelect": false,
+            "options": [
+              { "label": "First", "description": "first", "hasPreview": false },
+              { "label": "Second", "description": "second", "hasPreview": true }
+            ]
+          }
+        ]
+      },
+      "pendingEvents": [
+        { "channel": "rpiv:ask-user:prompt", "payload": "promptPayload" },
+        { "channel": "rpiv:ask-user:blocked", "payload": { "active": true } }
+      ],
+      "releaseEvent": { "channel": "rpiv:ask-user:blocked", "payload": { "active": false } }
+    }
+  },
+  "observedRegistrarNoQuestionsEnvelope": {
+    "inputOrigin": "observed-legacy-validator-input",
+    "assertionScope": "observed-legacy-no_questions-envelope",
+    "input": { "questions": [] },
+    "events": [],
+    "errorEnvelope": {
+      "content": [{ "type": "text", "text": "Error: At least one question is required" }],
+      "details": { "answers": [], "cancelled": true, "error": "no_questions" }
+    }
+  },
+  "observedLegacyTraceProjections": [
+    { "legacyLabel": "valid-selected", "events": ["prompt", "blocked:true", "blocked:false"] },
+    { "legacyLabel": "cancel", "events": ["prompt", "blocked:true", "blocked:false"] },
+    { "legacyLabel": "dialog-rejection", "events": ["prompt", "blocked:true", "blocked:false"] },
+    { "legacyLabel": "deferred", "pendingEvents": ["prompt", "blocked:true"], "settledEvents": ["prompt", "blocked:true", "blocked:false"] }
+  ]
+}
