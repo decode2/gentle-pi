@@ -9,11 +9,18 @@
 # https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/winternl.h
 # FILE_RENAME_INFO / FILE_DISPOSITION_INFO layout is from Microsoft's winbase.h:
 # https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/um/WinBase.h
+# Rename uses the documented underlying FileRenameInformation=10 contract rather
+# than the Win32 FileRenameInfo wrapper: RootDirectory anchors relative FileName,
+# FileNameLength is bytes, and FILE_RENAME_INFORMATION continues with the name.
+# https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/nf-ntifs-ntsetinformationfile
+# https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/ntifs/ns-ntifs-_file_rename_information
+# https://learn.microsoft.com/en-us/windows-hardware/drivers/ddi/wdm/ne-wdm-_file_information_class
+# RtlNtStatusToDosError maps the direct NTSTATUS to the existing collision codes:
+# https://learn.microsoft.com/en-us/windows/win32/api/winternl/nf-winternl-rtlntstatustodoserror
 # Collision values ERROR_FILE_EXISTS=80 / ERROR_ALREADY_EXISTS=183 are from:
 # https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/shared/winerror.h
-# Handle-based rename/delete API and FileRenameInfo=3/FileDispositionInfo=4:
+# Handle-based delete API and FileDispositionInfo=4:
 # https://learn.microsoft.com/en-us/windows/win32/api/fileapi/nf-fileapi-setfileinformationbyhandle
-# https://learn.microsoft.com/en-us/windows/win32/api/winbase/ns-winbase-file_rename_info
 # Scope: a newly created private disposable root. This neither proves arbitrary
 # profile/volume bootstrap trust nor cross-user denial. It emits no SID or path.
 
@@ -87,8 +94,10 @@ public static class NativeBoundary {
   // STATUS_OBJECT_NAME_NOT_FOUND is from Microsoft win32metadata ntstatus.h:
   // https://raw.githubusercontent.com/microsoft/win32metadata/main/generation/WinSDK/RecompiledIdlHeaders/shared/ntstatus.h
   const uint STATUS_OBJECT_NAME_NOT_FOUND = 0xC0000034;
-  const int FileRenameInfo = 3, FileDispositionInfo = 4;
+  const int FileRenameInformation = 10, FileDispositionInfo = 4;
   [DllImport("ntdll.dll", CallingConvention=CallingConvention.Winapi)] static extern uint NtCreateFile(out IntPtr fileHandle, uint desiredAccess, ref OBJECT_ATTRIBUTES objectAttributes, out IO_STATUS_BLOCK ioStatusBlock, IntPtr allocationSize, uint fileAttributes, uint shareAccess, uint createDisposition, uint createOptions, IntPtr eaBuffer, uint eaLength);
+  [DllImport("ntdll.dll", CallingConvention=CallingConvention.Winapi)] static extern uint NtSetInformationFile(IntPtr fileHandle, out IO_STATUS_BLOCK ioStatusBlock, IntPtr fileInformation, uint length, int fileInformationClass);
+  [DllImport("ntdll.dll", CallingConvention=CallingConvention.Winapi)] static extern uint RtlNtStatusToDosError(uint status);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool CloseHandle(IntPtr handle);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(IntPtr handle, out BY_HANDLE_FILE_INFORMATION info);
   [DllImport("kernel32.dll", SetLastError=true)] static extern bool SetFileInformationByHandle(IntPtr handle, int infoClass, IntPtr info, uint size);
@@ -134,7 +143,8 @@ public static class NativeBoundary {
   public static NativeIdentityResult IdentityWithStatus(IntPtr handle) { BY_HANDLE_FILE_INFORMATION info; if (!GetFileInformationByHandle(handle, out info)) return new NativeIdentityResult(null, (uint)Marshal.GetLastWin32Error()); return new NativeIdentityResult(info.VolumeSerialNumber.ToString("X8") + ":" + info.FileIndexHigh.ToString("X8") + info.FileIndexLow.ToString("X8"), 0); }
   public static byte[] ReadDacl(IntPtr handle) { IntPtr owner, group, dacl, sacl, descriptor = IntPtr.Zero; uint status = GetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, out owner, out group, out dacl, out sacl, out descriptor); if (status != 0 || descriptor == IntPtr.Zero) throw new Win32Exception((int)status); try { uint length = GetSecurityDescriptorLength(descriptor); if (length == 0 || length > 65536) throw new InvalidOperationException(); byte[] bytes = new byte[length]; Marshal.Copy(descriptor, bytes, 0, (int)length); return bytes; } finally { LocalFree(descriptor); } }
   static uint SetInfo(IntPtr handle, int infoClass, IntPtr memory, uint length) { return SetFileInformationByHandle(handle, infoClass, memory, length) ? 0 : unchecked((uint)Marshal.GetLastWin32Error()); }
-  public static uint RenameNoReplace(IntPtr file, IntPtr root, string name) { byte[] chars = System.Text.Encoding.Unicode.GetBytes(name); int header = IntPtr.Size == 8 ? 20 : 12; IntPtr memory = Marshal.AllocHGlobal(header + chars.Length); try { for (int i = 0; i < header + chars.Length; i++) Marshal.WriteByte(memory, i, 0); Marshal.WriteIntPtr(memory, IntPtr.Size == 8 ? 8 : 4, root); Marshal.WriteInt32(memory, IntPtr.Size == 8 ? 16 : 8, chars.Length); Marshal.Copy(chars, 0, IntPtr.Add(memory, header), chars.Length); return SetInfo(file, FileRenameInfo, memory, (uint)(header + chars.Length)); } finally { Marshal.FreeHGlobal(memory); } }
+  static uint SetRenameInfo(IntPtr handle, IntPtr memory, uint length) { IO_STATUS_BLOCK ioStatusBlock; uint status = NtSetInformationFile(handle, out ioStatusBlock, memory, length, FileRenameInformation); return status == 0 ? 0 : RtlNtStatusToDosError(status); }
+  public static uint RenameNoReplace(IntPtr file, IntPtr root, string name) { byte[] chars = System.Text.Encoding.Unicode.GetBytes(name); int header = IntPtr.Size == 8 ? 20 : 12; IntPtr memory = Marshal.AllocHGlobal(header + chars.Length); try { for (int i = 0; i < header + chars.Length; i++) Marshal.WriteByte(memory, i, 0); Marshal.WriteIntPtr(memory, IntPtr.Size == 8 ? 8 : 4, root); Marshal.WriteInt32(memory, IntPtr.Size == 8 ? 16 : 8, chars.Length); Marshal.Copy(chars, 0, IntPtr.Add(memory, header), chars.Length); return SetRenameInfo(file, memory, (uint)(header + chars.Length)); } finally { Marshal.FreeHGlobal(memory); } }
   public static uint MarkDelete(IntPtr file) { IntPtr memory = Marshal.AllocHGlobal(1); try { Marshal.WriteByte(memory, 1); return SetInfo(file, FileDispositionInfo, memory, 1); } finally { Marshal.FreeHGlobal(memory); } }
 }
 '@

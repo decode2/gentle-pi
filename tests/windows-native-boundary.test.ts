@@ -29,6 +29,16 @@ test("native-boundary source precomputes ABI values and checks typed tombstone s
 	assert.match(source, /postCloseReplacement/);
 });
 
+test("native-boundary source uses the documented NtSetInformationFile rename contract (source assertion, not runtime proof)", () => {
+	const source = readFileSync(script, "utf8");
+	assert.match(source, /const int FileRenameInformation = 10/);
+	assert.match(source, /static extern uint NtSetInformationFile\(/);
+	assert.match(source, /static extern uint RtlNtStatusToDosError\(/);
+	assert.match(source, /return status == 0 \? 0 : RtlNtStatusToDosError\(status\)/);
+	assert.match(source, /return SetRenameInfo\(file, memory, \(uint\)\(header \+ chars\.Length\)\)/);
+	assert.doesNotMatch(source, /SetInfo\(file, FileRenameInfo, memory/);
+});
+
 test("native-boundary source parenthesizes ABI offset multiplication in the PowerShell array", () => {
 	const source = readFileSync(script, "utf8");
 	assert.match(source, /\$expectedOffsets\s*=\s*@\(0,\s*\$pointer,\s*\(\$pointer\s*\*\s*2\),\s*\(\$pointer\s*\*\s*3\),\s*\(\$pointer\s*\*\s*4\),\s*\(\$pointer\s*\*\s*5\)\)/);
