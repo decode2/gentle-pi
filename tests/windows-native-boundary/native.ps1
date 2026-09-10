@@ -122,7 +122,7 @@ public static class NativeBoundary {
 	$expectedUnicodeSize = if ($pointerSize -eq 8) { 16 } else { 8 }
 	if ([NativeBoundary]::UnicodeStringSize() -ne $expectedUnicodeSize) { throw 'abi' }
 	if ([NativeBoundary]::IoStatusBlockSize() -ne ($pointerSize * 2) -or [NativeBoundary]::ObjectAttributesSize() -ne $expectedSize) { throw 'abi' }
-	$offsets = @('Length', 'RootDirectory', 'ObjectName', 'Attributes', 'SecurityDescriptor', 'SecurityQualityOfService'); $pointer = [NativeBoundary]::PointerSize(); $expectedOffsets = @(0, $pointer, $pointer * 2, $pointer * 3, $pointer * 4, $pointer * 5)
+	$offsets = @('Length', 'RootDirectory', 'ObjectName', 'Attributes', 'SecurityDescriptor', 'SecurityQualityOfService'); $pointer = [NativeBoundary]::PointerSize(); $expectedOffsets = @(0, $pointer, ($pointer * 2), ($pointer * 3), ($pointer * 4), ($pointer * 5))
 	for ($index = 0; $index -lt $offsets.Count; $index++) { if ([NativeBoundary]::Offset($offsets[$index]) -ne $expectedOffsets[$index]) { throw 'abi' } }
 
 	$sid = [Security.Principal.WindowsIdentity]::GetCurrent().User

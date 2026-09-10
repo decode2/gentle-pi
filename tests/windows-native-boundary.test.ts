@@ -27,6 +27,11 @@ test("native-boundary source precomputes ABI values and checks typed tombstone s
 	assert.match(source, /postCloseReplacement/);
 });
 
+test("native-boundary source parenthesizes ABI offset multiplication in the PowerShell array", () => {
+	const source = readFileSync(script, "utf8");
+	assert.match(source, /\$expectedOffsets\s*=\s*@\(0,\s*\$pointer,\s*\(\$pointer\s*\*\s*2\),\s*\(\$pointer\s*\*\s*3\),\s*\(\$pointer\s*\*\s*4\),\s*\(\$pointer\s*\*\s*5\)\)/);
+});
+
 test("native-boundary runner rejects unavailable hosts", async () => {
 	await assert.rejects(runNativeBoundaryFixture({ command: "/definitely/missing/powershell.exe", script, timeoutMs: 20 }), /unavailable/);
 });
