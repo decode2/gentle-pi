@@ -4,6 +4,19 @@ import { existsSync } from "node:fs";
 const SCHEMA = "gentle-pi.windows-native-boundary/v1";
 const SUCCESS_STAGES = ["abi", "anchored-open", "dacl", "identity", "replace-delete", "reparse-negative"];
 const FAILURE_STAGES = new Set([...SUCCESS_STAGES, "cleanup"]);
+const REPLACE_DELETE_SUBSTAGES = new Set([
+	"initial-target-create",
+	"rename-collision",
+	"source-target-identity-preservation",
+	"tombstone-rename",
+	"replacement-create",
+	"replacement-identity",
+	"mark-delete",
+	"original-close",
+	"tombstone-absence-status",
+	"postclose-replacement",
+]);
+const NATIVE_CODE_KINDS = new Set(["win32", "ntstatus", "assertion"]);
 const MAX_BYTES = 16_384;
 const POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 
@@ -12,13 +25,16 @@ export function parseFixtureLine(line) {
 	let value;
 	try { value = JSON.parse(line); } catch { throw new Error("malformed native-boundary result"); }
 	if (!value || typeof value !== "object" || Array.isArray(value)) throw new Error("malformed native-boundary result");
-	const allowed = new Set(["schema", "ok", "stage", "architecture", "elevated", "stages", "scope"]);
+	const allowed = new Set(["schema", "ok", "stage", "substage", "codeKind", "code", "architecture", "elevated", "stages", "scope"]);
 	if (Object.keys(value).some((key) => !allowed.has(key)) || value.schema !== SCHEMA || typeof value.ok !== "boolean" || typeof value.architecture !== "string" || !["x86", "x64", "arm64"].includes(value.architecture) || typeof value.elevated !== "boolean") throw new Error("malformed native-boundary result");
+	const hasDiagnostic = ["substage", "codeKind", "code"].some((key) => Object.hasOwn(value, key));
 	if (!value.ok) {
 		if (typeof value.stage !== "string" || !FAILURE_STAGES.has(value.stage)) throw new Error("malformed native-boundary result");
-		return Object.freeze({ schema: SCHEMA, ok: false, stage: value.stage, architecture: value.architecture, elevated: value.elevated });
+		if (!hasDiagnostic) return Object.freeze({ schema: SCHEMA, ok: false, stage: value.stage, architecture: value.architecture, elevated: value.elevated });
+		if (value.stage !== "replace-delete" || typeof value.substage !== "string" || !REPLACE_DELETE_SUBSTAGES.has(value.substage) || typeof value.codeKind !== "string" || !NATIVE_CODE_KINDS.has(value.codeKind) || (value.code !== null && (!Number.isInteger(value.code) || value.code < 0 || value.code > 0xffffffff)) || (value.code === null && value.codeKind !== "assertion") || (value.code !== null && value.codeKind === "assertion")) throw new Error("malformed native-boundary result");
+		return Object.freeze({ schema: SCHEMA, ok: false, stage: value.stage, substage: value.substage, codeKind: value.codeKind, code: value.code, architecture: value.architecture, elevated: value.elevated });
 	}
-	if (!Array.isArray(value.stages) || value.stages.length !== SUCCESS_STAGES.length || value.stages.some((stage, index) => stage !== SUCCESS_STAGES[index]) || value.scope !== "private-disposable-root") throw new Error("malformed native-boundary result");
+	if (hasDiagnostic || !Array.isArray(value.stages) || value.stages.length !== SUCCESS_STAGES.length || value.stages.some((stage, index) => stage !== SUCCESS_STAGES[index]) || value.scope !== "private-disposable-root") throw new Error("malformed native-boundary result");
 	return Object.freeze({ schema: SCHEMA, ok: true, stage: "complete", architecture: value.architecture, elevated: value.elevated, stages: Object.freeze([...value.stages]), scope: value.scope });
 }
 
@@ -58,7 +74,11 @@ export function runNativeBoundaryFixture({ script, timeoutMs = 15_000, command =
 			let result;
 			try { result = parseFixtureLine(stdout.toString("utf8")); } catch (error) { settle(error); return; }
 			const category = signal !== null ? "signal" : code !== 0 ? "nonzero-exit" : !result.ok ? "host-failure" : undefined;
-			if (category) { settle(new Error(`native-boundary host failed (category: ${category}) (stage: ${result.stage})`)); return; }
+			if (category) {
+				const diagnostic = result.ok ? "" : result.substage === undefined ? "" : ` (substage: ${result.substage}) (code-kind: ${result.codeKind}) (code: ${result.code})`;
+				settle(new Error(`native-boundary host failed (category: ${category}) (stage: ${result.stage})${diagnostic}`));
+				return;
+			}
 			settle(undefined, result);
 		});
 	});

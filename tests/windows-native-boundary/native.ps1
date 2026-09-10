@@ -21,6 +21,9 @@ Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 $schema = 'gentle-pi.windows-native-boundary/v1'
 $stage = 'abi'
+$substage = $null
+$codeKind = $null
+$code = $null
 $root = $null
 $junction = $null
 $completed = $false
@@ -36,7 +39,18 @@ function Write-Result([bool]$ok, [string]$failedStage, [string]$architecture, [b
 		[Console]::Out.WriteLine((@{ schema = $schema; ok = $true; architecture = $architecture; elevated = $elevated; stages = @('abi', 'anchored-open', 'dacl', 'identity', 'replace-delete', 'reparse-negative'); scope = 'private-disposable-root' } | ConvertTo-Json -Compress))
 		return
 	}
-	[Console]::Out.WriteLine((@{ schema = $schema; ok = $false; stage = $failedStage; architecture = $architecture; elevated = $elevated } | ConvertTo-Json -Compress))
+	$result = @{ schema = $schema; ok = $false; stage = $failedStage; architecture = $architecture; elevated = $elevated }
+	if ($failedStage -eq 'replace-delete' -and $null -ne $script:substage) {
+		$result.substage = $script:substage
+		$result.codeKind = $script:codeKind
+		$result.code = $script:code
+	}
+	[Console]::Out.WriteLine(($result | ConvertTo-Json -Compress))
+}
+function Set-ReplaceDeleteDiagnostic([string]$failedSubstage, [string]$failedCodeKind = 'assertion', $failedCode = $null) {
+	$script:substage = $failedSubstage
+	$script:codeKind = $failedCodeKind
+	$script:code = $failedCode
 }
 
 $architecture = Get-Architecture
@@ -55,6 +69,11 @@ public static class NativeBoundary {
     public IntPtr Handle;
     public uint Status;
     public NativeOpenResult(IntPtr handle, uint status) { Handle = handle; Status = status; }
+  }
+  public struct NativeIdentityResult {
+    public string Value;
+    public uint Error;
+    public NativeIdentityResult(string value, uint error) { Value = value; Error = error; }
   }
   [StructLayout(LayoutKind.Sequential)] public struct BY_HANDLE_FILE_INFORMATION {
     public uint FileAttributes; public System.Runtime.InteropServices.ComTypes.FILETIME CreationTime, LastAccessTime, LastWriteTime;
@@ -105,15 +124,18 @@ public static class NativeBoundary {
   static IntPtr Open(IntPtr root, string name, bool directory, bool create, byte[] descriptor) { return OpenWithStatus(root, name, directory, create, descriptor).Handle; }
   public static IntPtr OpenRoot(string path) { return Open(IntPtr.Zero, "\\??\\" + path, true, false, null); }
   public static IntPtr CreateRelative(IntPtr root, string component, bool directory, byte[] descriptor) { return Open(root, component, directory, true, descriptor); }
+  public static NativeOpenResult CreateRelativeWithStatus(IntPtr root, string component, bool directory, byte[] descriptor) { return OpenWithStatus(root, component, directory, true, descriptor); }
   public static IntPtr OpenRelative(IntPtr root, string component, bool directory) { return Open(root, component, directory, false, null); }
   public static NativeOpenResult OpenRelativeWithStatus(IntPtr root, string component, bool directory) { return OpenWithStatus(root, component, directory, false, null); }
   public static uint StatusObjectNameNotFound() { return STATUS_OBJECT_NAME_NOT_FOUND; }
   public static bool Close(IntPtr handle) { return handle != IntPtr.Zero && CloseHandle(handle); }
+  public static uint CloseWithCode(IntPtr handle) { if (handle == IntPtr.Zero) return 0; return CloseHandle(handle) ? 0 : (uint)Marshal.GetLastWin32Error(); }
   public static string Identity(IntPtr handle) { BY_HANDLE_FILE_INFORMATION info; if (!GetFileInformationByHandle(handle, out info)) throw new Win32Exception(Marshal.GetLastWin32Error()); return info.VolumeSerialNumber.ToString("X8") + ":" + info.FileIndexHigh.ToString("X8") + info.FileIndexLow.ToString("X8"); }
+  public static NativeIdentityResult IdentityWithStatus(IntPtr handle) { BY_HANDLE_FILE_INFORMATION info; if (!GetFileInformationByHandle(handle, out info)) return new NativeIdentityResult(null, (uint)Marshal.GetLastWin32Error()); return new NativeIdentityResult(info.VolumeSerialNumber.ToString("X8") + ":" + info.FileIndexHigh.ToString("X8") + info.FileIndexLow.ToString("X8"), 0); }
   public static byte[] ReadDacl(IntPtr handle) { IntPtr owner, group, dacl, sacl, descriptor = IntPtr.Zero; uint status = GetSecurityInfo(handle, SE_FILE_OBJECT, DACL_SECURITY_INFORMATION, out owner, out group, out dacl, out sacl, out descriptor); if (status != 0 || descriptor == IntPtr.Zero) throw new Win32Exception((int)status); try { uint length = GetSecurityDescriptorLength(descriptor); if (length == 0 || length > 65536) throw new InvalidOperationException(); byte[] bytes = new byte[length]; Marshal.Copy(descriptor, bytes, 0, (int)length); return bytes; } finally { LocalFree(descriptor); } }
-  static int SetInfo(IntPtr handle, int infoClass, IntPtr memory, uint length) { return SetFileInformationByHandle(handle, infoClass, memory, length) ? 0 : Marshal.GetLastWin32Error(); }
-  public static int RenameNoReplace(IntPtr file, IntPtr root, string name) { byte[] chars = System.Text.Encoding.Unicode.GetBytes(name); int header = IntPtr.Size == 8 ? 20 : 12; IntPtr memory = Marshal.AllocHGlobal(header + chars.Length); try { for (int i = 0; i < header + chars.Length; i++) Marshal.WriteByte(memory, i, 0); Marshal.WriteIntPtr(memory, IntPtr.Size == 8 ? 8 : 4, root); Marshal.WriteInt32(memory, IntPtr.Size == 8 ? 16 : 8, chars.Length); Marshal.Copy(chars, 0, IntPtr.Add(memory, header), chars.Length); return SetInfo(file, FileRenameInfo, memory, (uint)(header + chars.Length)); } finally { Marshal.FreeHGlobal(memory); } }
-  public static int MarkDelete(IntPtr file) { IntPtr memory = Marshal.AllocHGlobal(1); try { Marshal.WriteByte(memory, 1); return SetInfo(file, FileDispositionInfo, memory, 1); } finally { Marshal.FreeHGlobal(memory); } }
+  static uint SetInfo(IntPtr handle, int infoClass, IntPtr memory, uint length) { return SetFileInformationByHandle(handle, infoClass, memory, length) ? 0 : unchecked((uint)Marshal.GetLastWin32Error()); }
+  public static uint RenameNoReplace(IntPtr file, IntPtr root, string name) { byte[] chars = System.Text.Encoding.Unicode.GetBytes(name); int header = IntPtr.Size == 8 ? 20 : 12; IntPtr memory = Marshal.AllocHGlobal(header + chars.Length); try { for (int i = 0; i < header + chars.Length; i++) Marshal.WriteByte(memory, i, 0); Marshal.WriteIntPtr(memory, IntPtr.Size == 8 ? 8 : 4, root); Marshal.WriteInt32(memory, IntPtr.Size == 8 ? 16 : 8, chars.Length); Marshal.Copy(chars, 0, IntPtr.Add(memory, header), chars.Length); return SetInfo(file, FileRenameInfo, memory, (uint)(header + chars.Length)); } finally { Marshal.FreeHGlobal(memory); } }
+  public static uint MarkDelete(IntPtr file) { IntPtr memory = Marshal.AllocHGlobal(1); try { Marshal.WriteByte(memory, 1); return SetInfo(file, FileDispositionInfo, memory, 1); } finally { Marshal.FreeHGlobal(memory); } }
 }
 '@
 	$elevated = [NativeBoundary]::TokenElevated()
@@ -160,18 +182,101 @@ public static class NativeBoundary {
 				$stage = 'dacl'; Assert-CurrentFullControl (Read-HandleSecurity $rootHandle $true); Assert-CurrentFullControl (Read-HandleSecurity $anchor $true); Assert-CurrentFullControl (Read-HandleSecurity $original $false)
 				$pipeSecurity = [IO.Pipes.PipeSecurity]::new(); $pipeSecurity.SetAccessRuleProtection($true, $false); $pipeSecurity.AddAccessRule([IO.Pipes.PipeAccessRule]::new($sid, [IO.Pipes.PipeAccessRights]::FullControl, [Security.AccessControl.AccessControlType]::Allow)); $pipe = [IO.Pipes.NamedPipeServerStream]::new(('gentle-native-' + [Guid]::NewGuid().ToString('N')), [IO.Pipes.PipeDirection]::InOut, 1, [IO.Pipes.PipeTransmissionMode]::Byte, [IO.Pipes.PipeOptions]::Asynchronous, 0, 0, $pipeSecurity); try { Assert-CurrentPipeFullControl ($pipe.GetAccessControl()) } finally { $pipe.Dispose() }
 				$stage = 'identity'; $originalIdentity = [NativeBoundary]::Identity($original); $sameOriginal = [NativeBoundary]::OpenRelative($anchor, 'record.tmp', $false); if ($sameOriginal -eq [IntPtr]::Zero) { throw 'identity' }; try { if ($originalIdentity -ne [NativeBoundary]::Identity($sameOriginal)) { throw 'identity' } } finally { [NativeBoundary]::Close($sameOriginal) | Out-Null }
-				$stage = 'replace-delete'; $destination = [NativeBoundary]::CreateRelative($anchor, 'activation.json', $false, $descriptor); if ($destination -eq [IntPtr]::Zero) { throw 'replace-delete' }; try { $destinationIdentity = [NativeBoundary]::Identity($destination); $collision = [NativeBoundary]::RenameNoReplace($original, $anchor, 'activation.json'); if ($collision -notin @(80, 183)) { throw 'replace-delete' }; $recordCheck = [NativeBoundary]::OpenRelative($anchor, 'record.tmp', $false); $destinationCheck = [NativeBoundary]::OpenRelative($anchor, 'activation.json', $false); try { if ($recordCheck -eq [IntPtr]::Zero -or $destinationCheck -eq [IntPtr]::Zero -or $originalIdentity -ne [NativeBoundary]::Identity($recordCheck) -or $destinationIdentity -ne [NativeBoundary]::Identity($destinationCheck)) { throw 'replace-delete' } } finally { [NativeBoundary]::Close($recordCheck) | Out-Null; [NativeBoundary]::Close($destinationCheck) | Out-Null }
-					$tombstone = 'tombstone-' + [Guid]::NewGuid().ToString('N'); if ([NativeBoundary]::RenameNoReplace($original, $anchor, $tombstone) -ne 0) { throw 'replace-delete' }; $replacement = [NativeBoundary]::CreateRelative($anchor, 'record.tmp', $false, $descriptor); if ($replacement -eq [IntPtr]::Zero) { throw 'replace-delete' }; try { $replacementIdentity = [NativeBoundary]::Identity($replacement); if ($replacementIdentity -eq $originalIdentity -or [NativeBoundary]::MarkDelete($original) -ne 0) { throw 'replace-delete' }; $replacementCheck = [NativeBoundary]::OpenRelative($anchor, 'record.tmp', $false); try { if ($replacementCheck -eq [IntPtr]::Zero -or $replacementIdentity -ne [NativeBoundary]::Identity($replacementCheck)) { throw 'replace-delete' } } finally { [NativeBoundary]::Close($replacementCheck) | Out-Null } } finally { [NativeBoundary]::Close($replacement) | Out-Null }
-				} finally { [NativeBoundary]::Close($destination) | Out-Null }
-				[NativeBoundary]::Close($original) | Out-Null
+				$stage = 'replace-delete'
+				Set-ReplaceDeleteDiagnostic 'initial-target-create'
+				$destinationResult = [NativeBoundary]::CreateRelativeWithStatus($anchor, 'activation.json', $false, $descriptor)
+				$destination = $destinationResult.Handle
+				if ($destination -eq [IntPtr]::Zero) {
+					if ($destinationResult.Status -ne 0) { Set-ReplaceDeleteDiagnostic 'initial-target-create' 'ntstatus' $destinationResult.Status }
+					throw 'replace-delete'
+				}
+				try {
+					Set-ReplaceDeleteDiagnostic 'source-target-identity-preservation'
+					$destinationIdentityResult = [NativeBoundary]::IdentityWithStatus($destination)
+					if ($destinationIdentityResult.Error -ne 0) { Set-ReplaceDeleteDiagnostic 'source-target-identity-preservation' 'win32' $destinationIdentityResult.Error; throw 'replace-delete' }
+					$destinationIdentity = $destinationIdentityResult.Value
+
+					Set-ReplaceDeleteDiagnostic 'rename-collision'
+					$collision = [NativeBoundary]::RenameNoReplace($original, $anchor, 'activation.json')
+					if ($collision -notin @(80, 183)) { Set-ReplaceDeleteDiagnostic 'rename-collision' 'win32' $collision; throw 'replace-delete' }
+
+					Set-ReplaceDeleteDiagnostic 'source-target-identity-preservation'
+					$recordCheckResult = [NativeBoundary]::OpenRelativeWithStatus($anchor, 'record.tmp', $false)
+					$destinationCheckResult = [NativeBoundary]::OpenRelativeWithStatus($anchor, 'activation.json', $false)
+					$recordCheck = $recordCheckResult.Handle
+					$destinationCheck = $destinationCheckResult.Handle
+					try {
+						if ($recordCheck -eq [IntPtr]::Zero) { if ($recordCheckResult.Status -ne 0) { Set-ReplaceDeleteDiagnostic 'source-target-identity-preservation' 'ntstatus' $recordCheckResult.Status }; throw 'replace-delete' }
+						if ($destinationCheck -eq [IntPtr]::Zero) { if ($destinationCheckResult.Status -ne 0) { Set-ReplaceDeleteDiagnostic 'source-target-identity-preservation' 'ntstatus' $destinationCheckResult.Status }; throw 'replace-delete' }
+						$recordIdentityResult = [NativeBoundary]::IdentityWithStatus($recordCheck)
+						if ($recordIdentityResult.Error -ne 0) { Set-ReplaceDeleteDiagnostic 'source-target-identity-preservation' 'win32' $recordIdentityResult.Error; throw 'replace-delete' }
+						$destinationCheckIdentityResult = [NativeBoundary]::IdentityWithStatus($destinationCheck)
+						if ($destinationCheckIdentityResult.Error -ne 0) { Set-ReplaceDeleteDiagnostic 'source-target-identity-preservation' 'win32' $destinationCheckIdentityResult.Error; throw 'replace-delete' }
+						if ($originalIdentity -ne $recordIdentityResult.Value -or $destinationIdentity -ne $destinationCheckIdentityResult.Value) { throw 'replace-delete' }
+					} finally {
+						[NativeBoundary]::Close($recordCheck) | Out-Null
+						[NativeBoundary]::Close($destinationCheck) | Out-Null
+					}
+
+					$tombstone = 'tombstone-' + [Guid]::NewGuid().ToString('N')
+					Set-ReplaceDeleteDiagnostic 'tombstone-rename'
+					$tombstoneRename = [NativeBoundary]::RenameNoReplace($original, $anchor, $tombstone)
+					if ($tombstoneRename -ne 0) { Set-ReplaceDeleteDiagnostic 'tombstone-rename' 'win32' $tombstoneRename; throw 'replace-delete' }
+
+					Set-ReplaceDeleteDiagnostic 'replacement-create'
+					$replacementResult = [NativeBoundary]::CreateRelativeWithStatus($anchor, 'record.tmp', $false, $descriptor)
+					$replacement = $replacementResult.Handle
+					if ($replacement -eq [IntPtr]::Zero) { if ($replacementResult.Status -ne 0) { Set-ReplaceDeleteDiagnostic 'replacement-create' 'ntstatus' $replacementResult.Status }; throw 'replace-delete' }
+					try {
+						Set-ReplaceDeleteDiagnostic 'replacement-identity'
+						$replacementIdentityResult = [NativeBoundary]::IdentityWithStatus($replacement)
+						if ($replacementIdentityResult.Error -ne 0) { Set-ReplaceDeleteDiagnostic 'replacement-identity' 'win32' $replacementIdentityResult.Error; throw 'replace-delete' }
+						$replacementIdentity = $replacementIdentityResult.Value
+						if ($replacementIdentity -eq $originalIdentity) { throw 'replace-delete' }
+
+						Set-ReplaceDeleteDiagnostic 'mark-delete'
+						$markDelete = [NativeBoundary]::MarkDelete($original)
+						if ($markDelete -ne 0) { Set-ReplaceDeleteDiagnostic 'mark-delete' 'win32' $markDelete; throw 'replace-delete' }
+
+						Set-ReplaceDeleteDiagnostic 'replacement-identity'
+						$replacementCheckResult = [NativeBoundary]::OpenRelativeWithStatus($anchor, 'record.tmp', $false)
+						$replacementCheck = $replacementCheckResult.Handle
+						try {
+							if ($replacementCheck -eq [IntPtr]::Zero) { if ($replacementCheckResult.Status -ne 0) { Set-ReplaceDeleteDiagnostic 'replacement-identity' 'ntstatus' $replacementCheckResult.Status }; throw 'replace-delete' }
+							$replacementCheckIdentityResult = [NativeBoundary]::IdentityWithStatus($replacementCheck)
+							if ($replacementCheckIdentityResult.Error -ne 0) { Set-ReplaceDeleteDiagnostic 'replacement-identity' 'win32' $replacementCheckIdentityResult.Error; throw 'replace-delete' }
+							if ($replacementIdentity -ne $replacementCheckIdentityResult.Value) { throw 'replace-delete' }
+						} finally {
+							[NativeBoundary]::Close($replacementCheck) | Out-Null
+						}
+					} finally {
+						[NativeBoundary]::Close($replacement) | Out-Null
+					}
+				} finally {
+					[NativeBoundary]::Close($destination) | Out-Null
+				}
+
+				Set-ReplaceDeleteDiagnostic 'original-close'
+				$originalClose = [NativeBoundary]::CloseWithCode($original)
+				if ($originalClose -ne 0) { Set-ReplaceDeleteDiagnostic 'original-close' 'win32' $originalClose; throw 'replace-delete' }
 				$original = [IntPtr]::Zero
+
+				Set-ReplaceDeleteDiagnostic 'tombstone-absence-status'
 				$tombstoneResult = [NativeBoundary]::OpenRelativeWithStatus($anchor, $tombstone, $false)
 				if ($tombstoneResult.Handle -ne [IntPtr]::Zero) { [NativeBoundary]::Close($tombstoneResult.Handle) | Out-Null; throw 'replace-delete' }
-				if ($tombstoneResult.Status -ne [NativeBoundary]::StatusObjectNameNotFound()) { throw 'replace-delete' }
-				$postCloseReplacement = [NativeBoundary]::OpenRelative($anchor, 'record.tmp', $false)
+				if ($tombstoneResult.Status -ne [NativeBoundary]::StatusObjectNameNotFound()) { Set-ReplaceDeleteDiagnostic 'tombstone-absence-status' 'ntstatus' $tombstoneResult.Status; throw 'replace-delete' }
+
+				Set-ReplaceDeleteDiagnostic 'postclose-replacement'
+				$postCloseReplacementResult = [NativeBoundary]::OpenRelativeWithStatus($anchor, 'record.tmp', $false)
+				$postCloseReplacement = $postCloseReplacementResult.Handle
 				try {
-					if ($postCloseReplacement -eq [IntPtr]::Zero -or $replacementIdentity -ne [NativeBoundary]::Identity($postCloseReplacement)) { throw 'replace-delete' }
-				} finally { [NativeBoundary]::Close($postCloseReplacement) | Out-Null }
+					if ($postCloseReplacement -eq [IntPtr]::Zero) { if ($postCloseReplacementResult.Status -ne 0) { Set-ReplaceDeleteDiagnostic 'postclose-replacement' 'ntstatus' $postCloseReplacementResult.Status }; throw 'replace-delete' }
+					$postCloseReplacementIdentityResult = [NativeBoundary]::IdentityWithStatus($postCloseReplacement)
+					if ($postCloseReplacementIdentityResult.Error -ne 0) { Set-ReplaceDeleteDiagnostic 'postclose-replacement' 'win32' $postCloseReplacementIdentityResult.Error; throw 'replace-delete' }
+					if ($replacementIdentity -ne $postCloseReplacementIdentityResult.Value) { throw 'replace-delete' }
+				} finally {
+					[NativeBoundary]::Close($postCloseReplacement) | Out-Null
+				}
 				$stage = 'reparse-negative'; $junction = Join-Path $root 'junction'; New-Item -ItemType Junction -Path $junction -Target (Join-Path $root 'anchor') | Out-Null; $throughJunction = [NativeBoundary]::OpenRelative($rootHandle, 'junction\record.tmp', $false); if ($throughJunction -ne [IntPtr]::Zero) { [NativeBoundary]::Close($throughJunction) | Out-Null; throw 'reparse-negative' }; [IO.Directory]::Delete($junction, $false); $junction = $null
 				$completed = $true
 			} finally { [NativeBoundary]::Close($original) | Out-Null }
