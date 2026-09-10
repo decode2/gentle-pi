@@ -40,6 +40,57 @@ test("native-boundary runner waits for final output, cleanup delay, and normal e
 	assert.equal(child.signalCode, null);
 });
 
+test("native-boundary runner exposes only an allowlisted stage for a nonzero native failure", async () => {
+	const rawDetail = "S-1-5-21-untrusted";
+	const failed = JSON.stringify({ schema: "gentle-pi.windows-native-boundary/v1", ok: false, stage: "dacl", architecture: "x64", elevated: false });
+	const fixture = injected(`process.stdout.write(${JSON.stringify(`${failed}\n`)}); process.stderr.write(${JSON.stringify(rawDetail)}); process.exit(2)`);
+	await assert.rejects(fixture.operation, (error: Error) => {
+		assert.match(error.message, /^native-boundary host failed \(category: nonzero-exit\) \(stage: dacl\)$/);
+		assert.doesNotMatch(error.message, /S-1-5-21-untrusted/);
+		return true;
+	});
+	const child = fixture.child();
+	assert.ok(child.exitCode !== null || child.signalCode !== null);
+});
+
+test("native-boundary runner rejects malformed failure details and never passes an ok false result", async () => {
+	const rawDetail = "S-1-5-21-untrusted";
+	for (const output of [
+		JSON.stringify({ schema: "gentle-pi.windows-native-boundary/v1", ok: false, stage: "unknown", architecture: "x64", elevated: false }),
+		JSON.stringify({ schema: "gentle-pi.windows-native-boundary/v1", ok: false, stage: "dacl", architecture: "x64", elevated: false, detail: rawDetail }),
+	]) {
+		const fixture = injected(`process.stdout.write(${JSON.stringify(`${output}\n`)}); process.exit(2)`);
+		await assert.rejects(fixture.operation, (error: Error) => {
+			assert.match(error.message, /malformed native-boundary result/);
+			assert.doesNotMatch(error.message, /S-1-5-21-untrusted/);
+			return true;
+		});
+		const child = fixture.child();
+		assert.ok(child.exitCode !== null || child.signalCode !== null);
+	}
+	const failed = JSON.stringify({ schema: "gentle-pi.windows-native-boundary/v1", ok: false, stage: "cleanup", architecture: "x64", elevated: false });
+	const fixture = injected(`process.stdout.write(${JSON.stringify(`${failed}\n`)}); process.exit(0)`);
+	await assert.rejects(fixture.operation, (error: Error) => {
+		assert.match(error.message, /^native-boundary host failed \(category: host-failure\) \(stage: cleanup\)$/);
+		return true;
+	});
+	const child = fixture.child();
+	assert.ok(child.exitCode !== null || child.signalCode !== null);
+	const signalled = injected(`process.stdout.write(${JSON.stringify(`${result}\n`)}); setTimeout(() => process.kill(process.pid, "SIGTERM"), 5)`);
+	await assert.rejects(signalled.operation, (error: Error) => {
+		const terminatedChild = signalled.child();
+			const category = terminatedChild.signalCode !== null ? "signal" : "nonzero-exit";
+			if (terminatedChild.signalCode === null) {
+				assert.notEqual(terminatedChild.exitCode, null);
+				assert.notEqual(terminatedChild.exitCode, 0);
+			}
+			assert.equal(error.message, `native-boundary host failed (category: ${category}) (stage: complete)`);
+		return true;
+	});
+	const signalledChild = signalled.child();
+	assert.ok(signalledChild.exitCode !== null || signalledChild.signalCode !== null);
+});
+
 for (const [name, source, timeoutMs, expected] of [
 	["malformed", "process.stdout.write('not json\\n'); process.exit(2)", 150, /malformed/],
 	["oversized", "process.stdout.write('x'.repeat(16385)); process.exit(2)", 150, /malformed/],

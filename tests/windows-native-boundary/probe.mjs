@@ -57,7 +57,8 @@ export function runNativeBoundaryFixture({ script, timeoutMs = 15_000, command =
 			if (abortError) { settle(abortError); return; }
 			let result;
 			try { result = parseFixtureLine(stdout.toString("utf8")); } catch (error) { settle(error); return; }
-			if (signal !== null || code !== 0 || !result.ok) { settle(new Error("native-boundary host failed")); return; }
+			const category = signal !== null ? "signal" : code !== 0 ? "nonzero-exit" : !result.ok ? "host-failure" : undefined;
+			if (category) { settle(new Error(`native-boundary host failed (category: ${category}) (stage: ${result.stage})`)); return; }
 			settle(undefined, result);
 		});
 	});
