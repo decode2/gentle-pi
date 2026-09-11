@@ -424,6 +424,115 @@ test("Options closes an active custom editor without losing its draft, including
 	}] });
 });
 
+test("Ctrl+] collapses a custom draft to only the privacy hint, restores it, and Escape cancels", () => {
+	const outcomes: unknown[] = [];
+	const { component } = view((outcome) => outcomes.push(outcome));
+	component.handleInput("\t");
+	component.handleInput("private draft");
+	component.handleInput("\u001d");
+
+	const collapsed = component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean);
+	assert.deepEqual(collapsed, ["Ctrl+] to expand · Esc to cancel"]);
+	assert.equal(outcomes.length, 0, "collapsing never completes the questionnaire");
+
+	component.handleInput("\u001d");
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /private draft/, "expanding restores the exact active draft");
+	component.handleInput("\u001d");
+	component.handleInput("\u001b");
+	assert.deepEqual(outcomes, [{ correlationId: "view-correlation", cancelled: true, answers: [] }]);
+});
+
+test("collapsed input and stale mouse controls cannot modify or complete a custom draft", async () => {
+	const outcomes: unknown[] = [];
+	const externalCalls: string[] = [];
+	const component = new QuestionnaireTuiPresentation({
+		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme,
+		onDone: (outcome) => outcomes.push(outcome), externalEditor: async (draft) => { externalCalls.push(draft); return draft; },
+	});
+	const expanded = component.render(48);
+	const nextY = expanded.findIndex((line) => stripTerminalSequences(line).includes("Next"));
+	assert.ok(nextY >= 0, "the expanded frame has a Next hit target before collapse");
+	component.handleInput("\t");
+	component.handleInput("private draft");
+	component.handleInput("\u001d");
+	assert.equal(component.handleMouse(mouse(48, nextY, expanded.length)), undefined, "retired Next geometry is inert while collapsed");
+	component.handleInput("n");
+	component.handleInput("s");
+	component.handleInput("\t");
+	component.handleInput("]");
+	component.handleInput("\r");
+	component.handleInput("\u0007");
+	await Promise.resolve();
+	assert.equal(outcomes.length, 0, "collapsed commands never complete the questionnaire");
+	assert.deepEqual(externalCalls, [], "collapsed Ctrl+G never launches the external editor");
+	component.handleInput("\u001d");
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Question 1:[\s\S]*private draft/, "expansion restores the unchanged question and draft");
+});
+
+test("active bracketed paste owns Ctrl+] until the paste closes", () => {
+	const { component } = view();
+	component.handleInput("\t");
+	component.handleInput("\u001b[200~paste\u001d");
+	assert.doesNotMatch(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc to cancel/, "a configured key inside an active paste is editor data");
+	component.handleInput("tail\u001b[201~");
+	component.handleInput("\u001d");
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
+});
+
+test("collapsed hint is localized and remains one width-safe line", () => {
+	const component = new QuestionnaireTuiPresentation({
+		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {},
+		localize: (key, fallback) => key === "chrome.collapsed.hint" ? "{key} erweitern · Esc abbrechen" : fallback,
+	});
+	component.handleInput("\u001d");
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] erweitern · Esc abbrechen"]);
+	const narrow = component.render(8);
+	assert.equal(narrow.length, 1, "collapsed output never leaves stale rows at narrow widths");
+	assert.ok(narrow.every((line) => visibleWidth(line) <= 8), "collapsed output is width-safe");
+});
+
+test("complete bracketed paste while collapsed cannot change a custom draft", () => {
+	const outcomes: unknown[] = [];
+	const { component } = view((outcome) => outcomes.push(outcome));
+	component.handleInput("\t");
+	component.handleInput("original");
+	component.handleInput("\u001d");
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
+	component.handleInput("\u001b[200~hidden\u001b[201~");
+	component.handleInput("\u001d");
+	const expanded = stripTerminalSequences(component.render(48).join("\n"));
+	assert.match(expanded, /original/);
+	assert.doesNotMatch(expanded, /hidden/);
+	assert.equal(outcomes.length, 0, "hidden paste never completes the questionnaire");
+});
+
+test("Ctrl+] expands immediately instead of buffering unfinished collapsed paste", () => {
+	const { component } = view();
+	component.handleInput("\t");
+	component.handleInput("original");
+	component.handleInput("\u001d");
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
+	component.handleInput("\u001b[200~hidden");
+	component.handleInput("\u001d");
+	const expanded = stripTerminalSequences(component.render(48).join("\n"));
+	assert.doesNotMatch(expanded, /to expand · Esc to cancel/);
+	assert.match(expanded, /original/);
+	assert.doesNotMatch(expanded, /hidden/);
+});
+
+test("Escape cancels once instead of buffering unfinished collapsed paste", () => {
+	const outcomes: unknown[] = [];
+	const { component } = view((outcome) => outcomes.push(outcome));
+	component.handleInput("\t");
+	component.handleInput("original");
+	component.handleInput("\u001d");
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
+	component.handleInput("\u001b[200~hidden");
+	component.handleInput("\u001b");
+	component.handleInput("\u001b");
+	assert.deepEqual(outcomes, [{ correlationId: "view-correlation", cancelled: true, answers: [] }]);
+});
+
 test("renders only static questionnaire chrome through an injected localizer", () => {
 	let german = true;
 	const localize = (key: string, fallback: string) => german ? ({

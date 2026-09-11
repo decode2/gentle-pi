@@ -75,6 +75,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	private finishing = false;
 	private disposed = false;
 	private externalEditorPending: { readonly editor: Editor; readonly questionIndex: number } | undefined;
+	private collapsed = false;
 	private _focused = false;
 
 	get focused(): boolean { return this._focused; }
@@ -107,7 +108,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	}
 
 	override handleMouse(event: TuiMouseEvent): FullscreenMouseResult {
-		if (this.disposed || this.renderedWidth === undefined || this.renderedTerminalRows === undefined || this.renderedHeight === undefined ||
+		if (this.disposed || this.collapsed || this.renderedWidth === undefined || this.renderedTerminalRows === undefined || this.renderedHeight === undefined ||
 			Math.max(0, Math.floor(this.presentationOptions.tui.terminal.rows)) !== this.renderedTerminalRows ||
 			event.width !== this.renderedWidth || event.height !== this.renderedHeight) return undefined;
 		if (event.type === "wheel") {
@@ -139,6 +140,14 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (this.disposed) return [];
 		const bounded = Math.max(0, Math.floor(width));
 		const terminalRows = Math.max(0, Math.floor(this.presentationOptions.tui.terminal.rows));
+		if (this.collapsed) {
+			if (bounded === 0 || terminalRows === 0) return [];
+			this.renderedWidth = bounded;
+			this.renderedTerminalRows = terminalRows;
+			this.renderedHeight = 1;
+			const hint = this.localize("chrome.collapsed.hint", "{key} to expand · Esc to cancel").replaceAll("{key}", "Ctrl+]");
+			return [truncateToWidth(this.presentationOptions.theme.fg("dim", hint), bounded)];
+		}
 		if (bounded !== this.renderedWidth || terminalRows !== this.renderedTerminalRows) {
 			this.renderedWidth = undefined;
 			this.renderedTerminalRows = undefined;
@@ -205,9 +214,15 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 
 	private routeInput(data: string): void {
 		if (this.disposed || isKeyRelease(data)) return;
+		if (this.collapsed) {
+			if (matchesKey(data, "ctrl+]")) this.toggleCollapsed();
+			else if (matchesKey(data, "escape")) this.finish({ type: "cancel" });
+			return;
+		}
+		if (this.editing && (this.pasteActive || data.includes("\u001b[200~"))) return this.handleEditorInput(data);
+		if (matchesKey(data, "ctrl+]")) return this.toggleCollapsed();
 		if (this.editing) {
-			if (this.pasteActive || data.includes("\u001b[200~")) this.handleEditorInput(data);
-			else if (this.editing === "custom" && matchesKey(data, "ctrl+g")) this.launchExternalEditor();
+			if (this.editing === "custom" && matchesKey(data, "ctrl+g")) this.launchExternalEditor();
 			else if (matchesKey(data, "escape")) this.closeEditor();
 			else if (matchesKey(data, "enter")) this.editor!.insertTextAtCursor("\n");
 			else this.handleEditorInput(data);
@@ -225,6 +240,12 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	private observeMouse(method: "beforeMouse" | "afterMouse", event: TuiMouseEvent): void {
 		this.pointerScope.createMouseObserver(() => this.presentationOptions.tui.requestRender())[method](event);
 		this.optionControl?.createMouseObserver(() => this.presentationOptions.tui.requestRender())[method](event);
+	}
+
+	private toggleCollapsed(): void {
+		this.collapsed = !this.collapsed;
+		this.rebuild();
+		this.presentationOptions.tui.requestRender();
 	}
 
 	private dispatch(action: QuestionnairePresentationAction): void {
