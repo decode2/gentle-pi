@@ -1,0 +1,11 @@
+{
+  "chrome.question.prefix": "问题 {index}：",
+  "chrome.tab.options": "选项",
+  "chrome.tab.custom": "自定义回答",
+  "chrome.custom.response": "自定义回答：",
+  "chrome.editor.custom": "自定义回答（Esc 保留草稿）",
+  "chrome.primary.next": "下一步",
+  "chrome.primary.submit": "提交",
+  "chrome.cancel": "取消",
+  "chrome.preview.caption": "预览："
+}

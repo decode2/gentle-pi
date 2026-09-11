@@ -1,0 +1,11 @@
+{
+  "chrome.question.prefix": "Pregunta {index}:",
+  "chrome.tab.options": "Opciones",
+  "chrome.tab.custom": "Respuesta personalizada",
+  "chrome.custom.response": "Respuesta personalizada:",
+  "chrome.editor.custom": "Respuesta personalizada (Esc conserva el borrador)",
+  "chrome.primary.next": "Siguiente",
+  "chrome.primary.submit": "Enviar",
+  "chrome.cancel": "Cancelar",
+  "chrome.preview.caption": "Vista previa:"
+}

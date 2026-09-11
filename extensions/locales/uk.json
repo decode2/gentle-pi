@@ -1,0 +1,11 @@
+{
+  "chrome.question.prefix": "Питання {index}:",
+  "chrome.tab.options": "Варіанти",
+  "chrome.tab.custom": "Власна відповідь",
+  "chrome.custom.response": "Власна відповідь:",
+  "chrome.editor.custom": "Власна відповідь (Esc зберігає чернетку)",
+  "chrome.primary.next": "Далі",
+  "chrome.primary.submit": "Надіслати",
+  "chrome.cancel": "Скасувати",
+  "chrome.preview.caption": "Попередній перегляд:"
+}

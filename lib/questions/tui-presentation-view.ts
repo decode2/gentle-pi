@@ -16,6 +16,7 @@ import {
 import { NativeFullscreenInteraction } from "../native-fullscreen-interaction.ts";
 import { NativePointerScope } from "../native-pointer-region.ts";
 import type { FrozenQuestionnaireRequest, RawQuestionnaireOutcome } from "./contract.ts";
+import type { QuestionnaireLocalizer } from "./localization.ts";
 import { QuestionOptionControl, type QuestionOptionControlAction } from "./option-control.ts";
 import {
 	createQuestionnairePresentationState,
@@ -38,6 +39,7 @@ export interface QuestionnaireTuiPresentationOptions {
 	readonly tui: TUI;
 	readonly theme: QuestionnaireTuiPresentationTheme;
 	readonly keybindings?: KeybindingsManager;
+	readonly localize?: QuestionnaireLocalizer;
 	readonly onDone: (outcome: RawQuestionnaireOutcome) => void;
 }
 
@@ -387,35 +389,39 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 			super.clear();
 			const { request, activeQuestionIndex: index } = this.state;
 			const question = request.questions[index]!;
-		for (const [itemIndex, item] of request.questions.entries()) {
-			this.addChild(this.clickable(`${itemIndex === index ? "●" : "○"} ${itemIndex + 1}. ${display(item.header)}`, () => this.focusQuestion(itemIndex)));
-		}
-		this.addChild(new Text(this.presentationOptions.theme.bold(`Question ${index + 1}: ${display(question.question)}`), 1, 0));
-		const optionTab = this.state.tabs[index] === "options" ? "[Options]" : "Options";
-		const customTab = this.state.tabs[index] === "custom" ? "[Custom answer]" : "Custom answer";
-		this.addChild(this.clickable(optionTab, () => this.setTab("options")));
-		this.addChild(this.clickable(customTab, () => this.setTab("custom")));
-		if (this.editing) {
-			this.addChild(new Text(this.presentationOptions.theme.fg("muted", editorLabel(this.editing)), 1, 0));
-			this.addChild(this.editor!);
-		} else if (this.state.tabs[index] === "custom") {
-			this.addChild(new Text(this.presentationOptions.theme.fg("muted", `Custom response: ${display(this.state.customDrafts[index] ?? "")}`), 1, 0));
-		} else {
-			this.optionControl = new QuestionOptionControl({
-				items: question.options.map((option, optionIndex) => ({ id: String(optionIndex), ...option })),
-				multiSelect: question.multiSelect,
-				selectedIds: question.multiSelect
-					? question.options.flatMap((option, optionIndex) => this.state.multiSelections[index]!.includes(option.label) ? [String(optionIndex)] : [])
-					: question.options.flatMap((option, optionIndex) => this.state.optionSelections[index] === option.label ? [String(optionIndex)] : []),
-				focusedId: this.optionFocus?.questionIndex === index ? this.optionFocus.id : undefined,
-				theme: optionTheme(this.presentationOptions.theme), keybindings: this.presentationOptions.keybindings,
-				onAction: (action) => this.handleOption(action), onCancel: () => this.finish({ type: "cancel" }),
-			});
-			this.addChild(this.optionControl);
-		}
-		const primary = index === request.questions.length - 1 ? "Submit" : "Next";
-		this.addChild(this.clickable(primary, () => this.activatePrimary(), "primary"));
-		this.addChild(this.clickable("Cancel", () => this.finish({ type: "cancel" }), "cancel"));
+			for (const [itemIndex, item] of request.questions.entries()) {
+				this.addChild(this.clickable(`${itemIndex === index ? "●" : "○"} ${itemIndex + 1}. ${display(item.header)}`, () => this.focusQuestion(itemIndex)));
+			}
+			const prefix = this.localize("chrome.question.prefix", "Question {index}:").replaceAll("{index}", String(index + 1));
+			this.addChild(new Text(this.presentationOptions.theme.bold(`${prefix} ${display(question.question)}`), 1, 0));
+			const options = this.localize("chrome.tab.options", "Options");
+			const custom = this.localize("chrome.tab.custom", "Custom answer");
+			const optionTab = this.state.tabs[index] === "options" ? `[${options}]` : options;
+			const customTab = this.state.tabs[index] === "custom" ? `[${custom}]` : custom;
+			this.addChild(this.clickable(optionTab, () => this.setTab("options")));
+			this.addChild(this.clickable(customTab, () => this.setTab("custom")));
+			if (this.editing) {
+				this.addChild(new Text(this.presentationOptions.theme.fg("muted", editorLabel(this.editing, this.localize.bind(this))), 1, 0));
+				this.addChild(this.editor!);
+			} else if (this.state.tabs[index] === "custom") {
+				this.addChild(new Text(this.presentationOptions.theme.fg("muted", `${this.localize("chrome.custom.response", "Custom response:")} ${display(this.state.customDrafts[index] ?? "")}`), 1, 0));
+			} else {
+				this.optionControl = new QuestionOptionControl({
+					items: question.options.map((option, optionIndex) => ({ id: String(optionIndex), ...option })),
+					multiSelect: question.multiSelect,
+					selectedIds: question.multiSelect
+						? question.options.flatMap((option, optionIndex) => this.state.multiSelections[index]!.includes(option.label) ? [String(optionIndex)] : [])
+						: question.options.flatMap((option, optionIndex) => this.state.optionSelections[index] === option.label ? [String(optionIndex)] : []),
+					focusedId: this.optionFocus?.questionIndex === index ? this.optionFocus.id : undefined,
+					theme: optionTheme(this.presentationOptions.theme), keybindings: this.presentationOptions.keybindings, localize: this.presentationOptions.localize,
+					onAction: (action) => this.handleOption(action), onCancel: () => this.finish({ type: "cancel" }),
+				});
+				this.addChild(this.optionControl);
+			}
+			const primary = index === request.questions.length - 1
+				? this.localize("chrome.primary.submit", "Submit") : this.localize("chrome.primary.next", "Next");
+			this.addChild(this.clickable(primary, () => this.activatePrimary(), "primary"));
+			this.addChild(this.clickable(this.localize("chrome.cancel", "Cancel"), () => this.finish({ type: "cancel" }), "cancel"));
 		} finally {
 			this.rebuilding = false;
 		}
@@ -433,6 +439,15 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 				height: event.height,
 			},
 		};
+	}
+
+	private localize(key: string, fallback: string): string {
+		try {
+			const value = this.presentationOptions.localize?.(key, fallback);
+			return typeof value === "string" && value.trim().length > 0 ? value : fallback;
+		} catch {
+			return fallback;
+		}
 	}
 
 	private retireOptionControl(): void {
@@ -483,8 +498,9 @@ function optionTheme(theme: QuestionnaireTuiPresentationTheme) {
 	};
 }
 
-function editorLabel(editing: Exclude<Editing, undefined>): string {
-	return editing === "custom" ? "Custom response (Esc keeps draft)" : editing === "question-note" ? "Question note (Esc keeps draft)" : "Global note (Esc keeps draft)";
+function editorLabel(editing: Exclude<Editing, undefined>, localize: QuestionnaireLocalizer): string {
+	return editing === "custom" ? localize("chrome.editor.custom", "Custom response (Esc keeps draft)")
+		: editing === "question-note" ? "Question note (Esc keeps draft)" : "Global note (Esc keeps draft)";
 }
 
 const C1_STRING = /[\u0090\u0098\u009d\u009e\u009f][^\u0007\u009c]*(?:[\u0007\u009c]|$)/g;

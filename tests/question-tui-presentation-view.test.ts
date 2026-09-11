@@ -291,3 +291,39 @@ test("Options closes an active custom editor without losing its draft, including
 		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "custom", answer: "",
 	}] });
 });
+
+test("renders only static questionnaire chrome through an injected localizer", () => {
+	let german = true;
+	const localize = (key: string, fallback: string) => german ? ({
+		"chrome.question.prefix": "Frage {index}:",
+		"chrome.tab.options": "Optionen",
+		"chrome.tab.custom": "Eigene Antwort",
+		"chrome.custom.response": "Eigene Eingabe:",
+		"chrome.editor.custom": "Eigene Eingabe (Esc behält Entwurf)",
+		"chrome.primary.next": "Weiter",
+		"chrome.primary.submit": "Absenden",
+		"chrome.cancel": "Abbrechen",
+		"chrome.preview.caption": "Vorschau:",
+	}[key] ?? fallback) : fallback;
+	const component = new QuestionnaireTuiPresentation({
+		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {}, localize,
+	});
+
+	const translated = stripTerminalSequences(component.render(48).join("\n"));
+	assert.match(translated, /Frage 1:[\s\S]*Optionen[\s\S]*Eigene Antwort[\s\S]*Vorschau: exact preview[\s\S]*Weiter[\s\S]*Abbrechen/);
+	assert.match(translated, /Route[\s\S]*Choose a route[\s\S]*Direct[\s\S]*Fast[\s\S]*exact preview/, "request content remains byte-preserved");
+
+	component.handleInput("\t");
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Eigene Eingabe \(Esc behält Entwurf\)/, "the editor label is static chrome");
+	component.handleInput("\u001b");
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Eigene Eingabe:/, "the persisted custom label is static chrome");
+	component.handleInput("\t");
+	component.handleInput("\r");
+	component.handleInput("n");
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Frage 2:[\s\S]*Absenden[\s\S]*Abbrechen/, "the last-question primary label is static chrome");
+
+	german = false;
+	component.handleInput("\r");
+	const rebuilt = stripTerminalSequences(component.render(48).join("\n"));
+	assert.match(rebuilt, /Question 2:[\s\S]*Options[\s\S]*Custom answer[\s\S]*Submit[\s\S]*Cancel/);
+});

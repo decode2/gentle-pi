@@ -1,0 +1,11 @@
+{
+  "chrome.question.prefix": "Question {index} :",
+  "chrome.tab.options": "Options",
+  "chrome.tab.custom": "Réponse personnalisée",
+  "chrome.custom.response": "Réponse personnalisée :",
+  "chrome.editor.custom": "Réponse personnalisée (Échap conserve le brouillon)",
+  "chrome.primary.next": "Suivant",
+  "chrome.primary.submit": "Envoyer",
+  "chrome.cancel": "Annuler",
+  "chrome.preview.caption": "Aperçu :"
+}

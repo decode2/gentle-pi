@@ -3,6 +3,7 @@ import { Type } from "typebox";
 import { resolveGentlePiAgentHome } from "../lib/agent-home.ts";
 import { readQuestionOwnerConfig, type QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
 import { readQuestionnaireGuidanceConfig, type QuestionnaireGuidance } from "../lib/questions/guidance-config.ts";
+import { createQuestionnaireLocalizer, type QuestionnaireLocalizer } from "../lib/questions/localization.ts";
 import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
 import { createTuiQuestionPresentationDriver } from "../lib/questions/tui-presentation-driver.ts";
 import {
@@ -54,16 +55,22 @@ export interface AskUserQuestionDependencies {
 	resolveAgentHome: () => string;
 	readOwnerConfig: (agentHome: string) => Promise<QuestionOwnerConfigResolution>;
 	readGuidanceConfig?: (agentHome: string) => Promise<QuestionnaireGuidance>;
-	createPresentationDriver: (ui: QuestionnaireUi, mode: QuestionnaireMode) => QuestionPresentationDriver;
+	createLocalizer?: () => Promise<QuestionnaireLocalizer>;
+	createPresentationDriver: (ui: QuestionnaireUi, mode: QuestionnaireMode, localize?: QuestionnaireLocalizer) => QuestionPresentationDriver;
 }
 
 const defaultDependencies: AskUserQuestionDependencies = {
 	resolveAgentHome: resolveGentlePiAgentHome,
 	readOwnerConfig: readQuestionOwnerConfig,
 	readGuidanceConfig: readQuestionnaireGuidanceConfig,
-	createPresentationDriver: (ui, mode) => mode === "rpc"
+	createLocalizer: () => createQuestionnaireLocalizer({
+		loadProvider: () => import("@juicesharp/rpiv-i18n"),
+		loadLoader: () => import("@juicesharp/rpiv-i18n/loader"),
+		packageUrl: import.meta.url,
+	}),
+	createPresentationDriver: (ui, mode, localize) => mode === "rpc"
 		? createRpcQuestionPresentationDriver(ui)
-		: createTuiQuestionPresentationDriver(ui),
+		: createTuiQuestionPresentationDriver(ui, localize),
 };
 
 /** Factory seam for owner-safe, host-free extension tests. */
@@ -93,7 +100,13 @@ export function createAskUserQuestionExtension(
 			} catch {
 				// Optional guidance must not override an admitted owner decision.
 			}
-			pi.registerTool(questionnaireTool(pi, dependencies, guidance, () => busy, (value) => { busy = value; }));
+			let localize: QuestionnaireLocalizer = (_key, fallback) => fallback;
+			try {
+				localize = await dependencies.createLocalizer?.() ?? localize;
+			} catch {
+				// Optional localization must not prevent an owner-admitted registration.
+			}
+			pi.registerTool(questionnaireTool(pi, dependencies, guidance, localize, () => busy, (value) => { busy = value; }));
 			registered = true;
 			// Pi exposes no atomic reserve operation; a later dynamic collision remains host-owned.
 		});
@@ -104,6 +117,7 @@ function questionnaireTool(
 	pi: ExtensionAPI,
 	dependencies: AskUserQuestionDependencies,
 	guidance: QuestionnaireGuidance,
+	localize: QuestionnaireLocalizer,
 	isBusy: () => boolean,
 	setBusy: (value: boolean) => void,
 ): ToolDefinition<typeof ParametersSchema, QuestionnaireToolResult["details"]> {
@@ -135,7 +149,7 @@ function questionnaireTool(
 					})),
 				});
 				pi.events.emit(BLOCKED_EVENT, { active: true });
-				const outcome = await dependencies.createPresentationDriver(ctx.ui, ctx.mode).present(frozen.request, signal);
+				const outcome = await dependencies.createPresentationDriver(ctx.ui, ctx.mode, ctx.mode === "tui" ? localize : undefined).present(frozen.request, signal);
 				return validateAndFormat(frozen.request, outcome).result;
 			} finally {
 				setBusy(false);

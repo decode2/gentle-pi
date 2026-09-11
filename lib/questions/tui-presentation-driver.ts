@@ -5,6 +5,7 @@ import type {
 	QuestionPresentationDriver,
 	RawQuestionnaireOutcome,
 } from "./contract.ts";
+import type { QuestionnaireLocalizer } from "./localization.ts";
 import { QuestionnaireTuiPresentation } from "./tui-presentation-view.ts";
 import {
 	createQuestionnairePresentationState,
@@ -17,6 +18,7 @@ type DisposedComponent = Component & { dispose(): void };
 /** Bridges the public Pi custom-component host to the fullscreen questionnaire view. */
 export function createTuiQuestionPresentationDriver(
 	ui: Pick<ExtensionUIContext, "custom">,
+	localize?: QuestionnaireLocalizer,
 ): QuestionPresentationDriver {
 	return { async present(request: FrozenQuestionnaireRequest, signal?: AbortSignal): Promise<RawQuestionnaireOutcome> {
 		if (signal?.aborted) return cancelledOutcome(request);
@@ -45,6 +47,7 @@ export function createTuiQuestionPresentationDriver(
 					tui,
 					theme,
 					keybindings,
+					localize,
 					request,
 					onDone: (outcome) => {
 						if (terminal) return;

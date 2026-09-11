@@ -1,0 +1,11 @@
+{
+  "chrome.question.prefix": "Frage {index}:",
+  "chrome.tab.options": "Optionen",
+  "chrome.tab.custom": "Eigene Antwort",
+  "chrome.custom.response": "Eigene Eingabe:",
+  "chrome.editor.custom": "Eigene Eingabe (Esc behält Entwurf)",
+  "chrome.primary.next": "Weiter",
+  "chrome.primary.submit": "Absenden",
+  "chrome.cancel": "Abbrechen",
+  "chrome.preview.caption": "Vorschau:"
+}

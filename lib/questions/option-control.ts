@@ -11,6 +11,7 @@ import {
 	type TuiMouseEventResult,
 } from "@earendil-works/pi-tui";
 import { NativePointerScope, type NativePointerMouseObserver } from "../native-pointer-region.ts";
+import type { QuestionnaireLocalizer } from "./localization.ts";
 
 export interface QuestionOptionControlItem {
 	readonly id: string;
@@ -41,6 +42,7 @@ export interface QuestionOptionControlOptions {
 	readonly focusedId?: string;
 	readonly theme: QuestionOptionControlTheme;
 	readonly keybindings?: KeybindingsManager;
+	readonly localize?: QuestionnaireLocalizer;
 	readonly onAction?: (action: QuestionOptionControlAction) => void;
 	readonly onCancel?: () => void;
 }
@@ -57,6 +59,7 @@ export class QuestionOptionControl extends Container {
 	private readonly multiSelect: boolean;
 	private readonly theme: QuestionOptionControlTheme;
 	private readonly keybindings: KeybindingsManager | undefined;
+	private readonly localize: QuestionnaireLocalizer | undefined;
 	private readonly onAction: ((action: QuestionOptionControlAction) => void) | undefined;
 	private readonly onCancel: (() => void) | undefined;
 	private readonly rows: Row[] = [];
@@ -75,6 +78,7 @@ export class QuestionOptionControl extends Container {
 		this.multiSelect = options.multiSelect;
 		this.theme = options.theme;
 		this.keybindings = options.keybindings;
+		this.localize = options.localize;
 		this.onAction = options.onAction;
 		this.onCancel = options.onCancel;
 		this.selectedIds = validSelectedIds(options.selectedIds ?? [], this.items, this.multiSelect);
@@ -259,9 +263,18 @@ export class QuestionOptionControl extends Container {
 			const label = display(row.item.label);
 			const lines = [`${pointer}${marker}${focused ? this.theme.selectedText(label) : label}`];
 			lines.push(`   ${this.theme.description(display(row.item.description))}`);
-			if (row.item.preview !== undefined) lines.push(`   ${this.theme.preview(`Preview: ${display(row.item.preview)}`)}`);
+			if (row.item.preview !== undefined) lines.push(`   ${this.theme.preview(`${this.localizeText("chrome.preview.caption", "Preview:")} ${display(row.item.preview)}`)}`);
 			row.text.setText(lines.join("\n"));
 			row.box.invalidate();
+		}
+	}
+
+	private localizeText(key: string, fallback: string): string {
+		try {
+			const value = this.localize?.(key, fallback);
+			return typeof value === "string" && value.trim().length > 0 ? value : fallback;
+		} catch {
+			return fallback;
 		}
 	}
 

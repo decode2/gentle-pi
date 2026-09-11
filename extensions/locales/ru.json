@@ -1,0 +1,11 @@
+{
+  "chrome.question.prefix": "Вопрос {index}:",
+  "chrome.tab.options": "Варианты",
+  "chrome.tab.custom": "Свой ответ",
+  "chrome.custom.response": "Свой ответ:",
+  "chrome.editor.custom": "Свой ответ (Esc сохраняет черновик)",
+  "chrome.primary.next": "Далее",
+  "chrome.primary.submit": "Отправить",
+  "chrome.cancel": "Отмена",
+  "chrome.preview.caption": "Предпросмотр:"
+}
