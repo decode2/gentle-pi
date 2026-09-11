@@ -16,5 +16,6 @@
   "rpc.action.back": "Назад",
   "rpc.action.skip": "Пропустити",
   "rpc.action.submit-partial": "Надіслати частково",
-  "rpc.editor.custom": "Власна відповідь"
+  "rpc.editor.custom": "Власна відповідь",
+  "editor.failed": "Зовнішній редактор не спрацював"
 }

@@ -16,5 +16,6 @@
   "rpc.action.back": "Retour",
   "rpc.action.skip": "Ignorer",
   "rpc.action.submit-partial": "Envoyer partiellement",
-  "rpc.editor.custom": "Réponse personnalisée"
+  "rpc.editor.custom": "Réponse personnalisée",
+  "editor.failed": "L’éditeur externe a échoué"
 }

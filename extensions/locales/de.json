@@ -16,5 +16,6 @@
   "rpc.action.back": "Zurück",
   "rpc.action.skip": "Überspringen",
   "rpc.action.submit-partial": "Teilweise absenden",
-  "rpc.editor.custom": "Eigene Antwort"
+  "rpc.editor.custom": "Eigene Antwort",
+  "editor.failed": "Externer Editor fehlgeschlagen"
 }

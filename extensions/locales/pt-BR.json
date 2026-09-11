@@ -16,5 +16,6 @@
   "rpc.action.back": "Voltar",
   "rpc.action.skip": "Pular",
   "rpc.action.submit-partial": "Enviar parcialmente",
-  "rpc.editor.custom": "Resposta personalizada"
+  "rpc.editor.custom": "Resposta personalizada",
+  "editor.failed": "O editor externo falhou"
 }

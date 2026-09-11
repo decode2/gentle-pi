@@ -16,5 +16,6 @@
   "rpc.action.back": "返回",
   "rpc.action.skip": "跳过",
   "rpc.action.submit-partial": "部分提交",
-  "rpc.editor.custom": "自定义回答"
+  "rpc.editor.custom": "自定义回答",
+  "editor.failed": "外部编辑器失败"
 }

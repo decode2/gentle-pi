@@ -190,6 +190,8 @@ After the owner permits registration, gentle-pi reads this optional, read-only f
 
 The first-party tool is available in the interactive TUI and in RPC sessions that expose both native selection and editor dialogs. Questionnaire localization is optional: when a compatible provider is available, it translates only static questionnaire chrome in both presentations; otherwise the exact English labels remain. Questions, option labels, descriptions, previews, answers, events, and formatter output always retain their authored bytes. RPC has no note controls and its editor still has no abort or timeout capability. If Pi already exposes an `ask_user_question` tool when the session starts, gentle-pi does not register another one. Pi has no atomic tool-name reservation, so a plugin loaded later can still create a dynamic collision.
 
+When editing a custom answer in the TUI, press `Ctrl+G` to open Pi's configured external editor for that draft. Pi's trusted-project setting and editor configuration control the command and fallback behavior; if editing fails, the draft remains. This is TUI-only: RPC continues to use its native editor.
+
 Then start Pi in a project:
 
 ```bash

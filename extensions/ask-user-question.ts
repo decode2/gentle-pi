@@ -6,6 +6,7 @@ import { readQuestionnaireGuidanceConfig, type QuestionnaireGuidance } from "../
 import { createQuestionnaireLocalizer, type QuestionnaireLocalizer } from "../lib/questions/localization.ts";
 import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
 import { createTuiQuestionPresentationDriver } from "../lib/questions/tui-presentation-driver.ts";
+import { createQuestionnaireExternalEditorRuntime, type QuestionnaireExternalEditorRuntimeContext } from "../lib/questions/external-editor-runtime.ts";
 import {
 	MAX_HEADER_LENGTH, MAX_LABEL_LENGTH, MAX_OPTIONS, MAX_QUESTIONS, MIN_OPTIONS, RESERVED_LABELS,
 	type QuestionPresentationDriver, type QuestionnaireFailure, type QuestionnaireToolResult,
@@ -50,13 +51,14 @@ const ParametersSchema = Type.Object({
 
 type QuestionnaireUi = Pick<ExtensionUIContext, "custom" | "select" | "editor">;
 type QuestionnaireMode = "tui" | "rpc";
+type QuestionnairePresentationContext = QuestionnaireExternalEditorRuntimeContext;
 
 export interface AskUserQuestionDependencies {
 	resolveAgentHome: () => string;
 	readOwnerConfig: (agentHome: string) => Promise<QuestionOwnerConfigResolution>;
 	readGuidanceConfig?: (agentHome: string) => Promise<QuestionnaireGuidance>;
 	createLocalizer?: () => Promise<QuestionnaireLocalizer>;
-	createPresentationDriver: (ui: QuestionnaireUi, mode: QuestionnaireMode, localize?: QuestionnaireLocalizer) => QuestionPresentationDriver;
+	createPresentationDriver: (ui: QuestionnaireUi, mode: QuestionnaireMode, localize?: QuestionnaireLocalizer, context?: QuestionnairePresentationContext) => QuestionPresentationDriver;
 }
 
 const defaultDependencies: AskUserQuestionDependencies = {
@@ -68,9 +70,12 @@ const defaultDependencies: AskUserQuestionDependencies = {
 		loadLoader: () => import("@juicesharp/rpiv-i18n/loader"),
 		packageUrl: import.meta.url,
 	}),
-	createPresentationDriver: (ui, mode, localize) => mode === "rpc"
+	createPresentationDriver: (ui, mode, localize, context) => mode === "rpc"
 		? createRpcQuestionPresentationDriver(ui, localize)
-		: createTuiQuestionPresentationDriver(ui, localize),
+		: createTuiQuestionPresentationDriver(ui, localize, context === undefined ? undefined : async (draft) => {
+			const { createQuestionnaireExternalEditorNodeHost } = await import("../lib/questions/external-editor-node-host.ts");
+			return createQuestionnaireExternalEditorRuntime(context, await createQuestionnaireExternalEditorNodeHost())(draft);
+		}),
 };
 
 /** Factory seam for owner-safe, host-free extension tests. */
@@ -106,7 +111,7 @@ export function createAskUserQuestionExtension(
 			} catch {
 				// Optional localization must not prevent an owner-admitted registration.
 			}
-			pi.registerTool(questionnaireTool(pi, dependencies, guidance, localize, () => busy, (value) => { busy = value; }));
+			pi.registerTool(questionnaireTool(pi, dependencies, guidance, localize, agentHome, () => busy, (value) => { busy = value; }));
 			registered = true;
 			// Pi exposes no atomic reserve operation; a later dynamic collision remains host-owned.
 		});
@@ -118,6 +123,7 @@ function questionnaireTool(
 	dependencies: AskUserQuestionDependencies,
 	guidance: QuestionnaireGuidance,
 	localize: QuestionnaireLocalizer,
+	agentHome: string,
 	isBusy: () => boolean,
 	setBusy: (value: boolean) => void,
 ): ToolDefinition<typeof ParametersSchema, QuestionnaireToolResult["details"]> {
@@ -149,7 +155,11 @@ function questionnaireTool(
 					})),
 				});
 				pi.events.emit(BLOCKED_EVENT, { active: true });
-				const outcome = await dependencies.createPresentationDriver(ctx.ui, ctx.mode, localize).present(frozen.request, signal);
+				const outcome = await dependencies.createPresentationDriver(ctx.ui, ctx.mode, localize, {
+					cwd: ctx.cwd,
+					agentHome,
+					isProjectTrusted: () => ctx.isProjectTrusted?.(),
+				}).present(frozen.request, signal);
 				return validateAndFormat(frozen.request, outcome).result;
 			} finally {
 				setBusy(false);

@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { tmpdir } from "node:os";
 import test from "node:test";
 import { createAskUserQuestionExtension, type AskUserQuestionDependencies } from "../extensions/ask-user-question.ts";
 import type { QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
@@ -112,6 +115,27 @@ async function start(subject: ReturnType<typeof host>, mode: string, ui: TestUi 
 	await subject.sessionStarts[0]!({ type: "session_start", reason: "startup" }, { mode, hasUI, ui });
 }
 
+async function withDefaultOwner(run: () => Promise<void>): Promise<void> {
+	const fixture = await mkdtemp(join(tmpdir(), "gentle-pi-question-owner-"));
+	const original = new Map(["HOME", "XDG_CONFIG_HOME", "GENTLE_PI_AGENT_HOME", "PI_CODING_AGENT_DIR"].map((key) => [key, process.env[key]]));
+	const agentHome = join(fixture, "agent");
+	try {
+		process.env.HOME = join(fixture, "home");
+		process.env.XDG_CONFIG_HOME = join(fixture, "xdg");
+		process.env.GENTLE_PI_AGENT_HOME = agentHome;
+		process.env.PI_CODING_AGENT_DIR = agentHome;
+		await mkdir(join(agentHome, "gentle-ai"), { recursive: true });
+		await writeFile(join(agentHome, "gentle-ai", "question-owner.json"), JSON.stringify({ schema: "gentle-pi.question-owner/v1", owner: "gentle-pi" }));
+		await run();
+	} finally {
+		for (const [key, value] of original) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		await rm(fixture, { recursive: true, force: true });
+	}
+}
+
 test("does not register the questionnaire for legacy or disabled owners", async (t) => {
 	for (const configuredOwner of ["legacy-external", "disabled"] as const) {
 		for (const session of [
@@ -144,6 +168,38 @@ test("registers the exact bounded questionnaire schema only in a TUI session", a
 	assert.equal(questions.items?.properties?.options?.maxItems, 4);
 	assert.equal(questions.items?.properties?.options?.minItems, 2);
 	assert.equal((questions.items?.properties?.options as { items?: { properties?: Record<string, { maxLength?: number }> } }).items?.properties?.label?.maxLength, 60);
+});
+
+test("default admitted TUI registration forwards an external-editor callback to the real driver", { concurrency: false }, async () => {
+	await withDefaultOwner(async () => {
+		let component: { cancel(): void; presentationOptions?: { externalEditor?: unknown } } | undefined;
+		let settle!: (outcome: unknown) => void;
+		const pending = new Promise<unknown>((resolve) => { settle = resolve; });
+		const tui = { terminal: { rows: 24 }, requestRender() {} };
+		const ui: TestUi = {
+			custom(factory: unknown) {
+				component = (factory as (tui: typeof tui, theme: { fg(color: string, text: string): string; bold(text: string): string }, keybindings: object, done: (outcome: unknown) => void) => typeof component)(
+					tui,
+					{ fg: (_color, text) => text, bold: (text) => text },
+					{},
+					settle,
+				);
+				return pending;
+			},
+		};
+		const subject = host();
+		createAskUserQuestionExtension()(subject.pi as never);
+		await start(subject, "tui", ui);
+		const execution = subject.tools[0]!.execute("default-external-editor", { questions: [legacyQuestion()] }, new AbortController().signal, undefined, { mode: "tui", ui });
+		try {
+			await Promise.resolve();
+			await Promise.resolve();
+			assert.equal(typeof component?.presentationOptions?.externalEditor, "function");
+		} finally {
+			component?.cancel();
+			await execution;
+		}
+	});
 });
 
 test("registers in RPC only when the owner allows it and native dialog methods are available", async () => {
