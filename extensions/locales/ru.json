@@ -7,5 +7,14 @@
   "chrome.primary.next": "Далее",
   "chrome.primary.submit": "Отправить",
   "chrome.cancel": "Отмена",
-  "chrome.preview.caption": "Предпросмотр:"
+  "chrome.preview.caption": "Предпросмотр:",
+  "rpc.preview.framing": "Статический предпросмотр (RPC; полные сведения TUI недоступны):",
+  "rpc.preview.caption": "Статический предпросмотр:",
+  "rpc.action.choose-option": "Выбрать вариант",
+  "rpc.action.choose-options": "Выбрать варианты",
+  "rpc.action.custom": "Ввести свой текст",
+  "rpc.action.back": "Назад",
+  "rpc.action.skip": "Пропустить",
+  "rpc.action.submit-partial": "Отправить частично",
+  "rpc.editor.custom": "Свой ответ"
 }

@@ -7,5 +7,14 @@
   "chrome.primary.next": "Далі",
   "chrome.primary.submit": "Надіслати",
   "chrome.cancel": "Скасувати",
-  "chrome.preview.caption": "Попередній перегляд:"
+  "chrome.preview.caption": "Попередній перегляд:",
+  "rpc.preview.framing": "Статичний попередній перегляд (RPC; повні відомості TUI недоступні):",
+  "rpc.preview.caption": "Статичний попередній перегляд:",
+  "rpc.action.choose-option": "Вибрати варіант",
+  "rpc.action.choose-options": "Вибрати варіанти",
+  "rpc.action.custom": "Ввести власний текст",
+  "rpc.action.back": "Назад",
+  "rpc.action.skip": "Пропустити",
+  "rpc.action.submit-partial": "Надіслати частково",
+  "rpc.editor.custom": "Власна відповідь"
 }

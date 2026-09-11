@@ -7,5 +7,14 @@
   "chrome.primary.next": "Next",
   "chrome.primary.submit": "Submit",
   "chrome.cancel": "Cancel",
-  "chrome.preview.caption": "Preview:"
+  "chrome.preview.caption": "Preview:",
+  "rpc.preview.framing": "Static preview (RPC; full TUI detail unavailable):",
+  "rpc.preview.caption": "Static preview:",
+  "rpc.action.choose-option": "Choose an option",
+  "rpc.action.choose-options": "Choose options",
+  "rpc.action.custom": "Use custom text",
+  "rpc.action.back": "Back",
+  "rpc.action.skip": "Skip",
+  "rpc.action.submit-partial": "Submit partial",
+  "rpc.editor.custom": "Custom response"
 }

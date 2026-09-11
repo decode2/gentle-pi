@@ -188,7 +188,7 @@ After the owner permits registration, gentle-pi reads this optional, read-only f
 
 `guidance` may be omitted or empty. Every configured string must be non-blank, unknown keys reject the whole file, and valid values preserve their original bytes. Missing, unreadable, or invalid guidance keeps the built-in description and omits optional prompt metadata. gentle-pi never writes, migrates, or looks up legacy guidance configuration. The file is read when an eligible session registers the tool; restart Pi or start a new session after changing it. Owner selection remains required.
 
-The first-party tool is available only in the interactive TUI. If Pi already exposes an `ask_user_question` tool when the session starts, gentle-pi does not register another one. Pi has no atomic tool-name reservation, so a plugin loaded later can still create a dynamic collision. Public RPC support remains deferred because Pi's RPC editor has no abort or timeout capability.
+The first-party tool is available in the interactive TUI and in RPC sessions that expose both native selection and editor dialogs. Questionnaire localization is optional: when a compatible provider is available, it translates only static questionnaire chrome in both presentations; otherwise the exact English labels remain. Questions, option labels, descriptions, previews, answers, events, and formatter output always retain their authored bytes. RPC has no note controls and its editor still has no abort or timeout capability. If Pi already exposes an `ask_user_question` tool when the session starts, gentle-pi does not register another one. Pi has no atomic tool-name reservation, so a plugin loaded later can still create a dynamic collision.
 
 Then start Pi in a project:
 

@@ -5,7 +5,16 @@ import { createAskUserQuestionExtension, type AskUserQuestionDependencies } from
 import type { QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
 import type { QuestionnaireGuidance } from "../lib/questions/guidance-config.ts";
 import type { QuestionPresentationDriver } from "../lib/questions/contract.ts";
+import type { QuestionnaireLocalizer } from "../lib/questions/localization.ts";
 import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
+
+type LocalizedRpcDriverFactory = (
+	ui: Parameters<typeof createRpcQuestionPresentationDriver>[0],
+	localize?: QuestionnaireLocalizer,
+) => QuestionPresentationDriver;
+
+// RED seam: production still has one argument and therefore ignores this localizer.
+const createLocalizedRpcDriver = createRpcQuestionPresentationDriver as LocalizedRpcDriverFactory;
 
 type TestUi = { custom?: unknown; select?: (title: string, options: string[]) => Promise<string | undefined>; editor?: (title: string, prefill?: string) => Promise<string | undefined> };
 type SessionHandler = (event: unknown, ctx: { mode: string; hasUI?: boolean; ui: TestUi }) => Promise<void> | void;
@@ -430,6 +439,52 @@ test("routes an RPC call through native select and formats the correlated answer
 		{ channel: "rpiv:ask-user:blocked", payload: { active: false } },
 	]);
 	assert.equal(eventsAtCompletion, subject.events.length, "the release is observable before RPC execution settles");
+});
+
+test("passes the admitted localizer to the real RPC driver without translating authored events", async () => {
+	const translations: Record<string, string> = {
+		"Choose an option": "Eine Option wählen",
+		"Use custom text": "Eigenen Text verwenden",
+		"Skip": "Überspringen",
+		"Submit": "Absenden",
+		"Submit partial": "Teilweise absenden",
+		"Cancel": "Abbrechen",
+	};
+	const providedLocalizer: QuestionnaireLocalizer = (_key, fallback) => translations[fallback] ?? fallback;
+	let receivedLocalizer: QuestionnaireLocalizer | undefined;
+	const uiCalls: Array<{ title: string; options: string[] }> = [];
+	const ui: TestUi = {
+		select: async (title, options) => {
+			uiCalls.push({ title, options });
+			return uiCalls.length === 1 ? "Eine Option wählen" : uiCalls.length === 2 ? "Yes" : "Absenden";
+		},
+		editor: async () => undefined,
+	};
+	const subject = host();
+	createAskUserQuestionExtension({
+		resolveAgentHome: () => "/profiles/test",
+		readOwnerConfig: async () => owner("gentle-pi"),
+		createLocalizer: async () => providedLocalizer,
+		createPresentationDriver: (driverUi, mode, localize) => {
+			assert.equal(mode, "rpc");
+			receivedLocalizer = localize;
+			return createLocalizedRpcDriver(driverUi as never, localize);
+		},
+	})(subject.pi as never);
+	await start(subject, "rpc", ui, true);
+	const result = await subject.tools[0]!.execute("rpc-localized", { questions: [legacyQuestion()] }, new AbortController().signal, undefined, { mode: "rpc", hasUI: true, ui });
+
+	assert.equal(receivedLocalizer, providedLocalizer);
+	assert.deepEqual(uiCalls.map((call) => call.options), [
+		["Eine Option wählen", "Eigenen Text verwenden", "Überspringen", "Absenden", "Teilweise absenden", "Abbrechen"],
+		["Yes", "No"],
+		["Eine Option wählen", "Eigenen Text verwenden", "Überspringen", "Absenden", "Teilweise absenden", "Abbrechen"],
+	]);
+	assert.deepEqual(result, {
+		content: [{ type: "text", text: "User has answered your questions: \"Proceed?\"=\"Yes\". You can now continue with the user's answers in mind." }],
+		details: { answers: [{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Yes" }], cancelled: false },
+	});
+	assert.deepEqual(subject.events[0], { channel: "rpiv:ask-user:prompt", payload: { questions: [{ question: "Proceed?", header: "Proceed", multiSelect: false, options: [{ label: "Yes", description: "Continue", hasPreview: false }, { label: "No", description: "Stop", hasPreview: false }] }] } });
 });
 
 test("returns no_questions for malformed RPC input without events or presentation", async () => {

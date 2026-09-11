@@ -7,5 +7,14 @@
   "chrome.primary.next": "Suivant",
   "chrome.primary.submit": "Envoyer",
   "chrome.cancel": "Annuler",
-  "chrome.preview.caption": "Aperçu :"
+  "chrome.preview.caption": "Aperçu :",
+  "rpc.preview.framing": "Aperçu statique (RPC ; détails TUI complets indisponibles) :",
+  "rpc.preview.caption": "Aperçu statique :",
+  "rpc.action.choose-option": "Choisir une option",
+  "rpc.action.choose-options": "Choisir des options",
+  "rpc.action.custom": "Utiliser du texte personnalisé",
+  "rpc.action.back": "Retour",
+  "rpc.action.skip": "Ignorer",
+  "rpc.action.submit-partial": "Envoyer partiellement",
+  "rpc.editor.custom": "Réponse personnalisée"
 }

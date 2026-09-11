@@ -69,7 +69,7 @@ const defaultDependencies: AskUserQuestionDependencies = {
 		packageUrl: import.meta.url,
 	}),
 	createPresentationDriver: (ui, mode, localize) => mode === "rpc"
-		? createRpcQuestionPresentationDriver(ui)
+		? createRpcQuestionPresentationDriver(ui, localize)
 		: createTuiQuestionPresentationDriver(ui, localize),
 };
 
@@ -149,7 +149,7 @@ function questionnaireTool(
 					})),
 				});
 				pi.events.emit(BLOCKED_EVENT, { active: true });
-				const outcome = await dependencies.createPresentationDriver(ctx.ui, ctx.mode, ctx.mode === "tui" ? localize : undefined).present(frozen.request, signal);
+				const outcome = await dependencies.createPresentationDriver(ctx.ui, ctx.mode, localize).present(frozen.request, signal);
 				return validateAndFormat(frozen.request, outcome).result;
 			} finally {
 				setBusy(false);

@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { QuestionnaireLocalizer } from "../lib/questions/localization.ts";
 import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
 import { validateAndFormat } from "../lib/questions/response.ts";
 import { createFrozenQuestionnaireRequest } from "../lib/questions/validation.ts";
@@ -154,4 +155,104 @@ test("propagates native RPC dialog rejection instead of converting it to cancell
 	const ui = new FakeUi([Promise.reject(rejection)]);
 	await assert.rejects(() => createRpcQuestionPresentationDriver(ui).present(request()), rejection);
 	assert.equal(ui.calls.length, 1);
+});
+
+type LocalizedRpcDriverFactory = (
+	ui: Pick<ExtensionUIContext, "select" | "editor">,
+	localize?: QuestionnaireLocalizer,
+) => ReturnType<typeof createRpcQuestionPresentationDriver>;
+
+const createLocalizedRpcDriver = createRpcQuestionPresentationDriver as LocalizedRpcDriverFactory;
+
+function localizer(translations: Record<string, string>, lookups: Array<[string, string]>): QuestionnaireLocalizer {
+	return (key, fallback) => {
+		lookups.push([key, fallback]);
+		return translations[fallback] ?? fallback;
+	};
+}
+
+test("localizes RPC chrome while preserving authored option labels and canonical answers", async () => {
+	const lookups: Array<[string, string]> = [];
+	const ui = new FakeUi(["Eine Option wählen", "Back", "Weiter", "Teilweise absenden"]);
+	const outcome = owned(await createLocalizedRpcDriver(ui, localizer({
+		"Question {index}:": "Frage {index}:",
+		"Static preview (RPC; full TUI detail unavailable):": "Statische Vorschau (RPC; vollständige TUI-Details nicht verfügbar):",
+		"Choose an option": "Eine Option wählen",
+		"Use custom text": "Eigenen Text verwenden",
+		"Skip": "Überspringen",
+		"Next": "Weiter",
+		"Submit partial": "Teilweise absenden",
+		"Cancel": "Abbrechen",
+	}, lookups)).present(request()));
+
+	assert.deepEqual(outcome.answers, [{ questionIndex: 0, question: "Choose a route", kind: "option", answer: "Back", preview: "Exact\npreview" }]);
+	assert.equal(outcome.cancelled, false);
+	assert.equal(ui.calls[0]!.title, "Frage 1: Route\nChoose a route\n\nStatische Vorschau (RPC; vollständige TUI-Details nicht verfügbar):\nBack\nAn authored label.\nStatic preview: Exact\npreview\n\nSubmit\nAnother authored label.");
+	assert.deepEqual(ui.calls[0]!.values, ["Eine Option wählen", "Eigenen Text verwenden", "Überspringen", "Weiter", "Teilweise absenden", "Abbrechen"]);
+	assert.deepEqual(ui.calls[1]!.values, ["Back", "Submit"], "authored option labels remain the only option dialog values");
+	assert.equal(lookups.some(([, fallback]) => ["Route", "Choose a route", "An authored label.", "Exact\npreview"].includes(fallback)), false, "authored question content is never localized");
+});
+
+test("localizes the RPC custom editor title without changing multiline custom input", async () => {
+	const ui = new FakeUi(["Usar texto personalizado", "  línea\nmanual  ", "Siguiente", "Enviar parcialmente"]);
+	const outcome = owned(await createLocalizedRpcDriver(ui, localizer({
+		"Use custom text": "Usar texto personalizado",
+		"Next": "Siguiente",
+		"Submit partial": "Enviar parcialmente",
+		"Custom response": "Respuesta personalizada",
+	}, [])).present(request()));
+
+	assert.deepEqual(outcome.answers, [{ questionIndex: 0, question: "Choose a route", kind: "custom", answer: "  línea\nmanual  " }]);
+	assert.equal(outcome.cancelled, false);
+	assert.deepEqual(ui.calls[1], { kind: "editor", title: "Respuesta personalizada", prefill: undefined });
+});
+
+test("routes a pending RPC selection through its captured localized labels after the provider language changes", async () => {
+	let language = "de";
+	let release!: (value: string) => void;
+	const first = new Promise<string>((resolve) => { release = resolve; });
+	const ui = new FakeUi([first, "Back", "Siguiente", "Enviar parcialmente"]);
+	const lookups: Array<[string, string]> = [];
+	const translate = localizer({
+		"Choose an option": "Eine Option wählen",
+		"Use custom text": "Eigenen Text verwenden",
+		"Skip": "Überspringen",
+		"Next": "Weiter",
+		"Submit partial": "Teilweise absenden",
+		"Cancel": "Abbrechen",
+	}, lookups);
+	const liveLocalizer: QuestionnaireLocalizer = (key, fallback) => language === "de"
+		? translate(key, fallback)
+		: localizer({ "Next": "Siguiente", "Submit partial": "Enviar parcialmente" }, lookups)(key, fallback);
+	const presenting = createLocalizedRpcDriver(ui, liveLocalizer).present(request());
+	await Promise.resolve();
+	language = "es";
+	release("Eine Option wählen");
+	const outcome = owned(await presenting);
+
+	assert.equal(ui.calls[0]!.values![0], "Eine Option wählen");
+	assert.ok(ui.calls[2]!.values!.includes("Siguiente"), "the next dialog rebuilds labels for the new provider language");
+	assert.deepEqual(outcome.answers, [{ questionIndex: 0, question: "Choose a route", kind: "option", answer: "Back", preview: "Exact\npreview" }]);
+	assert.equal(outcome.cancelled, false);
+});
+
+test("cancels instead of guessing when localized action labels collide", async () => {
+	const ui = new FakeUi(["Choose an option", "Back", "Submit"]);
+	const outcome = owned(await createLocalizedRpcDriver(ui, localizer({
+		"Choose an option": "Choose an option",
+		"Use custom text": "Choose an option",
+	}, [])).present(request()));
+
+	assert.equal(outcome.cancelled, true);
+	assert.deepEqual(outcome.answers, []);
+	assert.ok(ui.calls.length <= 1, "an ambiguous action must not enter an option dialog or execute an arbitrary action");
+});
+
+test("cancels an English action label when the displayed RPC menu is localized", async () => {
+	const ui = new FakeUi(["Choose an option", "Back", "Submit"]);
+	const outcome = owned(await createLocalizedRpcDriver(ui, localizer({ "Choose an option": "Eine Option wählen" }, [])).present(request()));
+
+	assert.equal(outcome.cancelled, true);
+	assert.deepEqual(outcome.answers, []);
+	assert.equal(ui.calls.length, 1, "a label that was not displayed has no routing alias");
 });
