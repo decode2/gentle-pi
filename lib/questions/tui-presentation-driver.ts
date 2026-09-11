@@ -1,5 +1,5 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import type { Component } from "@earendil-works/pi-tui";
+import { matchesKey, type Component, type OverlayHandle } from "@earendil-works/pi-tui";
 import type {
 	FrozenQuestionnaireRequest,
 	QuestionPresentationDriver,
@@ -15,7 +15,7 @@ import {
 } from "./presentation-state.ts";
 
 type DisposedComponent = Component & { dispose(): void };
-type QuestionnaireTuiUI = Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "notify">>;
+type QuestionnaireTuiUI = Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "notify" | "onTerminalInput">>;
 
 /** Bridges the public Pi custom-component host to the fullscreen questionnaire view. */
 export function createTuiQuestionPresentationDriver(
@@ -29,11 +29,51 @@ export function createTuiQuestionPresentationDriver(
 
 		let terminal = false;
 		let view: QuestionnaireTuiPresentation | undefined;
+		let overlayHandle: OverlayHandle | undefined;
+		let removeRawInput: (() => void) | undefined;
+		let rawInputRegistered = false;
 		const detachAbort = () => signal?.removeEventListener("abort", abort);
+		const cleanupRawInput = () => {
+			const remove = removeRawInput;
+			removeRawInput = undefined;
+			rawInputRegistered = false;
+			try {
+				remove?.();
+			} catch {
+				// Optional host cleanup cannot mask a questionnaire outcome or host failure.
+			}
+		};
+		const syncOverlayVisibility = () => {
+			if (terminal || !rawInputRegistered || !overlayHandle || !view) return;
+			try {
+				if (view.isCollapsed()) overlayHandle.setHidden(true);
+				else if (overlayHandle.isHidden()) {
+					overlayHandle.setHidden(false);
+					overlayHandle.focus();
+				}
+			} catch {
+				// A host visibility failure leaves the focused component fallback recoverable.
+			}
+		};
+		const handleRawInput = (data: string) => {
+			if (terminal || !view || !overlayHandle) return undefined;
+			try {
+				const hidden = overlayHandle.isHidden();
+				if (!hidden && !overlayHandle.isFocused()) return undefined;
+				if (hidden && matchesKey(data, "escape")) {
+					view.cancel();
+					return { consume: true };
+				}
+				return view.consumeRawCollapseInput(data) ? { consume: true } : undefined;
+			} catch {
+				return undefined;
+			}
+		};
 		const terminate = () => {
 			if (terminal) return;
 			terminal = true;
 			detachAbort();
+			cleanupRawInput();
 			view?.dispose();
 		};
 		const abort = () => {
@@ -41,6 +81,7 @@ export function createTuiQuestionPresentationDriver(
 			if (view) return view.cancel();
 			terminal = true;
 			detachAbort();
+			cleanupRawInput();
 		};
 		signal?.addEventListener("abort", abort, { once: true });
 
@@ -53,6 +94,7 @@ export function createTuiQuestionPresentationDriver(
 					keybindings,
 					localize,
 					collapseKey,
+					onCollapseChange: syncOverlayVisibility,
 					externalEditor: externalEditor === undefined ? undefined : (draft) => runExternalEditor(tui, externalEditor, draft),
 					onExternalEditorError: (message) => {
 						try {
@@ -69,10 +111,26 @@ export function createTuiQuestionPresentationDriver(
 						done(outcome);
 					},
 				});
+				if (view.isCollapseEnabled() && typeof ui.onTerminalInput === "function") {
+					try {
+						const remove = ui.onTerminalInput(handleRawInput);
+						if (typeof remove === "function") {
+							removeRawInput = remove;
+							rawInputRegistered = true;
+						}
+					} catch {
+						// The visible collapsed row remains usable when raw input is unavailable.
+					}
+				}
 				return view;
 			}, {
 				overlay: true,
 				overlayOptions: { width: "100%", maxHeight: "100%", anchor: "center", margin: 0 },
+				onHandle: (handle) => {
+					if (terminal) return;
+					overlayHandle = handle;
+					syncOverlayVisibility();
+				},
 			});
 		} catch (error) {
 			terminate();

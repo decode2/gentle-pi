@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
+import type { ExtensionUIContext, TerminalInputHandler, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, KeybindingsManager, OverlayHandle, OverlayOptions, TUI } from "@earendil-works/pi-tui";
 import type { QuestionnaireExternalEditor } from "../lib/questions/external-editor.ts";
 import { createTuiQuestionPresentationDriver } from "../lib/questions/tui-presentation-driver.ts";
@@ -290,10 +290,11 @@ for (const scenario of [
 test("requests a full-width terminal-capped public overlay for the questionnaire", async () => {
 	const host = new FakeCustomHost((component) => component.handleInput("\u001b"));
 	await createTuiQuestionPresentationDriver(host).present(request());
-	assert.deepEqual(host.receivedOptions, [{
+	assert.deepEqual(host.receivedOptions.map(({ onHandle, ...options }) => options), [{
 		overlay: true,
 		overlayOptions: { width: "100%", maxHeight: "100%", anchor: "center", margin: 0 },
 	}], "the host receives the unchanged public full-width terminal-capped overlay contract");
+	assert.equal(typeof host.receivedOptions[0]?.onHandle, "function", "the driver receives the public overlay handle at the top level");
 });
 
 test("returns the view's raw cancel outcome without driver formatting", async () => {
@@ -470,4 +471,198 @@ test("normal completion and host rejection detach abort listeners, and later abo
 	assert.equal(rejectedSignal.addCalls, 1);
 	assert.equal(rejectedSignal.listeners.size, 0);
 	assert.equal(rejectedSignal.removeCalls, 1);
+});
+
+class RawOverlayHost implements Pick<ExtensionUIContext, "custom" | "onTerminalInput"> {
+	readonly tui = { terminal: { rows: 24 }, requestRender() {} } as TUI;
+	readonly keybindings = {} as KeybindingsManager;
+	readonly listeners = new Set<TerminalInputHandler>();
+	readonly handle = {
+		hidden: false, focused: true, focusCalls: 0, setHiddenCalls: [] as boolean[],
+		hide() {}, setHidden(hidden: boolean) { this.hidden = hidden; this.setHiddenCalls.push(hidden); }, isHidden() { return this.hidden; },
+		focus() { this.focused = true; this.focusCalls++; }, unfocus() { this.focused = false; }, isFocused() { return this.focused; }, getBounds() { return undefined; },
+	};
+	component: QuestionnaireTuiPresentation | undefined;
+	doneCalls = 0;
+	onHandleCalls = 0;
+	onTerminalInputCalls = 0;
+	removeCalls = 0;
+	registrationError: Error | undefined;
+	customError: Error | undefined;
+	deferHandle = false;
+	private pendingHandle: ((handle: OverlayHandle) => void) | undefined;
+	private resolve: ((result: unknown) => void) | undefined;
+
+	onTerminalInput(handler: TerminalInputHandler): () => void {
+		this.onTerminalInputCalls++;
+		if (this.registrationError) throw this.registrationError;
+		this.listeners.add(handler);
+		return () => { this.removeCalls++; this.listeners.delete(handler); };
+	}
+
+	custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T> {
+		const component = factory(this.tui, theme, this.keybindings, (result) => { this.doneCalls++; this.resolve?.(result); });
+		assert.equal(component instanceof Promise, false, "the questionnaire factory remains synchronous");
+		this.component = component as QuestionnaireTuiPresentation;
+		if (options?.onHandle) {
+			const deliver = (handle: OverlayHandle) => { this.onHandleCalls++; options.onHandle?.(handle); };
+			if (this.deferHandle) this.pendingHandle = deliver;
+			else deliver(this.handle as unknown as OverlayHandle);
+		}
+		if (this.customError) throw this.customError;
+		return new Promise<T>((resolve) => { this.resolve = resolve as (result: unknown) => void; });
+	}
+
+	deliverLateHandle() { this.pendingHandle?.(this.handle as unknown as OverlayHandle); }
+	raw(data: string) { return [...this.listeners].map((listener) => listener(data)).at(-1); }
+}
+
+async function startRawOverlay(host: RawOverlayHost, ui: Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "onTerminalInput">> = host) {
+	const presenting = createTuiQuestionPresentationDriver(ui).present(request());
+	await Promise.resolve();
+	assert.ok(host.component, "the public custom factory created the questionnaire");
+	return { presenting, cleanup: async () => { host.component?.cancel(); await presenting; } };
+}
+
+test("raw Ctrl+] collapses a focused overlay, consumes once, then restores focus without settling", async () => {
+	const host = new RawOverlayHost();
+	const { presenting, cleanup } = await startRawOverlay(host);
+	try {
+		assert.equal(host.onTerminalInputCalls, 1, "an active questionnaire installs one public raw-input listener");
+		assert.equal(host.onHandleCalls, 1, "the driver receives the public overlay handle");
+		assert.deepEqual(host.raw("\u001d"), { consume: true }, "the raw handler consumes the configured key before component routing");
+		assert.deepEqual(host.handle.setHiddenCalls, [true]);
+		assert.equal(host.doneCalls, 0, "collapse leaves the questionnaire promise pending");
+		assert.deepEqual(host.raw("\u001d"), { consume: true });
+		assert.deepEqual(host.handle.setHiddenCalls, [true, false]);
+		assert.equal(host.handle.focusCalls, 1, "expansion restores overlay focus through OverlayHandle.focus()");
+		assert.equal(host.doneCalls, 0);
+	} finally { await cleanup(); }
+	await presenting;
+	assert.equal(host.removeCalls, 1, "normal cancellation removes the raw listener exactly once");
+	assert.equal(host.raw("\u001d"), undefined, "a captured raw route is inert after settlement");
+});
+
+test("another focused overlay leaves Ctrl+] unconsumed and cannot hide the questionnaire", async () => {
+	const host = new RawOverlayHost();
+	const { cleanup } = await startRawOverlay(host);
+	try {
+		assert.equal(host.onTerminalInputCalls, 1, "the active questionnaire still registers its scoped raw listener");
+		assert.equal(host.onHandleCalls, 1, "the public overlay handle is available for focus checks");
+		host.handle.focused = false;
+		assert.equal(host.raw("\u001d"), undefined, "the public raw listener leaves another overlay's key alone");
+		assert.deepEqual(host.handle.setHiddenCalls, []);
+		assert.match(host.component!.render(48).join("\n"), /Question 1:/, "the questionnaire remains expanded");
+	} finally { await cleanup(); }
+});
+
+test("without raw input, Ctrl+] retains the visible one-line fallback and never hides the public handle", async () => {
+	const host = new RawOverlayHost();
+	const { cleanup } = await startRawOverlay(host, { custom: host.custom.bind(host) });
+	try {
+		assert.equal(host.onTerminalInputCalls, 0, "an unavailable public hook is not registered");
+		assert.equal(host.onHandleCalls, 1, "the fallback still receives a public overlay handle without hiding it");
+		host.component!.handleInput("\u001d");
+		assert.deepEqual(host.handle.setHiddenCalls, [], "a handle alone must never make the collapsed view unrecoverable");
+		assert.deepEqual(host.component!.render(48).map((line) => line.trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
+	} finally { await cleanup(); }
+});
+
+test("hidden Escape cancels once through raw input without forwarding Escape to the view", async () => {
+	const host = new RawOverlayHost();
+	const { cleanup } = await startRawOverlay(host);
+	try {
+		assert.equal(host.onTerminalInputCalls, 1);
+		assert.deepEqual(host.raw("\u001d"), { consume: true });
+		assert.deepEqual(host.raw("\u001b"), { consume: true }, "hidden Escape is owned by the questionnaire listener");
+		assert.equal(host.doneCalls, 1);
+		assert.deepEqual(host.raw("\u001b"), undefined, "a settled listener cannot cancel a second time");
+	} finally { await cleanup(); }
+});
+
+test("raw routing declines Ctrl+] during an active bracketed paste so the focused view keeps literal data", async () => {
+	const host = new RawOverlayHost();
+	const { cleanup } = await startRawOverlay(host);
+	try {
+		assert.equal(host.onTerminalInputCalls, 1);
+		host.component!.handleInput("\t");
+		assert.equal(host.raw("\u001b[200~before"), undefined, "paste framing is not a collapse shortcut");
+		host.component!.handleInput("\u001b[200~before");
+		assert.equal(host.raw("\u001d"), undefined, "the raw listener yields configured input while the view owns a paste");
+		host.component!.handleInput("\u001dafter\u001b[201~");
+		host.component!.handleInput("\u001b");
+		assert.match(host.component!.render(48).join("\n"), /before.*after/s);
+		assert.deepEqual(host.handle.setHiddenCalls, []);
+	} finally { await cleanup(); }
+});
+
+test("abort removes the active raw listener exactly once before the cancelled presentation settles", async () => {
+	const host = new RawOverlayHost();
+	const signal = new AbortController();
+	const presenting = createTuiQuestionPresentationDriver(host).present(request(), signal.signal);
+	try {
+		await Promise.resolve();
+		assert.equal(host.onTerminalInputCalls, 1);
+		signal.abort();
+		await presenting;
+		assert.equal(host.removeCalls, 1);
+		assert.equal(host.listeners.size, 0);
+		assert.equal(host.raw("\u001d"), undefined);
+	} finally {
+		signal.abort();
+		await presenting;
+	}
+});
+
+test("submit removes the active raw listener exactly once before the questionnaire promise settles", async () => {
+	const host = new RawOverlayHost();
+	const { presenting, cleanup } = await startRawOverlay(host);
+	try {
+		assert.equal(host.onTerminalInputCalls, 1);
+		host.component!.handleInput("\r");
+		host.component!.handleInput("s");
+		await presenting;
+		assert.equal(host.removeCalls, 1);
+		assert.equal(host.listeners.size, 0);
+	} finally { await cleanup(); }
+});
+
+test("a host rejection removes the registered raw listener without manufacturing a cancellation", async () => {
+	const host = new RawOverlayHost();
+	const error = new Error("host rejected questionnaire");
+	host.customError = error;
+	await assert.rejects(createTuiQuestionPresentationDriver(host).present(request()), error);
+	assert.equal(host.onTerminalInputCalls, 1);
+	assert.equal(host.removeCalls, 1);
+	assert.equal(host.doneCalls, 0);
+	assert.equal(host.listeners.size, 0);
+});
+
+test("a late overlay handle after cancellation cannot revive hidden state or a raw listener", async () => {
+	const host = new RawOverlayHost();
+	host.deferHandle = true;
+	const { cleanup } = await startRawOverlay(host);
+	try {
+		assert.equal(host.onTerminalInputCalls, 1);
+		assert.equal(host.onHandleCalls, 0, "the fake host retains the public callback until after termination");
+	} finally {
+		await cleanup();
+	}
+	host.deliverLateHandle();
+	assert.equal(host.onHandleCalls, 1);
+	assert.deepEqual(host.handle.setHiddenCalls, []);
+	assert.equal(host.listeners.size, 0);
+});
+
+test("a throwing raw-listener registration fails closed, retains the visible fallback, and leaks no listener", async () => {
+	const host = new RawOverlayHost();
+	host.registrationError = new Error("raw input unavailable");
+	const { cleanup } = await startRawOverlay(host);
+	try {
+		assert.equal(host.onTerminalInputCalls, 1);
+		assert.equal(host.listeners.size, 0, "a failed registration owns no live callback");
+		assert.equal(host.onHandleCalls, 1);
+		host.component!.handleInput("\u001d");
+		assert.deepEqual(host.handle.setHiddenCalls, [], "failure cannot hide the only recoverable view");
+	} finally { await cleanup(); }
 });

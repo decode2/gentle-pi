@@ -45,6 +45,7 @@ export interface QuestionnaireTuiPresentationOptions {
 	readonly externalEditor?: QuestionnaireExternalEditor;
 	readonly onExternalEditorError?: (message: string) => void;
 	readonly collapseKey?: string;
+	readonly onCollapseChange?: (collapsed: boolean) => void;
 	readonly onDone: (outcome: RawQuestionnaireOutcome) => void;
 }
 
@@ -202,6 +203,20 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		this.finish({ type: "cancel" });
 	}
 
+	isCollapseEnabled(): boolean {
+		return this.collapseMatchKey !== undefined;
+	}
+
+	isCollapsed(): boolean {
+		return this.collapsed;
+	}
+
+	consumeRawCollapseInput(data: string): boolean {
+		if (this.disposed || this.pasteActive || !this.matchesCollapseKey(data)) return false;
+		if (!isKeyRelease(data)) this.toggleCollapsed();
+		return true;
+	}
+
 	dispose(): void {
 		if (this.disposed) return;
 		this.disposed = true;
@@ -256,6 +271,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	private toggleCollapsed(): void {
 		this.collapsed = !this.collapsed;
 		this.rebuild();
+		this.presentationOptions.onCollapseChange?.(this.collapsed);
 		this.presentationOptions.tui.requestRender();
 	}
 
