@@ -8,6 +8,7 @@
   "chrome.primary.submit": "Отправить",
   "chrome.cancel": "Отмена",
   "chrome.preview.caption": "Предпросмотр:",
+  "chrome.collapsed.hint": "{key}, чтобы развернуть · Esc для отмены",
   "rpc.preview.framing": "Статический предпросмотр (RPC; полные сведения TUI недоступны):",
   "rpc.preview.caption": "Статический предпросмотр:",
   "rpc.action.choose-option": "Выбрать вариант",

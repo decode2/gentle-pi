@@ -4,6 +4,7 @@ import {
 	Editor,
 	isKeyRelease,
 	matchesKey,
+	parseKey,
 	Text,
 	truncateToWidth,
 	type Component,
@@ -43,6 +44,7 @@ export interface QuestionnaireTuiPresentationOptions {
 	readonly localize?: QuestionnaireLocalizer;
 	readonly externalEditor?: QuestionnaireExternalEditor;
 	readonly onExternalEditorError?: (message: string) => void;
+	readonly collapseKey?: string;
 	readonly onDone: (outcome: RawQuestionnaireOutcome) => void;
 }
 
@@ -75,6 +77,8 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	private finishing = false;
 	private disposed = false;
 	private externalEditorPending: { readonly editor: Editor; readonly questionIndex: number } | undefined;
+	private readonly collapseKey: string | undefined;
+	private readonly collapseMatchKey: string | undefined;
 	private collapsed = false;
 	private _focused = false;
 
@@ -99,6 +103,9 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		});
 		view = this;
 		this.presentationOptions = options;
+		const collapseKey = normalizeCollapseKey(options.collapseKey);
+		this.collapseKey = collapseKey === "off" ? undefined : collapseKey ?? "ctrl+]";
+		this.collapseMatchKey = matchingKeyId(this.collapseKey);
 		this.state = createQuestionnairePresentationState(options.request);
 		this.rebuild();
 	}
@@ -145,7 +152,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 			this.renderedWidth = bounded;
 			this.renderedTerminalRows = terminalRows;
 			this.renderedHeight = 1;
-			const hint = this.localize("chrome.collapsed.hint", "{key} to expand · Esc to cancel").replaceAll("{key}", "Ctrl+]");
+			const hint = this.localize("chrome.collapsed.hint", "{key} to expand · Esc to cancel").replaceAll("{key}", formatCollapseKey(this.collapseKey));
 			return [truncateToWidth(this.presentationOptions.theme.fg("dim", hint), bounded)];
 		}
 		if (bounded !== this.renderedWidth || terminalRows !== this.renderedTerminalRows) {
@@ -215,12 +222,12 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	private routeInput(data: string): void {
 		if (this.disposed || isKeyRelease(data)) return;
 		if (this.collapsed) {
-			if (matchesKey(data, "ctrl+]")) this.toggleCollapsed();
+			if (this.matchesCollapseKey(data)) this.toggleCollapsed();
 			else if (matchesKey(data, "escape")) this.finish({ type: "cancel" });
 			return;
 		}
 		if (this.editing && (this.pasteActive || data.includes("\u001b[200~"))) return this.handleEditorInput(data);
-		if (matchesKey(data, "ctrl+]")) return this.toggleCollapsed();
+		if (this.matchesCollapseKey(data)) return this.toggleCollapsed();
 		if (this.editing) {
 			if (this.editing === "custom" && matchesKey(data, "ctrl+g")) this.launchExternalEditor();
 			else if (matchesKey(data, "escape")) this.closeEditor();
@@ -240,6 +247,10 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	private observeMouse(method: "beforeMouse" | "afterMouse", event: TuiMouseEvent): void {
 		this.pointerScope.createMouseObserver(() => this.presentationOptions.tui.requestRender())[method](event);
 		this.optionControl?.createMouseObserver(() => this.presentationOptions.tui.requestRender())[method](event);
+	}
+
+	private matchesCollapseKey(data: string): boolean {
+		return this.collapseMatchKey !== undefined && matchingKeyId(parseKey(data)) === this.collapseMatchKey;
 	}
 
 	private toggleCollapsed(): void {
@@ -550,6 +561,42 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (action.type === "select-option") this.dispatch({ type: "select-option", questionIndex: this.state.activeQuestionIndex, label });
 		if (action.type === "toggle-option") this.dispatch({ type: "toggle-option", questionIndex: this.state.activeQuestionIndex, label });
 	}
+}
+
+const COLLAPSE_MODIFIERS = new Set(["ctrl", "shift", "alt", "super"]);
+const COLLAPSE_NAMED_KEYS = new Set([
+	"escape", "esc", "enter", "return", "tab", "space", "backspace", "delete", "insert", "clear", "home", "end",
+	"pageup", "pagedown", "up", "down", "left", "right", ...Array.from({ length: 12 }, (_, index) => `f${index + 1}`),
+]);
+const COLLAPSE_PRINTABLE_KEY = /^[a-z0-9_\-!@#$%^&*()|~`'":;,./<>?[\]{}=\\]$/;
+const COLLAPSE_BASE_ALIASES: Record<string, string> = { esc: "escape", return: "enter" };
+
+function normalizeCollapseKey(value: string | undefined): string | undefined {
+	if (value === undefined) return undefined;
+	const key = value.trim().toLowerCase();
+	if (key === "off") return key;
+	if (key.length === 0 || key.startsWith("+") || key.endsWith("+") || key.includes("++")) return undefined;
+	const parts = key.split("+");
+	const base = parts.at(-1)!;
+	const modifiers = parts.slice(0, -1);
+	if (modifiers.length !== new Set(modifiers).size || !modifiers.every((modifier) => COLLAPSE_MODIFIERS.has(modifier))) return undefined;
+	if (COLLAPSE_NAMED_KEYS.has(base)) return base.startsWith("f") && modifiers.length > 0 ? undefined : key;
+	return COLLAPSE_PRINTABLE_KEY.test(base) ? key : undefined;
+}
+
+function matchingKeyId(keyId: string | undefined): string | undefined {
+	const normalized = normalizeCollapseKey(keyId);
+	if (normalized === undefined || normalized === "off") return undefined;
+	const parts = normalized.split("+");
+	const base = COLLAPSE_BASE_ALIASES[parts.at(-1)!] ?? parts.at(-1)!;
+	const modifiers = new Set(parts.slice(0, -1));
+	return [...["shift", "ctrl", "alt", "super"].filter((modifier) => modifiers.has(modifier)), base].join("+");
+}
+
+function formatCollapseKey(keyId: string | undefined): string {
+	if (keyId === undefined) return "";
+	const display: Record<string, string> = { pageup: "PageUp", pagedown: "PageDown" };
+	return keyId.split("+").map((part) => display[part] ?? (part.length === 1 ? part.toUpperCase() : part[0]!.toUpperCase() + part.slice(1))).join("+");
 }
 
 function editorTheme(theme: QuestionnaireTuiPresentationTheme) {

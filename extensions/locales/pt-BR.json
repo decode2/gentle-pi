@@ -8,6 +8,7 @@
   "chrome.primary.submit": "Enviar",
   "chrome.cancel": "Cancelar",
   "chrome.preview.caption": "Prévia:",
+  "chrome.collapsed.hint": "{key} para expandir · Esc para cancelar",
   "rpc.preview.framing": "Prévia estática (RPC; detalhes completos da TUI indisponíveis):",
   "rpc.preview.caption": "Prévia estática:",
   "rpc.action.choose-option": "Escolher uma opção",

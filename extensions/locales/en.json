@@ -8,6 +8,7 @@
   "chrome.primary.submit": "Submit",
   "chrome.cancel": "Cancel",
   "chrome.preview.caption": "Preview:",
+  "chrome.collapsed.hint": "{key} to expand · Esc to cancel",
   "rpc.preview.framing": "Static preview (RPC; full TUI detail unavailable):",
   "rpc.preview.caption": "Static preview:",
   "rpc.action.choose-option": "Choose an option",

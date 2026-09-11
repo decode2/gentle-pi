@@ -8,6 +8,7 @@
   "chrome.primary.submit": "Надіслати",
   "chrome.cancel": "Скасувати",
   "chrome.preview.caption": "Попередній перегляд:",
+  "chrome.collapsed.hint": "{key}, щоб розгорнути · Esc для скасування",
   "rpc.preview.framing": "Статичний попередній перегляд (RPC; повні відомості TUI недоступні):",
   "rpc.preview.caption": "Статичний попередній перегляд:",
   "rpc.action.choose-option": "Вибрати варіант",

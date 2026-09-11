@@ -58,7 +58,7 @@ export interface AskUserQuestionDependencies {
 	readOwnerConfig: (agentHome: string) => Promise<QuestionOwnerConfigResolution>;
 	readGuidanceConfig?: (agentHome: string) => Promise<QuestionnaireGuidance>;
 	createLocalizer?: () => Promise<QuestionnaireLocalizer>;
-	createPresentationDriver: (ui: QuestionnaireUi, mode: QuestionnaireMode, localize?: QuestionnaireLocalizer, context?: QuestionnairePresentationContext) => QuestionPresentationDriver;
+	createPresentationDriver: (ui: QuestionnaireUi, mode: QuestionnaireMode, localize?: QuestionnaireLocalizer, context?: QuestionnairePresentationContext, collapseKey?: string) => QuestionPresentationDriver;
 }
 
 const defaultDependencies: AskUserQuestionDependencies = {
@@ -70,12 +70,12 @@ const defaultDependencies: AskUserQuestionDependencies = {
 		loadLoader: () => import("@juicesharp/rpiv-i18n/loader"),
 		packageUrl: import.meta.url,
 	}),
-	createPresentationDriver: (ui, mode, localize, context) => mode === "rpc"
+	createPresentationDriver: (ui, mode, localize, context, collapseKey) => mode === "rpc"
 		? createRpcQuestionPresentationDriver(ui, localize)
 		: createTuiQuestionPresentationDriver(ui, localize, context === undefined ? undefined : async (draft) => {
 			const { createQuestionnaireExternalEditorNodeHost } = await import("../lib/questions/external-editor-node-host.ts");
 			return createQuestionnaireExternalEditorRuntime(context, await createQuestionnaireExternalEditorNodeHost())(draft);
-		}),
+		}, collapseKey),
 };
 
 /** Factory seam for owner-safe, host-free extension tests. */
@@ -159,7 +159,7 @@ function questionnaireTool(
 					cwd: ctx.cwd,
 					agentHome,
 					isProjectTrusted: () => ctx.isProjectTrusted?.(),
-				}).present(frozen.request, signal);
+				}, ctx.mode === "tui" ? guidance.collapseKey : undefined).present(frozen.request, signal);
 				return validateAndFormat(frozen.request, outcome).result;
 			} finally {
 				setBusy(false);

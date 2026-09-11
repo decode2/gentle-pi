@@ -110,3 +110,57 @@ test("falls back when configured strings or guideline arrays are empty, whitespa
 		});
 	}
 });
+
+test("preserves valid guidance while accepting a normalized root collapseKey", async () => {
+	const { result, paths } = await readSynthetic(JSON.stringify({
+		schema: "gentle-pi.ask-user-question/v1",
+		guidance: {
+			description: "configured description",
+			promptSnippet: "configured snippet",
+			promptGuidelines: ["configured guideline"],
+		},
+		collapseKey: "  CTRL+SHIFT+K  ",
+	}));
+	assert.deepEqual(paths, [configPath]);
+	assert.deepEqual(result, {
+		description: "configured description",
+		promptSnippet: "configured snippet",
+		promptGuidelines: ["configured guideline"],
+		collapseKey: "ctrl+shift+k",
+	});
+});
+
+test("accepts off and normalized legacy named collapse keys", async (t) => {
+	for (const collapseKey of ["off", "CTRL+ESC", "ctrl+escape", "ctrl+enter", "ctrl+return", "ctrl+pageup", "ctrl+pagedown"]) {
+		await t.test(collapseKey, async () => {
+			const { result } = await readSynthetic(JSON.stringify({ schema: "gentle-pi.ask-user-question/v1", collapseKey }));
+			assert.deepEqual(result, { collapseKey: collapseKey.trim().toLowerCase() });
+		});
+	}
+});
+
+test("falls back for invalid collapseKey fields or any unknown root field", async (t) => {
+	const schema = "gentle-pi.ask-user-question/v1";
+	for (const scenario of [
+		{ name: "empty", collapseKey: "   " },
+		{ name: "non-string", collapseKey: 1 },
+		{ name: "duplicate modifier", collapseKey: "ctrl+ctrl+k" },
+		{ name: "unknown modifier", collapseKey: "control+k" },
+		{ name: "leading plus", collapseKey: "+ctrl+k" },
+		{ name: "trailing plus", collapseKey: "ctrl+k+" },
+		{ name: "double plus", collapseKey: "ctrl++k" },
+		{ name: "bare plus", collapseKey: "+" },
+		{ name: "unknown base", collapseKey: "ctrl+not-a-key" },
+		{ name: "unknown root", collapseKey: "ctrl+k", extra: true },
+	]) {
+		await t.test(scenario.name, async () => {
+			const { result, paths } = await readSynthetic(JSON.stringify({
+				schema,
+				guidance: { description: "preserved only when the full file is valid" },
+				...(scenario.extra === true ? { extra: true } : { collapseKey: scenario.collapseKey }),
+			}));
+			assert.deepEqual(paths, [configPath]);
+			assert.deepEqual(result, {});
+		});
+	}
+});

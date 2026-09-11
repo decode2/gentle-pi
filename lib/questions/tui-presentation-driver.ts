@@ -22,6 +22,7 @@ export function createTuiQuestionPresentationDriver(
 	ui: QuestionnaireTuiUI,
 	localize?: QuestionnaireLocalizer,
 	externalEditor?: QuestionnaireExternalEditor,
+	collapseKey?: string,
 ): QuestionPresentationDriver {
 	return { async present(request: FrozenQuestionnaireRequest, signal?: AbortSignal): Promise<RawQuestionnaireOutcome> {
 		if (signal?.aborted) return cancelledOutcome(request);
@@ -51,6 +52,7 @@ export function createTuiQuestionPresentationDriver(
 					theme,
 					keybindings,
 					localize,
+					collapseKey,
 					externalEditor: externalEditor === undefined ? undefined : (draft) => runExternalEditor(tui, externalEditor, draft),
 					onExternalEditorError: (message) => {
 						try {

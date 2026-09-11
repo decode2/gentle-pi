@@ -115,7 +115,7 @@ async function start(subject: ReturnType<typeof host>, mode: string, ui: TestUi 
 	await subject.sessionStarts[0]!({ type: "session_start", reason: "startup" }, { mode, hasUI, ui });
 }
 
-async function withDefaultOwner(run: () => Promise<void>): Promise<void> {
+async function withDefaultOwner(run: (agentHome: string) => Promise<void>): Promise<void> {
 	const fixture = await mkdtemp(join(tmpdir(), "gentle-pi-question-owner-"));
 	const original = new Map(["HOME", "XDG_CONFIG_HOME", "GENTLE_PI_AGENT_HOME", "PI_CODING_AGENT_DIR"].map((key) => [key, process.env[key]]));
 	const agentHome = join(fixture, "agent");
@@ -126,7 +126,7 @@ async function withDefaultOwner(run: () => Promise<void>): Promise<void> {
 		process.env.PI_CODING_AGENT_DIR = agentHome;
 		await mkdir(join(agentHome, "gentle-ai"), { recursive: true });
 		await writeFile(join(agentHome, "gentle-ai", "question-owner.json"), JSON.stringify({ schema: "gentle-pi.question-owner/v1", owner: "gentle-pi" }));
-		await run();
+		await run(agentHome);
 	} finally {
 		for (const [key, value] of original) {
 			if (value === undefined) delete process.env[key];
@@ -696,4 +696,39 @@ test("does not read optional guidance before owner admission, after an incumbent
 			assert.deepEqual(order, scenario.expectedOrder);
 		});
 	}
+});
+
+test("the admitted default TUI registration reads collapseKey from its owned first-party config", { concurrency: false }, async () => {
+	await withDefaultOwner(async (agentHome) => {
+		await writeFile(join(agentHome, "gentle-ai", "ask-user-question.json"), JSON.stringify({
+			schema: "gentle-pi.ask-user-question/v1", collapseKey: " CTRL+K ",
+		}));
+		let component: { cancel(): void; presentationOptions?: { collapseKey?: string } } | undefined;
+		let settle!: (outcome: unknown) => void;
+		const pending = new Promise<unknown>((resolve) => { settle = resolve; });
+		const tui = { terminal: { rows: 24 }, requestRender() {} };
+		const ui: TestUi = {
+			custom(factory: unknown) {
+				component = (factory as (tui: typeof tui, theme: { fg(color: string, text: string): string; bold(text: string): string }, keybindings: object, done: (outcome: unknown) => void) => typeof component)(
+					tui,
+					{ fg: (_color, text) => text, bold: (text) => text },
+					{},
+					settle,
+				);
+				return pending;
+			},
+		};
+		const subject = host();
+		createAskUserQuestionExtension()(subject.pi as never);
+		await start(subject, "tui", ui);
+		const execution = subject.tools[0]!.execute("default-collapse-key", { questions: [legacyQuestion()] }, new AbortController().signal, undefined, { mode: "tui", ui });
+		try {
+			await Promise.resolve();
+			await Promise.resolve();
+			assert.equal(component?.presentationOptions?.collapseKey, "ctrl+k");
+		} finally {
+			component?.cancel();
+			await execution;
+		}
+	});
 });

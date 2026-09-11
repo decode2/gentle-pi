@@ -182,11 +182,14 @@ After the owner permits registration, gentle-pi reads this optional, read-only f
     "description": "Ask focused questions.",
     "promptSnippet": "Ask only when a user decision is needed.",
     "promptGuidelines": ["Use ask_user_question for bounded choices."]
-  }
+  },
+  "collapseKey": "ctrl+]"
 }
 ```
 
 `guidance` may be omitted or empty. Every configured string must be non-blank, unknown keys reject the whole file, and valid values preserve their original bytes. Missing, unreadable, or invalid guidance keeps the built-in description and omits optional prompt metadata. gentle-pi never writes, migrates, or looks up legacy guidance configuration. The file is read when an eligible session registers the tool; restart Pi or start a new session after changing it. Owner selection remains required.
+
+`collapseKey` is optional and defaults to `ctrl+]`. It accepts a trimmed, case-insensitive Pi key identifier such as `ctrl+k`; use `"off"` to disable collapse. The configured key replaces the questionnaire view with the localized `{key} to expand · Esc to cancel` hint and restores any retained draft when pressed again. This is limited to the questionnaire view; it does not install a global shortcut or add raw input-listener or overlay integration.
 
 The first-party tool is available in the interactive TUI and in RPC sessions that expose both native selection and editor dialogs. Questionnaire localization is optional: when a compatible provider is available, it translates only static questionnaire chrome in both presentations; otherwise the exact English labels remain. Questions, option labels, descriptions, previews, answers, events, and formatter output always retain their authored bytes. RPC has no note controls and its editor still has no abort or timeout capability. If Pi already exposes an `ask_user_question` tool when the session starts, gentle-pi does not register another one. Pi has no atomic tool-name reservation, so a plugin loaded later can still create a dynamic collision.
 

@@ -8,6 +8,7 @@
   "chrome.primary.submit": "Envoyer",
   "chrome.cancel": "Annuler",
   "chrome.preview.caption": "Aperçu :",
+  "chrome.collapsed.hint": "{key} pour développer · Échap pour annuler",
   "rpc.preview.framing": "Aperçu statique (RPC ; détails TUI complets indisponibles) :",
   "rpc.preview.caption": "Aperçu statique :",
   "rpc.action.choose-option": "Choisir une option",

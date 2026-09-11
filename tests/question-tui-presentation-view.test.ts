@@ -568,3 +568,30 @@ test("renders only static questionnaire chrome through an injected localizer", (
 	const rebuilt = stripTerminalSequences(component.render(48).join("\n"));
 	assert.match(rebuilt, /Question 2:[\s\S]*Options[\s\S]*Custom answer[\s\S]*Submit[\s\S]*Cancel/);
 });
+
+test("a configured collapse key replaces Ctrl+] and displays its normalized key", () => {
+	type FutureCollapseOptions = ConstructorParameters<typeof QuestionnaireTuiPresentation>[0] & { collapseKey?: string };
+	const component = new QuestionnaireTuiPresentation({
+		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {}, collapseKey: "ctrl+k",
+	} as FutureCollapseOptions);
+	component.handleInput("\t");
+	component.handleInput("private draft");
+	component.handleInput("\u001d");
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Custom response/, "the old default shortcut stays with the editor when overridden");
+	component.handleInput("\u000b");
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+K to expand · Esc to cancel"]);
+});
+
+test("an off collapse key leaves Ctrl+] and Ctrl+K to the current editor", () => {
+	type FutureCollapseOptions = ConstructorParameters<typeof QuestionnaireTuiPresentation>[0] & { collapseKey?: string };
+	const component = new QuestionnaireTuiPresentation({
+		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {}, collapseKey: "off",
+	} as FutureCollapseOptions);
+	component.handleInput("\t");
+	component.handleInput("private draft");
+	component.handleInput("\u001d");
+	component.handleInput("\u000b");
+	const expanded = stripTerminalSequences(component.render(48).join("\n"));
+	assert.match(expanded, /Custom response/, "disabled collapse never enters hidden state");
+	assert.doesNotMatch(expanded, /to expand · Esc to cancel/);
+});
