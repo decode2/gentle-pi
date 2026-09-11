@@ -3,12 +3,20 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { createAskUserQuestionExtension, type AskUserQuestionDependencies } from "../extensions/ask-user-question.ts";
 import type { QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
+import type { QuestionnaireGuidance } from "../lib/questions/guidance-config.ts";
 import type { QuestionPresentationDriver } from "../lib/questions/contract.ts";
 import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
 
 type TestUi = { custom?: unknown; select?: (title: string, options: string[]) => Promise<string | undefined>; editor?: (title: string, prefill?: string) => Promise<string | undefined> };
 type SessionHandler = (event: unknown, ctx: { mode: string; hasUI?: boolean; ui: TestUi }) => Promise<void> | void;
-type RegisteredTool = { name: string; parameters: { properties?: Record<string, unknown> }; execute: (...args: unknown[]) => Promise<unknown> };
+type RegisteredTool = {
+	name: string;
+	description?: string;
+	promptSnippet?: string;
+	promptGuidelines?: string[];
+	parameters: { properties?: Record<string, unknown> };
+	execute: (...args: unknown[]) => Promise<unknown>;
+};
 type EventRecord = { channel: string; payload: unknown };
 type EventContract = {
 	sourceEventContractOracle: {
@@ -64,6 +72,29 @@ function rpcDependencies(config: QuestionOwnerConfigResolution, selectedModes: u
 				return driver.present(request, signal);
 			} };
 		},
+	};
+}
+
+type GuidanceAwareDependencies = AskUserQuestionDependencies & {
+	readGuidanceConfig: (agentHome: string) => Promise<QuestionnaireGuidance>;
+};
+
+function guidanceDependencies(
+	config: QuestionOwnerConfigResolution,
+	readGuidanceConfig: GuidanceAwareDependencies["readGuidanceConfig"],
+	order?: string[],
+): GuidanceAwareDependencies {
+	return {
+		resolveAgentHome: () => {
+			order?.push("home");
+			return "/profiles/test";
+		},
+		readOwnerConfig: async () => {
+			order?.push("owner");
+			return config;
+		},
+		readGuidanceConfig,
+		createPresentationDriver: () => ({ present: async () => { throw new Error("test driver was not supplied"); } }),
 	};
 }
 
@@ -468,4 +499,90 @@ test("makes repeated eligible RPC session starts idempotent", async () => {
 	await start(subject, "rpc", ui, true);
 	await start(subject, "rpc", ui, true);
 	assert.deepEqual(subject.tools.map((tool) => tool.name), ["ask_user_question"]);
+});
+
+test("reads first-party guidance after owner admission and incumbent inventory, preserving configured metadata in TUI and RPC", async (t) => {
+	for (const session of [
+		{ name: "TUI", mode: "tui", ui: { custom: async () => undefined }, hasUI: true },
+		{ name: "RPC", mode: "rpc", ui: { select: async () => undefined, editor: async () => undefined }, hasUI: true },
+	]) {
+		await t.test(session.name, async () => {
+			const order: string[] = [];
+			const subject = host();
+			const originalInventory = subject.pi.getAllTools;
+			subject.pi.getAllTools = () => {
+				order.push("inventory");
+				return originalInventory();
+			};
+			const configured = {
+				description: "  configured description  ",
+				promptSnippet: "  configured snippet  ",
+				promptGuidelines: ["  first guideline  ", "  second guideline  "],
+			};
+			createAskUserQuestionExtension(guidanceDependencies(owner("gentle-pi"), async (agentHome) => {
+				order.push(`guidance:${agentHome}`);
+				return configured;
+			}, order))(subject.pi as never);
+			await start(subject, session.mode, session.ui, session.hasUI);
+			assert.deepEqual(order, ["home", "owner", "inventory", "guidance:/profiles/test"]);
+			assert.deepEqual(subject.tools.map((tool) => ({
+				description: tool.description,
+				promptSnippet: tool.promptSnippet,
+				promptGuidelines: tool.promptGuidelines,
+			})), [configured]);
+		});
+	}
+});
+
+test("uses incumbent metadata when optional first-party guidance is absent or unreadable", async (t) => {
+	for (const scenario of [
+		{ name: "absent", readGuidanceConfig: async () => ({}) },
+		{ name: "reader throws", readGuidanceConfig: async () => { throw new Error("optional guidance is unreadable"); } },
+	]) {
+		await t.test(scenario.name, async () => {
+			let reads = 0;
+			const subject = host();
+			createAskUserQuestionExtension(guidanceDependencies(owner("gentle-pi"), async (agentHome) => {
+				reads++;
+				assert.equal(agentHome, "/profiles/test");
+				return scenario.readGuidanceConfig();
+			}))(subject.pi as never);
+			await start(subject, "tui");
+			assert.equal(reads, 1);
+			const tool = subject.tools[0]!;
+			assert.equal(tool.description, "Ask the user one to four structured questions in the interactive TUI.");
+			assert.equal(Object.hasOwn(tool, "promptSnippet"), false);
+			assert.equal(Object.hasOwn(tool, "promptGuidelines"), false);
+		});
+	}
+});
+
+test("does not read optional guidance before owner admission, after an incumbent, or for unsupported modes", async (t) => {
+	const cases: Array<{ name: string; config: QuestionOwnerConfigResolution; inventory?: string[]; mode: string; ui: TestUi; hasUI: boolean; expectedOrder: string[] }> = [
+		{ name: "owner denied", config: owner("disabled"), mode: "tui", ui: { custom: async () => undefined }, hasUI: true, expectedOrder: ["home", "owner"] },
+		{ name: "incumbent", config: owner("gentle-pi"), inventory: ["ask_user_question"], mode: "tui", ui: { custom: async () => undefined }, hasUI: true, expectedOrder: ["home", "owner", "inventory"] },
+		{ name: "print", config: owner("gentle-pi"), mode: "print", ui: {}, hasUI: false, expectedOrder: [] },
+		{ name: "JSON", config: owner("gentle-pi"), mode: "json", ui: {}, hasUI: false, expectedOrder: [] },
+		{ name: "RPC without native dialogs", config: owner("gentle-pi"), mode: "rpc", ui: { select: async () => undefined }, hasUI: true, expectedOrder: [] },
+	];
+	for (const scenario of cases) {
+		await t.test(scenario.name, async () => {
+			const order: string[] = [];
+			const subject = host(scenario.inventory);
+			const originalInventory = subject.pi.getAllTools;
+			subject.pi.getAllTools = () => {
+				order.push("inventory");
+				return originalInventory();
+			};
+			let reads = 0;
+			createAskUserQuestionExtension(guidanceDependencies(scenario.config, async () => {
+				reads++;
+				order.push("guidance");
+				return {};
+			}, order))(subject.pi as never);
+			await start(subject, scenario.mode, scenario.ui, scenario.hasUI);
+			assert.equal(reads, 0);
+			assert.deepEqual(order, scenario.expectedOrder);
+		});
+	}
 });

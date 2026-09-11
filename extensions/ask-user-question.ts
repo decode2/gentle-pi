@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionUIContext, ToolDefinition } from "@earendil
 import { Type } from "typebox";
 import { resolveGentlePiAgentHome } from "../lib/agent-home.ts";
 import { readQuestionOwnerConfig, type QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
+import { readQuestionnaireGuidanceConfig, type QuestionnaireGuidance } from "../lib/questions/guidance-config.ts";
 import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
 import { createTuiQuestionPresentationDriver } from "../lib/questions/tui-presentation-driver.ts";
 import {
@@ -52,12 +53,14 @@ type QuestionnaireMode = "tui" | "rpc";
 export interface AskUserQuestionDependencies {
 	resolveAgentHome: () => string;
 	readOwnerConfig: (agentHome: string) => Promise<QuestionOwnerConfigResolution>;
+	readGuidanceConfig?: (agentHome: string) => Promise<QuestionnaireGuidance>;
 	createPresentationDriver: (ui: QuestionnaireUi, mode: QuestionnaireMode) => QuestionPresentationDriver;
 }
 
 const defaultDependencies: AskUserQuestionDependencies = {
 	resolveAgentHome: resolveGentlePiAgentHome,
 	readOwnerConfig: readQuestionOwnerConfig,
+	readGuidanceConfig: readQuestionnaireGuidanceConfig,
 	createPresentationDriver: (ui, mode) => mode === "rpc"
 		? createRpcQuestionPresentationDriver(ui)
 		: createTuiQuestionPresentationDriver(ui),
@@ -73,16 +76,24 @@ export function createAskUserQuestionExtension(
 	return function askUserQuestion(pi: ExtensionAPI): void {
 		pi.on("session_start", async (_event, ctx) => {
 			if (registered || !supportedMode(ctx)) return;
+			let agentHome: string;
 			let owner: QuestionOwnerConfigResolution;
 			try {
-				owner = await dependencies.readOwnerConfig(dependencies.resolveAgentHome());
+				agentHome = dependencies.resolveAgentHome();
+				owner = await dependencies.readOwnerConfig(agentHome);
 			} catch {
 				return;
 			}
 			if (!owner.allowRegistration) return;
 			if (pi.getAllTools().some((tool) => tool.name === TOOL_NAME)) return;
 
-			pi.registerTool(questionnaireTool(pi, dependencies, () => busy, (value) => { busy = value; }));
+			let guidance: QuestionnaireGuidance = {};
+			try {
+				guidance = await dependencies.readGuidanceConfig?.(agentHome) ?? {};
+			} catch {
+				// Optional guidance must not override an admitted owner decision.
+			}
+			pi.registerTool(questionnaireTool(pi, dependencies, guidance, () => busy, (value) => { busy = value; }));
 			registered = true;
 			// Pi exposes no atomic reserve operation; a later dynamic collision remains host-owned.
 		});
@@ -92,13 +103,16 @@ export function createAskUserQuestionExtension(
 function questionnaireTool(
 	pi: ExtensionAPI,
 	dependencies: AskUserQuestionDependencies,
+	guidance: QuestionnaireGuidance,
 	isBusy: () => boolean,
 	setBusy: (value: boolean) => void,
 ): ToolDefinition<typeof ParametersSchema, QuestionnaireToolResult["details"]> {
 	return {
 		name: TOOL_NAME,
 		label: "Ask User Question",
-		description: "Ask the user one to four structured questions in the interactive TUI.",
+		description: guidance.description ?? "Ask the user one to four structured questions in the interactive TUI.",
+		...(guidance.promptSnippet === undefined ? {} : { promptSnippet: guidance.promptSnippet }),
+		...(guidance.promptGuidelines === undefined ? {} : { promptGuidelines: guidance.promptGuidelines }),
 		parameters: ParametersSchema,
 		executionMode: "sequential",
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {

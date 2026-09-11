@@ -167,6 +167,27 @@ pi install npm:pi-lens
 
 The agent home resolves in this order: `GENTLE_PI_AGENT_HOME`, `PI_CODING_AGENT_DIR`, then `~/.pi/agent`. Missing, unreadable, or malformed configuration fails closed: the extension does not register the tool or write configuration. Use `"owner": "legacy-external"` to suppress only gentle-pi's first-party registration while another extension supplies the tool; `"disabled"` likewise suppresses only the first-party registration. Neither setting reserves a name, unregisters, or disables an external tool.
 
+#### Optional questionnaire guidance
+
+After the owner permits registration, gentle-pi reads this optional, read-only file:
+
+```text
+<resolved agent home>/gentle-ai/ask-user-question.json
+```
+
+```json
+{
+  "schema": "gentle-pi.ask-user-question/v1",
+  "guidance": {
+    "description": "Ask focused questions.",
+    "promptSnippet": "Ask only when a user decision is needed.",
+    "promptGuidelines": ["Use ask_user_question for bounded choices."]
+  }
+}
+```
+
+`guidance` may be omitted or empty. Every configured string must be non-blank, unknown keys reject the whole file, and valid values preserve their original bytes. Missing, unreadable, or invalid guidance keeps the built-in description and omits optional prompt metadata. gentle-pi never writes, migrates, or looks up legacy guidance configuration. The file is read when an eligible session registers the tool; restart Pi or start a new session after changing it. Owner selection remains required.
+
 The first-party tool is available only in the interactive TUI. If Pi already exposes an `ask_user_question` tool when the session starts, gentle-pi does not register another one. Pi has no atomic tool-name reservation, so a plugin loaded later can still create a dynamic collision. Public RPC support remains deferred because Pi's RPC editor has no abort or timeout capability.
 
 Then start Pi in a project:
