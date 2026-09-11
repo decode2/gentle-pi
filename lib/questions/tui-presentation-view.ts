@@ -16,6 +16,7 @@ import {
 import { NativeFullscreenInteraction } from "../native-fullscreen-interaction.ts";
 import { NativePointerScope } from "../native-pointer-region.ts";
 import type { FrozenQuestionnaireRequest, RawQuestionnaireOutcome } from "./contract.ts";
+import type { QuestionnaireExternalEditor } from "./external-editor.ts";
 import type { QuestionnaireLocalizer } from "./localization.ts";
 import { QuestionOptionControl, type QuestionOptionControlAction } from "./option-control.ts";
 import {
@@ -40,6 +41,8 @@ export interface QuestionnaireTuiPresentationOptions {
 	readonly theme: QuestionnaireTuiPresentationTheme;
 	readonly keybindings?: KeybindingsManager;
 	readonly localize?: QuestionnaireLocalizer;
+	readonly externalEditor?: QuestionnaireExternalEditor;
+	readonly onExternalEditorError?: (message: string) => void;
 	readonly onDone: (outcome: RawQuestionnaireOutcome) => void;
 }
 
@@ -71,6 +74,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	private rebuilding = false;
 	private finishing = false;
 	private disposed = false;
+	private externalEditorPending: { readonly editor: Editor; readonly questionIndex: number } | undefined;
 	private _focused = false;
 
 	get focused(): boolean { return this._focused; }
@@ -190,6 +194,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		this.renderedHeight = undefined;
 		this.pasteActive = false;
 		this.pasteBuffer = "";
+		this.externalEditorPending = undefined;
 		if (this.editor) this.editor.onChange = undefined;
 		this.editor = undefined;
 		this.editorQuestionIndex = undefined;
@@ -202,6 +207,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (this.disposed || isKeyRelease(data)) return;
 		if (this.editing) {
 			if (this.pasteActive || data.includes("\u001b[200~")) this.handleEditorInput(data);
+			else if (this.editing === "custom" && matchesKey(data, "ctrl+g")) this.launchExternalEditor();
 			else if (matchesKey(data, "escape")) this.closeEditor();
 			else if (matchesKey(data, "enter")) this.editor!.insertTextAtCursor("\n");
 			else this.handleEditorInput(data);
@@ -327,6 +333,46 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		this.pasteBuffer = "";
 		if (rebuild) this.rebuild();
 		this.presentationOptions.tui.requestRender();
+	}
+
+	private launchExternalEditor(): void {
+		const editor = this.editor;
+		const questionIndex = this.editorQuestionIndex;
+		const externalEditor = this.presentationOptions.externalEditor;
+		if (!editor || !externalEditor || this.externalEditorPending || this.pasteActive || this.editing !== "custom" ||
+			questionIndex === undefined || questionIndex !== this.state.activeQuestionIndex || this.state.tabs[questionIndex] !== "custom") return;
+		const pending = { editor, questionIndex };
+		this.externalEditorPending = pending;
+		void this.runExternalEditor(pending, editor.getExpandedText(), externalEditor);
+	}
+
+	private async runExternalEditor(pending: { readonly editor: Editor; readonly questionIndex: number }, draft: string, externalEditor: QuestionnaireExternalEditor): Promise<void> {
+		try {
+			const edited = await externalEditor(draft);
+			if (!this.isCurrentExternalEditor(pending)) return;
+			pending.editor.setText(edited);
+			this.storeEditorValue("custom", pending.questionIndex, pending.editor.getExpandedText());
+			this.presentationOptions.tui.requestRender();
+		} catch {
+			if (!this.isCurrentExternalEditor(pending)) return;
+			this.externalEditorPending = undefined;
+			this.reportExternalEditorError();
+		} finally {
+			if (this.externalEditorPending === pending) this.externalEditorPending = undefined;
+		}
+	}
+
+	private isCurrentExternalEditor(pending: { readonly editor: Editor; readonly questionIndex: number }): boolean {
+		return !this.disposed && this.externalEditorPending === pending && this.editing === "custom" && this.editor === pending.editor &&
+			this.editorQuestionIndex === pending.questionIndex && this.state.activeQuestionIndex === pending.questionIndex && this.state.tabs[pending.questionIndex] === "custom";
+	}
+
+	private reportExternalEditorError(): void {
+		try {
+			this.presentationOptions.onExternalEditorError?.(this.localize("editor.failed", "External editor failed"));
+		} catch {
+			// A notification failure must not escape a handled editor rejection.
+		}
 	}
 
 	private handleEditorInput(data: string): void {

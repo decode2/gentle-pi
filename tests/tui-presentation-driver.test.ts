@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionUIContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, KeybindingsManager, OverlayHandle, OverlayOptions, TUI } from "@earendil-works/pi-tui";
+import type { QuestionnaireExternalEditor } from "../lib/questions/external-editor.ts";
 import { createTuiQuestionPresentationDriver } from "../lib/questions/tui-presentation-driver.ts";
 import { validateAndFormat } from "../lib/questions/response.ts";
 import { QuestionnaireTuiPresentation } from "../lib/questions/tui-presentation-view.ts";
@@ -48,7 +49,13 @@ function owned(outcome: unknown) {
 }
 
 class FakeCustomHost implements Pick<ExtensionUIContext, "custom"> {
-	readonly tui = { terminal: { rows: 24 }, requestRender: () => {} } as TUI;
+	readonly lifecycle: string[] = [];
+	readonly tui = {
+		terminal: { rows: 24 },
+		requestRender: (force?: boolean) => { this.lifecycle.push(`render:${force === true}`); },
+		stop: (options?: { preserveScreen?: boolean }) => { this.lifecycle.push(`stop:${options?.preserveScreen === true}`); },
+		start: () => { this.lifecycle.push("start"); },
+	} as TUI;
 	readonly keybindings = {} as KeybindingsManager;
 	readonly received: Array<{ tui: TUI; theme: Theme; keybindings: KeybindingsManager }> = [];
 	readonly receivedOptions: Array<CustomOptions | undefined> = [];
@@ -83,6 +90,52 @@ class FakeCustomHost implements Pick<ExtensionUIContext, "custom"> {
 		this.run(this.component);
 		return result;
 	}
+}
+
+type FutureTuiDriverFactory = (
+	ui: Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "notify">>,
+	localize?: Parameters<typeof createTuiQuestionPresentationDriver>[1],
+	externalEditor?: QuestionnaireExternalEditor,
+) => ReturnType<typeof createTuiQuestionPresentationDriver>;
+
+async function settleExternalEditor(): Promise<void> {
+	await Promise.resolve();
+	await Promise.resolve();
+}
+
+function assertSubsequence(actual: readonly string[], expected: readonly string[]): void {
+	let offset = 0;
+	for (const entry of expected) {
+		offset = actual.indexOf(entry, offset);
+		assert.ok(offset >= 0, `trace includes ${entry} after ${actual.join(", ")}`);
+		offset++;
+	}
+}
+
+async function captureDriverExternalEditor(host: FakeCustomHost, editor: QuestionnaireExternalEditor) {
+	const presenting = createTuiQuestionPresentationDriver(host, undefined, editor).present(request());
+	await settleExternalEditor();
+	const externalEditor = (host.component as unknown as { presentationOptions?: { externalEditor?: QuestionnaireExternalEditor } } | undefined)
+		?.presentationOptions?.externalEditor;
+	if (!externalEditor) throw new Error("driver-created view exposes an injected external editor");
+	return {
+		externalEditor,
+		cleanup: async () => {
+			host.component?.cancel();
+			await presenting;
+		},
+	};
+}
+
+async function expectUndefinedRejection(operation: () => Promise<unknown>): Promise<void> {
+	let rejected = false;
+	try {
+		await operation();
+	} catch (error) {
+		rejected = true;
+		assert.equal(error, undefined);
+	}
+	assert.equal(rejected, true);
 }
 
 class SyncThrowAfterFactoryHost implements Pick<ExtensionUIContext, "custom"> {
@@ -137,6 +190,102 @@ test("invokes custom once with host arguments and returns a reducer-owned partia
 		answers: [{ questionIndex: 0, question: "Choose a route", kind: "option", answer: "Direct" }],
 	});
 });
+
+test("future external editing stops the TUI before invocation and restores a forced render after success", async () => {
+	const calls: string[] = [];
+	const host = new FakeCustomHost((component) => {
+		component.handleInput("\t");
+		component.handleInput("driver draft");
+		component.handleInput("\u0007");
+	});
+	const driver = (createTuiQuestionPresentationDriver as unknown as FutureTuiDriverFactory)(host, undefined, async (draft) => {
+		host.lifecycle.push(`editor:${draft}`);
+		calls.push(draft);
+		return "driver result";
+	});
+	const presenting = driver.present(request());
+	try {
+		await settleExternalEditor();
+		assert.deepEqual(calls, ["driver draft"]);
+		assertSubsequence(host.lifecycle, ["stop:true", "editor:driver draft", "start", "render:true"]);
+	} finally {
+		host.component?.cancel();
+		await presenting;
+	}
+});
+
+test("future external editing restores the TUI and reports localized rejection through the public driver UI", async () => {
+	const calls: string[] = [];
+	const notices: string[] = [];
+	const host = new FakeCustomHost((component) => {
+		component.handleInput("\t");
+		component.handleInput("failure draft");
+		component.handleInput("\u0007");
+	});
+	const ui = Object.assign(host, { notify(message: string, level?: string) { notices.push(`${level}:${message}`); } }) as Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "notify">>;
+	const driver = (createTuiQuestionPresentationDriver as unknown as FutureTuiDriverFactory)(ui,
+		(key, fallback) => key === "editor.failed" ? "Editor fehlgeschlagen" : fallback,
+		async (draft) => {
+			host.lifecycle.push(`editor:${draft}`);
+			calls.push(draft);
+			throw new Error("editor rejected");
+		});
+	const presenting = driver.present(request());
+	try {
+		await settleExternalEditor();
+		assert.deepEqual(calls, ["failure draft"]);
+		assertSubsequence(host.lifecycle, ["stop:true", "editor:failure draft", "start", "render:true"]);
+		assert.deepEqual(notices, ["error:Editor fehlgeschlagen"]);
+	} finally {
+		host.component?.cancel();
+		await presenting;
+	}
+});
+
+test("an undefined start failure preserves the external draft and reports the view error", async () => {
+	const notices: string[] = [];
+	const host = new FakeCustomHost((component) => {
+		component.handleInput("\t");
+		component.handleInput("original draft");
+		component.handleInput("\u0007");
+	});
+	host.tui.start = () => { host.lifecycle.push("start"); throw undefined; };
+	const ui = Object.assign(host, { notify(message: string, level?: string) { notices.push(`${level}:${message}`); } }) as Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "notify">>;
+	const presenting = createTuiQuestionPresentationDriver(ui, undefined, async () => "edited value").present(request());
+	try {
+		await settleExternalEditor();
+		assert.match(host.component!.render(48).join("\n"), /original draft/);
+		assert.deepEqual(notices, ["error:External editor failed"]);
+		assertSubsequence(host.lifecycle, ["stop:true", "start", "render:true"]);
+	} finally {
+		host.component?.cancel();
+		await presenting;
+	}
+});
+
+for (const scenario of [
+	{ name: "an undefined editor failure before a start error", calls: 1, configure(host: FakeCustomHost) { host.tui.start = () => { host.lifecycle.push("start"); throw new Error("start"); }; }, editor: async () => { throw undefined; } },
+	{ name: "an undefined stop failure before a start error", calls: 0, configure(host: FakeCustomHost) { host.tui.stop = () => { host.lifecycle.push("stop:true"); throw undefined; }; host.tui.start = () => { host.lifecycle.push("start"); throw new Error("start"); }; }, editor: async () => "unused" },
+	{ name: "an undefined forced render failure after editor success", calls: 1, configure(host: FakeCustomHost) { host.tui.requestRender = (force?: boolean) => { host.lifecycle.push(`render:${force === true}`); throw undefined; }; }, editor: async () => "edited" },
+	{ name: "an undefined start failure before a render error", calls: 1, configure(host: FakeCustomHost) { host.tui.start = () => { host.lifecycle.push("start"); throw undefined; }; host.tui.requestRender = (force?: boolean) => { host.lifecycle.push(`render:${force === true}`); throw new Error("render"); }; }, editor: async () => "edited" },
+]) {
+	test(`driver wrapper preserves ${scenario.name}`, async () => {
+		const host = new FakeCustomHost(() => {});
+		let calls = 0;
+		scenario.configure(host);
+		const { externalEditor, cleanup } = await captureDriverExternalEditor(host, async (draft) => {
+			calls++;
+			return scenario.editor(draft);
+		});
+		try {
+			await expectUndefinedRejection(() => externalEditor("draft"));
+			assert.equal(calls, scenario.calls);
+			assert.ok(host.lifecycle.includes("render:true"));
+		} finally {
+			await cleanup();
+		}
+	});
+}
 
 test("requests a full-width terminal-capped public overlay for the questionnaire", async () => {
 	const host = new FakeCustomHost((component) => component.handleInput("\u001b"));

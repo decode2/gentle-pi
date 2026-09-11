@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { StdinBuffer, stripTerminalSequences, type TUI, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
+import type { QuestionnaireExternalEditor } from "../lib/questions/external-editor.ts";
 import { QuestionnaireTuiPresentation } from "../lib/questions/tui-presentation-view.ts";
 import { createFrozenQuestionnaireRequest } from "../lib/questions/validation.ts";
 
@@ -50,6 +51,137 @@ function clickVisible(component: QuestionnaireTuiPresentation, label: string | R
 	assert.ok(y >= 0, `${width}-column layout contains ${String(label)}`);
 	component.handleMouse(mouse(width, y, lines.length));
 }
+
+test("Ctrl+G launches the external editor only from a custom-answer draft", async () => {
+	const calls: string[] = [];
+	const externalEditor: QuestionnaireExternalEditor = async (content) => {
+		calls.push(content);
+		return "edited externally";
+	};
+	const component = new QuestionnaireTuiPresentation({
+		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {}, externalEditor,
+	} as ConstructorParameters<typeof QuestionnaireTuiPresentation>[0] & { externalEditor: QuestionnaireExternalEditor });
+
+	component.handleInput("\t");
+	component.handleInput("draft before external edit");
+	component.handleInput("\u0007");
+	await Promise.resolve();
+
+	assert.deepEqual(calls, ["draft before external edit"]);
+});
+
+type FutureExternalViewOptions = ConstructorParameters<typeof QuestionnaireTuiPresentation>[0] & {
+	externalEditor?: QuestionnaireExternalEditor;
+	onExternalEditorError?: (message: string) => void;
+};
+
+function externalView(externalEditor: QuestionnaireExternalEditor, onExternalEditorError: (message: string) => void = () => {}, localize?: (key: string, fallback: string) => string) {
+	const outcomes: unknown[] = [];
+	const component = new QuestionnaireTuiPresentation({
+		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme,
+		onDone: (outcome) => outcomes.push(outcome), externalEditor, onExternalEditorError, localize,
+	} as FutureExternalViewOptions);
+	return { component, outcomes };
+}
+
+async function settleExternalEditor(): Promise<void> {
+	await Promise.resolve();
+	await Promise.resolve();
+}
+
+test("Ctrl+G updates the visible custom draft without completing, then Next and Submit commit its multiline result", async () => {
+	const calls: string[] = [];
+	const { component, outcomes } = externalView(async (draft) => {
+		calls.push(draft);
+		return "edited externally\nsecond line";
+	});
+	component.handleInput("\t");
+	component.handleInput("draft before external edit");
+	component.handleInput("\u0007");
+	await settleExternalEditor();
+	assert.deepEqual(calls, ["draft before external edit"]);
+	assert.equal(outcomes.length, 0, "external editing does not complete the questionnaire");
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /edited externally[\s\S]*second line/, "the active editor visibly contains the external result before commit");
+	component.handleInput("\u001b");
+	component.handleInput("n");
+	component.handleInput("s");
+	assert.deepEqual(outcomes, [{ correlationId: "view-correlation", cancelled: false, answers: [{
+		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "custom", answer: "edited externally\nsecond line",
+	}] }]);
+});
+
+test("Ctrl+G is ignored from an option tab", async () => {
+	const calls: string[] = [];
+	const { component } = externalView(async (draft) => {
+		calls.push(draft);
+		return draft;
+	});
+	component.handleInput("\u0007");
+	await settleExternalEditor();
+	assert.deepEqual(calls, [], "Ctrl+G on options remains a no-op");
+});
+
+test("Ctrl+G coalesces a pending launch and permits a later launch after settlement", async () => {
+	const calls: string[] = [];
+	const resolvers: Array<(value: string) => void> = [];
+	const { component } = externalView((draft) => {
+		calls.push(draft);
+		return new Promise((resolve) => resolvers.push(resolve));
+	});
+	component.handleInput("\t");
+	component.handleInput("stable draft");
+	component.handleInput("\u0007");
+	component.handleInput("\u0007");
+	await settleExternalEditor();
+	assert.deepEqual(calls, ["stable draft"]);
+	resolvers.shift()!("first result");
+	await settleExternalEditor();
+	component.handleInput("\u0007");
+	await settleExternalEditor();
+	assert.deepEqual(calls, ["stable draft", "first result"]);
+	resolvers.shift()!("second result");
+	await settleExternalEditor();
+});
+
+test("a rejected editor preserves the draft, reports localized failure, and clears the launch guard", async () => {
+	const calls: string[] = [];
+	const notices: string[] = [];
+	const { component } = externalView(async (draft) => {
+		calls.push(draft);
+		if (calls.length === 1) throw new Error("editor failed");
+		return "recovered draft";
+	}, (message) => notices.push(message), (key, fallback) => key === "editor.failed" ? "Editor fehlgeschlagen" : fallback);
+	component.handleInput("\t");
+	component.handleInput("preserve me");
+	component.handleInput("\u0007");
+	await settleExternalEditor();
+	assert.deepEqual(calls, ["preserve me"]);
+	assert.deepEqual(notices, ["Editor fehlgeschlagen"]);
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /preserve me/, "a rejection retains the original visible draft");
+	component.handleInput("\u0007");
+	await settleExternalEditor();
+	assert.deepEqual(calls, ["preserve me", "preserve me"]);
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /recovered draft/);
+});
+
+test("a deferred editor completion after disposal cannot resurrect the view", async () => {
+	const calls: string[] = [];
+	let resolveEditor!: (value: string) => void;
+	const { component, outcomes } = externalView((draft) => {
+		calls.push(draft);
+		return new Promise((resolve) => { resolveEditor = resolve; });
+	});
+	component.handleInput("\t");
+	component.handleInput("late draft");
+	component.handleInput("\u0007");
+	await settleExternalEditor();
+	assert.deepEqual(calls, ["late draft"], "the launch reaches the injected editor before disposal coverage begins");
+	component.dispose();
+	resolveEditor("must not return");
+	await settleExternalEditor();
+	assert.deepEqual(component.render(48), []);
+	assert.deepEqual(outcomes, []);
+});
 
 test("selecting is display-only until Next, then Submit emits reducer-owned frozen metadata once", () => {
 	const outcomes: unknown[] = [];

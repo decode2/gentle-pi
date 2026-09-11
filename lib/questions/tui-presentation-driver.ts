@@ -5,6 +5,7 @@ import type {
 	QuestionPresentationDriver,
 	RawQuestionnaireOutcome,
 } from "./contract.ts";
+import type { QuestionnaireExternalEditor } from "./external-editor.ts";
 import type { QuestionnaireLocalizer } from "./localization.ts";
 import { QuestionnaireTuiPresentation } from "./tui-presentation-view.ts";
 import {
@@ -14,11 +15,13 @@ import {
 } from "./presentation-state.ts";
 
 type DisposedComponent = Component & { dispose(): void };
+type QuestionnaireTuiUI = Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "notify">>;
 
 /** Bridges the public Pi custom-component host to the fullscreen questionnaire view. */
 export function createTuiQuestionPresentationDriver(
-	ui: Pick<ExtensionUIContext, "custom">,
+	ui: QuestionnaireTuiUI,
 	localize?: QuestionnaireLocalizer,
+	externalEditor?: QuestionnaireExternalEditor,
 ): QuestionPresentationDriver {
 	return { async present(request: FrozenQuestionnaireRequest, signal?: AbortSignal): Promise<RawQuestionnaireOutcome> {
 		if (signal?.aborted) return cancelledOutcome(request);
@@ -48,6 +51,14 @@ export function createTuiQuestionPresentationDriver(
 					theme,
 					keybindings,
 					localize,
+					externalEditor: externalEditor === undefined ? undefined : (draft) => runExternalEditor(tui, externalEditor, draft),
+					onExternalEditorError: (message) => {
+						try {
+							ui.notify?.(message, "error");
+						} catch {
+							// Error notification is best effort after the editor failure is contained.
+						}
+					},
 					request,
 					onDone: (outcome) => {
 						if (terminal) return;
@@ -68,6 +79,35 @@ export function createTuiQuestionPresentationDriver(
 			terminate();
 		}
 	} };
+}
+
+async function runExternalEditor(tui: import("@earendil-works/pi-tui").TUI, externalEditor: QuestionnaireExternalEditor, draft: string): Promise<string> {
+	let primaryFailed = false;
+	try {
+		tui.stop({ preserveScreen: true });
+		return await externalEditor(draft);
+	} catch (error) {
+		primaryFailed = true;
+		throw error;
+	} finally {
+		let restoreFailed = false;
+		let restoreError: unknown;
+		try {
+			tui.start();
+		} catch (error) {
+			restoreFailed = true;
+			restoreError = error;
+		}
+		try {
+			tui.requestRender(true);
+		} catch (error) {
+			if (!restoreFailed) {
+				restoreFailed = true;
+				restoreError = error;
+			}
+		}
+		if (!primaryFailed && restoreFailed) throw restoreError;
+	}
 }
 
 function cancelledOutcome(request: FrozenQuestionnaireRequest): RawQuestionnaireOutcome {
