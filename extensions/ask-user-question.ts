@@ -2,6 +2,7 @@ import type { ExtensionAPI, ExtensionUIContext, ToolDefinition } from "@earendil
 import { Type } from "typebox";
 import { resolveGentlePiAgentHome } from "../lib/agent-home.ts";
 import { readQuestionOwnerConfig, type QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
+import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
 import { createTuiQuestionPresentationDriver } from "../lib/questions/tui-presentation-driver.ts";
 import {
 	MAX_HEADER_LENGTH, MAX_LABEL_LENGTH, MAX_OPTIONS, MAX_QUESTIONS, MIN_OPTIONS, RESERVED_LABELS,
@@ -45,16 +46,21 @@ const ParametersSchema = Type.Object({
 	questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: 4 }),
 }, { additionalProperties: false });
 
+type QuestionnaireUi = Pick<ExtensionUIContext, "custom" | "select" | "editor">;
+type QuestionnaireMode = "tui" | "rpc";
+
 export interface AskUserQuestionDependencies {
 	resolveAgentHome: () => string;
 	readOwnerConfig: (agentHome: string) => Promise<QuestionOwnerConfigResolution>;
-	createPresentationDriver: (ui: Pick<ExtensionUIContext, "custom">) => QuestionPresentationDriver;
+	createPresentationDriver: (ui: QuestionnaireUi, mode: QuestionnaireMode) => QuestionPresentationDriver;
 }
 
 const defaultDependencies: AskUserQuestionDependencies = {
 	resolveAgentHome: resolveGentlePiAgentHome,
 	readOwnerConfig: readQuestionOwnerConfig,
-	createPresentationDriver: createTuiQuestionPresentationDriver,
+	createPresentationDriver: (ui, mode) => mode === "rpc"
+		? createRpcQuestionPresentationDriver(ui)
+		: createTuiQuestionPresentationDriver(ui),
 };
 
 /** Factory seam for owner-safe, host-free extension tests. */
@@ -66,7 +72,7 @@ export function createAskUserQuestionExtension(
 
 	return function askUserQuestion(pi: ExtensionAPI): void {
 		pi.on("session_start", async (_event, ctx) => {
-			if (registered || ctx.mode !== "tui") return;
+			if (registered || !supportedMode(ctx)) return;
 			let owner: QuestionOwnerConfigResolution;
 			try {
 				owner = await dependencies.readOwnerConfig(dependencies.resolveAgentHome());
@@ -96,7 +102,7 @@ function questionnaireTool(
 		parameters: ParametersSchema,
 		executionMode: "sequential",
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
-			if (ctx.mode !== "tui") return errorResult(LEGACY_FAILURES.no_ui);
+			if (!supportedMode(ctx)) return errorResult(LEGACY_FAILURES.no_ui);
 			if (isBusy()) throw new Error("ask_user_question is already active");
 			const frozen = createFrozenQuestionnaireRequest(toolCallId, params);
 			if (!frozen.ok) return legacyInputFailure(params, frozen.failure);
@@ -115,7 +121,7 @@ function questionnaireTool(
 					})),
 				});
 				pi.events.emit(BLOCKED_EVENT, { active: true });
-				const outcome = await dependencies.createPresentationDriver(ctx.ui).present(frozen.request, signal);
+				const outcome = await dependencies.createPresentationDriver(ctx.ui, ctx.mode).present(frozen.request, signal);
 				return validateAndFormat(frozen.request, outcome).result;
 			} finally {
 				setBusy(false);
@@ -123,6 +129,11 @@ function questionnaireTool(
 			}
 		},
 	};
+}
+
+function supportedMode(ctx: { mode: string; hasUI?: boolean; ui: QuestionnaireUi }): ctx is { mode: QuestionnaireMode; hasUI?: boolean; ui: QuestionnaireUi } {
+	return ctx.mode === "tui" || ctx.mode === "rpc" && ctx.hasUI === true
+		&& typeof ctx.ui.select === "function" && typeof ctx.ui.editor === "function";
 }
 
 function legacyInputFailure(input: unknown, fallback: QuestionnaireFailure): QuestionnaireToolResult {

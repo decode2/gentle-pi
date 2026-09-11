@@ -16,11 +16,7 @@ export function createRpcQuestionPresentationDriver(
 ): QuestionPresentationDriver {
 	return { async present(request) {
 		let state = createQuestionnairePresentationState(request);
-		try {
-			while (!state.cancelled && !state.submitted) state = await presentQuestion(ui, state);
-		} catch {
-			state = reduceQuestionnairePresentation(state, { type: "cancel" });
-		}
+		while (!state.cancelled && !state.submitted) state = await presentQuestion(ui, state);
 		return toRawQuestionnaireOutcome(state);
 	} };
 }
@@ -41,8 +37,6 @@ async function presentQuestion(
 		const committed = reduceQuestionnairePresentation(state, { type: "next" });
 		return action === "Submit" ? reduceQuestionnairePresentation(committed, { type: "submit-partial" }) : moveTo(committed, index + 1);
 	}
-	if (action === "Add question note") return editQuestionNote(ui, state, index);
-	if (action === "Add global note") return editGlobalNote(ui, state);
 	if (action === "Use custom text") return editCustom(ui, state, index);
 	return chooseOption(ui, state, question, index);
 }
@@ -52,8 +46,6 @@ function actionsFor(state: QuestionnairePresentationState, question: FrozenQuest
 	return [
 		question.multiSelect ? "Choose options" : "Choose an option",
 		"Use custom text",
-		"Add question note",
-		"Add global note",
 		...(index > 0 ? ["Back"] : []),
 		...(state.committed[index] === undefined ? ["Skip"] : []),
 		...(index === state.request.questions.length - 1 ? ["Submit"] : ["Next"]),
@@ -85,23 +77,6 @@ async function editCustom(
 	if (value === undefined) return cancel(state);
 	const custom = reduceQuestionnairePresentation(state, { type: "set-custom-draft", questionIndex: index, value });
 	return reduceQuestionnairePresentation(custom, { type: "set-tab", questionIndex: index, tab: "custom" });
-}
-
-async function editQuestionNote(
-	ui: Pick<ExtensionUIContext, "select" | "editor">,
-	state: QuestionnairePresentationState,
-	index: number,
-): Promise<QuestionnairePresentationState> {
-	const value = await ui.editor("Question note", state.questionNotes[index]);
-	return value === undefined ? cancel(state) : reduceQuestionnairePresentation(state, { type: "set-question-note", questionIndex: index, value });
-}
-
-async function editGlobalNote(
-	ui: Pick<ExtensionUIContext, "select" | "editor">,
-	state: QuestionnairePresentationState,
-): Promise<QuestionnairePresentationState> {
-	const value = await ui.editor("Global note", state.globalNote);
-	return value === undefined ? cancel(state) : reduceQuestionnairePresentation(state, { type: "set-global-note", value });
 }
 
 function moveTo(state: QuestionnairePresentationState, index: number): QuestionnairePresentationState {

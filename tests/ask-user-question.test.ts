@@ -4,8 +4,10 @@ import test from "node:test";
 import { createAskUserQuestionExtension, type AskUserQuestionDependencies } from "../extensions/ask-user-question.ts";
 import type { QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
 import type { QuestionPresentationDriver } from "../lib/questions/contract.ts";
+import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
 
-type SessionHandler = (event: unknown, ctx: { mode: string; ui: { custom: unknown } }) => Promise<void> | void;
+type TestUi = { custom?: unknown; select?: (title: string, options: string[]) => Promise<string | undefined>; editor?: (title: string, prefill?: string) => Promise<string | undefined> };
+type SessionHandler = (event: unknown, ctx: { mode: string; hasUI?: boolean; ui: TestUi }) => Promise<void> | void;
 type RegisteredTool = { name: string; parameters: { properties?: Record<string, unknown> }; execute: (...args: unknown[]) => Promise<unknown> };
 type EventRecord = { channel: string; payload: unknown };
 type EventContract = {
@@ -50,18 +52,40 @@ function dependencies(config: QuestionOwnerConfigResolution, driver?: QuestionPr
 	};
 }
 
-async function start(subject: ReturnType<typeof host>, mode: string, custom: unknown = async () => undefined): Promise<void> {
-	assert.equal(subject.sessionStarts.length, 1, "the factory registers one session_start handler");
-	await subject.sessionStarts[0]!({ type: "session_start", reason: "startup" }, { mode, ui: { custom } });
+function rpcDependencies(config: QuestionOwnerConfigResolution, selectedModes: unknown[], correlations: string[]): AskUserQuestionDependencies {
+	return {
+		resolveAgentHome: () => "/profiles/test",
+		readOwnerConfig: async () => config,
+		createPresentationDriver: (ui, mode?: string) => {
+			selectedModes.push(mode);
+			const driver = createRpcQuestionPresentationDriver(ui as never);
+			return { present: async (request, signal) => {
+				correlations.push(request.correlationId);
+				return driver.present(request, signal);
+			} };
+		},
+	};
 }
 
-test("does not register the questionnaire for legacy or disabled owners", async () => {
+async function start(subject: ReturnType<typeof host>, mode: string, ui: TestUi = { custom: async () => undefined }, hasUI = mode === "tui"): Promise<void> {
+	assert.equal(subject.sessionStarts.length, 1, "the factory registers one session_start handler");
+	await subject.sessionStarts[0]!({ type: "session_start", reason: "startup" }, { mode, hasUI, ui });
+}
+
+test("does not register the questionnaire for legacy or disabled owners", async (t) => {
 	for (const configuredOwner of ["legacy-external", "disabled"] as const) {
-		const subject = host();
-		createAskUserQuestionExtension(dependencies(owner(configuredOwner)))(subject.pi as never);
-		assert.deepEqual(subject.tools, [], "factory registration is deferred until a session has a mode");
-		await start(subject, "tui");
-		assert.deepEqual(subject.tools, []);
+		for (const session of [
+			{ name: "tui", mode: "tui", ui: { custom: async () => undefined }, hasUI: true },
+			{ name: "rpc", mode: "rpc", ui: { select: async () => undefined, editor: async () => undefined }, hasUI: true },
+		]) {
+			await t.test(`${configuredOwner} ${session.name}`, async () => {
+				const subject = host();
+				createAskUserQuestionExtension(dependencies(owner(configuredOwner)))(subject.pi as never);
+				assert.deepEqual(subject.tools, [], "factory registration is deferred until a session has a mode");
+				await start(subject, session.mode, session.ui, session.hasUI);
+				assert.deepEqual(subject.tools, []);
+			});
+		}
 	}
 });
 
@@ -82,11 +106,34 @@ test("registers the exact bounded questionnaire schema only in a TUI session", a
 	assert.equal((questions.items?.properties?.options as { items?: { properties?: Record<string, { maxLength?: number }> } }).items?.properties?.label?.maxLength, 60);
 });
 
-test("never registers for print, json, or RPC sessions", async () => {
-	for (const mode of ["print", "json", "rpc"]) {
+test("registers in RPC only when the owner allows it and native dialog methods are available", async () => {
+	const subject = host();
+	createAskUserQuestionExtension(dependencies(owner("gentle-pi")))(subject.pi as never);
+	await start(subject, "rpc", { select: async () => undefined, editor: async () => undefined }, true);
+	assert.deepEqual(subject.tools.map((tool) => tool.name), ["ask_user_question"]);
+});
+
+test("does not register for RPC without both native dialog methods or for hasUI false", async (t) => {
+	const cases: Array<{ name: string; ui: TestUi; hasUI: boolean }> = [
+		{ name: "missing select", ui: { editor: async () => undefined }, hasUI: true },
+		{ name: "missing editor", ui: { select: async () => undefined }, hasUI: true },
+		{ name: "no UI", ui: { select: async () => undefined, editor: async () => undefined }, hasUI: false },
+	];
+	for (const scenario of cases) {
+		await t.test(scenario.name, async () => {
+			const subject = host();
+			createAskUserQuestionExtension(dependencies(owner("gentle-pi")))(subject.pi as never);
+			await start(subject, "rpc", scenario.ui, scenario.hasUI);
+			assert.deepEqual(subject.tools, []);
+		});
+	}
+});
+
+test("never registers for print or json sessions", async () => {
+	for (const mode of ["print", "json"]) {
 		const subject = host();
 		createAskUserQuestionExtension(dependencies(owner("gentle-pi")))(subject.pi as never);
-		await start(subject, mode);
+		await start(subject, mode, { select: async () => undefined, editor: async () => undefined }, false);
 		assert.deepEqual(subject.tools, [], mode);
 	}
 });
@@ -299,4 +346,126 @@ test("keeps sparse direct inputs on the canonical invalid_input fallback", async
 			assert.deepEqual(subject.events, []);
 		});
 	}
+});
+
+test("routes an RPC call through native select and formats the correlated answer", async () => {
+	let begin!: () => void;
+	const begun = new Promise<void>((resolve) => { begin = resolve; });
+	let chooseAction!: (value: string) => void;
+	const action = new Promise<string>((resolve) => { chooseAction = resolve; });
+	const calls: Array<{ title: string; options: string[] }> = [];
+	const ui: TestUi = {
+		custom: async () => undefined,
+		select: async (title, options) => {
+			calls.push({ title, options });
+			if (calls.length === 1) {
+				begin();
+				return action;
+			}
+			return calls.length === 2 ? "Yes" : "Submit";
+		},
+		editor: async () => undefined,
+	};
+	const selectedModes: unknown[] = [];
+	const correlations: string[] = [];
+	const subject = host();
+	createAskUserQuestionExtension(rpcDependencies(owner("gentle-pi"), selectedModes, correlations))(subject.pi as never);
+	await start(subject, "rpc", ui, true);
+	const execution = subject.tools[0]!.execute("rpc-call-42", { questions: [legacyQuestion()] }, new AbortController().signal, undefined, { mode: "rpc", hasUI: true, ui });
+	let eventsAtCompletion = -1;
+	const completion = execution.then(() => { eventsAtCompletion = subject.events.length; });
+	await begun;
+	assert.deepEqual(subject.events, [
+		{ channel: "rpiv:ask-user:prompt", payload: { questions: [{ question: "Proceed?", header: "Proceed", multiSelect: false, options: [{ label: "Yes", description: "Continue", hasPreview: false }, { label: "No", description: "Stop", hasPreview: false }] }] } },
+		{ channel: "rpiv:ask-user:blocked", payload: { active: true } },
+	]);
+	chooseAction("Choose an option");
+	const result = await execution;
+	await completion;
+	assert.deepEqual(selectedModes, ["rpc"]);
+	assert.deepEqual(correlations, ["rpc-call-42"]);
+	assert.deepEqual(calls.map((call) => call.options), [
+		["Choose an option", "Use custom text", "Skip", "Submit", "Submit partial", "Cancel"],
+		["Yes", "No"],
+		["Choose an option", "Use custom text", "Skip", "Submit", "Submit partial", "Cancel"],
+	]);
+	assert.deepEqual(result, {
+		content: [{ type: "text", text: "User has answered your questions: \"Proceed?\"=\"Yes\". You can now continue with the user's answers in mind." }],
+		details: { answers: [{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Yes" }], cancelled: false },
+	});
+	assert.deepEqual(subject.events, [
+		{ channel: "rpiv:ask-user:prompt", payload: { questions: [{ question: "Proceed?", header: "Proceed", multiSelect: false, options: [{ label: "Yes", description: "Continue", hasPreview: false }, { label: "No", description: "Stop", hasPreview: false }] }] } },
+		{ channel: "rpiv:ask-user:blocked", payload: { active: true } },
+		{ channel: "rpiv:ask-user:blocked", payload: { active: false } },
+	]);
+	assert.equal(eventsAtCompletion, subject.events.length, "the release is observable before RPC execution settles");
+});
+
+test("returns no_questions for malformed RPC input without events or presentation", async () => {
+	let driverCalls = 0;
+	const subject = host();
+	createAskUserQuestionExtension(dependencies(owner("gentle-pi"), { present: async () => {
+		driverCalls++;
+		throw new Error("malformed RPC input reached the presentation driver");
+	} }))(subject.pi as never);
+	const ui: TestUi = { select: async () => undefined, editor: async () => undefined };
+	await start(subject, "rpc", ui, true);
+	const result = await subject.tools[0]!.execute("rpc-invalid", { questions: [] }, new AbortController().signal, undefined, { mode: "rpc", hasUI: true, ui });
+	assert.deepEqual(result, legacyErrorEnvelope("no_questions", "At least one question is required"));
+	assert.equal(driverCalls, 0);
+	assert.deepEqual(subject.events, []);
+});
+
+test("returns no_ui when direct RPC execution lacks native dialog methods", async () => {
+	let driverCalls = 0;
+	const subject = host();
+	createAskUserQuestionExtension(dependencies(owner("gentle-pi"), { present: async () => { driverCalls++; throw new Error("missing-capability RPC reached the presentation driver"); } }))(subject.pi as never);
+	await start(subject, "tui");
+	const result = await subject.tools[0]!.execute("rpc-missing-methods", { questions: [legacyQuestion()] }, new AbortController().signal, undefined, { mode: "rpc", hasUI: true, ui: { custom: async () => undefined } });
+	assert.deepEqual(result, legacyErrorEnvelope("no_ui", "UI not available (running in non-interactive mode)"));
+	assert.equal(driverCalls, 0);
+	assert.deepEqual(subject.events, []);
+});
+
+test("releases the RPC blocked bracket before surfacing a native dialog rejection", async () => {
+	const rejection = new Error("native-rpc-rejection");
+	const ui: TestUi = { select: async () => { throw rejection; }, editor: async () => undefined };
+	const selectedModes: unknown[] = [];
+	const correlations: string[] = [];
+	const subject = host();
+	createAskUserQuestionExtension(rpcDependencies(owner("gentle-pi"), selectedModes, correlations))(subject.pi as never);
+	await start(subject, "rpc", ui, true);
+	const execution = subject.tools[0]!.execute("rpc-reject", { questions: [legacyQuestion()] }, new AbortController().signal, undefined, { mode: "rpc", hasUI: true, ui });
+	let eventsAtCompletion = -1;
+	const completion = execution.then(
+		() => { eventsAtCompletion = subject.events.length; },
+		() => { eventsAtCompletion = subject.events.length; },
+	);
+	await assert.rejects(() => execution, rejection);
+	await completion;
+	assert.deepEqual(selectedModes, ["rpc"]);
+	assert.deepEqual(correlations, ["rpc-reject"]);
+	assert.deepEqual(subject.events, [
+		{ channel: "rpiv:ask-user:prompt", payload: { questions: [{ question: "Proceed?", header: "Proceed", multiSelect: false, options: [{ label: "Yes", description: "Continue", hasPreview: false }, { label: "No", description: "Stop", hasPreview: false }] }] } },
+		{ channel: "rpiv:ask-user:blocked", payload: { active: true } },
+		{ channel: "rpiv:ask-user:blocked", payload: { active: false } },
+	]);
+	assert.equal(eventsAtCompletion, subject.events.length, "the release is observable before the rejected RPC execution settles");
+});
+
+test("does not displace an incumbent RPC tool", async () => {
+	const subject = host(["ask_user_question"]);
+	createAskUserQuestionExtension(dependencies(owner("gentle-pi")))(subject.pi as never);
+	await start(subject, "rpc", { select: async () => undefined, editor: async () => undefined }, true);
+	assert.equal(subject.inventoryCalls(), 1);
+	assert.deepEqual(subject.tools, []);
+});
+
+test("makes repeated eligible RPC session starts idempotent", async () => {
+	const subject = host();
+	createAskUserQuestionExtension(dependencies(owner("gentle-pi")))(subject.pi as never);
+	const ui: TestUi = { select: async () => undefined, editor: async () => undefined };
+	await start(subject, "rpc", ui, true);
+	await start(subject, "rpc", ui, true);
+	assert.deepEqual(subject.tools.map((tool) => tool.name), ["ask_user_question"]);
 });

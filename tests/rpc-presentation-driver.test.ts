@@ -67,20 +67,20 @@ test("presents exact static descriptions and frozen previews while keeping routi
 	});
 	assert.equal(ui.calls[0]!.kind, "select");
 	assert.equal(ui.calls[0]!.title, "Question 1: Route\nChoose a route\n\nStatic preview (RPC; full TUI detail unavailable):\nBack\nAn authored label.\nStatic preview: Exact\npreview\n\nSubmit\nAnother authored label.");
-	assert.deepEqual(ui.calls[0]!.values, ["Choose an option", "Use custom text", "Add question note", "Add global note", "Skip", "Next", "Submit partial", "Cancel"]);
+	assert.deepEqual(ui.calls[0]!.values, ["Choose an option", "Use custom text", "Skip", "Next", "Submit partial", "Cancel"]);
 	assert.deepEqual(ui.calls[1]!.values, ["Back", "Submit"]);
 });
 
-test("preserves multiline custom text and notes, ordered multi toggles, and global notes", async () => {
+test("preserves multiline custom text and ordered multi toggles without note controls", async () => {
 	const ui = new FakeUi([
-		"Choose an option", "Back", "Add question note", "note\nexact", "Next",
+		"Choose an option", "Back", "Next",
 		"Choose options", "Second", "Choose options", "First", "Next",
-		"Use custom text", "  custom\ntext  ", "Add global note", "global\nnote", "Submit",
+		"Use custom text", "  custom\ntext  ", "Submit",
 	]);
 	const outcome = owned(await createRpcQuestionPresentationDriver(ui).present(request()));
 	assert.deepEqual(outcome, {
-		correlationId: "rpc-correlation", cancelled: false, globalNote: "global\nnote", answers: [
-			{ questionIndex: 0, question: "Choose a route", kind: "option", answer: "Back", preview: "Exact\npreview", notes: "note\nexact" },
+		correlationId: "rpc-correlation", cancelled: false, answers: [
+			{ questionIndex: 0, question: "Choose a route", kind: "option", answer: "Back", preview: "Exact\npreview" },
 			{ questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: ["First", "Second"] },
 			{ questionIndex: 2, question: "Add context", kind: "custom", answer: "  custom\ntext  " },
 		],
@@ -147,4 +147,11 @@ test("awaits each RPC dialog before requesting the next", async () => {
 	const outcome = owned(await presenting);
 	assert.equal(outcome.cancelled, true);
 	assert.equal(ui.calls.length, 2);
+});
+
+test("propagates native RPC dialog rejection instead of converting it to cancellation", async () => {
+	const rejection = new Error("native-select-rejection");
+	const ui = new FakeUi([Promise.reject(rejection)]);
+	await assert.rejects(() => createRpcQuestionPresentationDriver(ui).present(request()), rejection);
+	assert.equal(ui.calls.length, 1);
 });
