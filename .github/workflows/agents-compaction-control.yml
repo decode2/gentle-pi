@@ -94,8 +94,7 @@ jobs:
       NODE_VERSION: 24
       PNPM_VERSION: 11.1.1
       npm_config_ignore_scripts: "true"
-      STORE_DIR: ${{ runner.temp }}/pnpm-store
-      EVIDENCE_DIR: ${{ runner.temp }}/agents-compaction-type-diagnostics
+
     steps:
       - name: Checkout base revision
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -111,9 +110,12 @@ jobs:
           ref: 7d87e698442f156de1a1d667bf3cc4d5f9d54c72
           path: candidate
           persist-credentials: false
-      - name: Prepare evidence directories
+      - name: Prepare runtime paths and evidence directories
         shell: bash
-        run: mkdir -p "$EVIDENCE_DIR/base" "$EVIDENCE_DIR/candidate"
+        run: |
+          echo "STORE_DIR=$RUNNER_TEMP/pnpm-store" >> "$GITHUB_ENV"
+          echo "EVIDENCE_DIR=$RUNNER_TEMP/agents-compaction-type-diagnostics" >> "$GITHUB_ENV"
+          mkdir -p "$RUNNER_TEMP/agents-compaction-type-diagnostics/base" "$RUNNER_TEMP/agents-compaction-type-diagnostics/candidate"
       - name: Setup Node.js
         id: setup_node
         uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
