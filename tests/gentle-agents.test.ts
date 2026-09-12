@@ -268,7 +268,7 @@ test("cancelling a yielded foreground task prevents completion follow-up", async
 	harness.children[0].message({ id: "q1", kind: "query", message: "q" });
 	const yielded = await pending;
 	const taskId = (yielded.details.gentleAgents as { taskId: string }).taskId;
-	assert.match((await tools.get("subagent_cancel")!.execute("stop", { task_id: taskId }, undefined, undefined, ctx)).content[0].text, /Cancelled task/);
+	assert.match((await tools.get("subagent_cancel")!.execute("stop", { task_id: taskId }, undefined, undefined, ctx)).content[0].text, /Cancellation requested/);
 	await tick();
 	harness.children[0].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "late" }], stopReason: "stop" }] });
 	harness.children[0].emit({ type: "agent_settled" });
@@ -1308,7 +1308,7 @@ test("background runs return at once; status, result, send_message, cancel, and 
 	await tick();
 	assert.match((await tools.get("subagent_status")!.execute("c2", { task_id: id }, undefined, undefined, ctx)).content[0].text, /running · background/);
 	assert.match((await tools.get("subagent_result")!.execute("c3", { task_id: id }, undefined, undefined, ctx)).content[0].text, /still running/);
-	assert.match((await tools.get("subagent_send_message")!.execute("c4", { task_id: id, message: "Skip tests" }, undefined, undefined, ctx)).content[0].text, /queued/);
+	assert.match((await tools.get("subagent_send_message")!.execute("c4", { task_id: id, message: "Skip tests" }, undefined, undefined, ctx)).content[0].text, /Steering requested/);
 	await tick();
 	assert.equal(harness.children[0].written.at(-1)?.message, "Skip tests");
 	assert.match((await tools.get("subagent_continue")!.execute("c5", { task_id: id, prompt: "more" }, undefined, undefined, ctx)).content[0].text, /cannot be continued yet/);
@@ -1343,7 +1343,27 @@ test("background runs return at once; status, result, send_message, cancel, and 
 	assert.match((await tools.get("subagent_run")!.execute("c11", { agent: "ghost", task: "x" }, undefined, undefined, ctx)).content[0].text, /no subagent named "ghost"\. Known: explore/);
 });
 
-test("once the last task is done the card asks for one frame when its finished row expires, so an idle terminal clears it", async () => {
+test("automatic compaction keeps owned task controls recoverable and reports requested control honestly", async () => {
+		const { pi, tools, fire } = fakePi();
+		const harness = deps();
+		gentleAgents(pi, {}, harness.deps);
+		const { ctx } = fakeContext();
+		await fire("session_start", ctx);
+		const started = await tools.get("subagent_run")!.execute("run", { agent: "explore", task: "Compact safely", mode: "background" }, undefined, undefined, ctx);
+		const id = (started.details.gentleAgents as { taskId: string }).taskId;
+		await tick();
+		harness.children[0].emit({ type: "compaction_start", reason: "threshold" });
+		assert.match((await tools.get("subagent_status")!.execute("status", { task_id: id }, undefined, undefined, ctx)).content[0].text, /compacting \(threshold\)/);
+		assert.match((await tools.get("subagent_list_tasks")!.execute("list", {}, undefined, undefined, ctx)).content[0].text, new RegExp(`^${id} · explore · running`));
+		assert.match((await tools.get("subagent_send_message")!.execute("steer", { task_id: id, message: "Keep going" }, undefined, undefined, ctx)).content[0].text, /Steering requested/);
+		harness.children[0].emit({ type: "compaction_end", reason: "threshold", result: { summary: "summary", firstKeptEntryId: "entry", tokensBefore: 1 }, aborted: false, willRetry: false });
+		assert.match((await tools.get("subagent_status")!.execute("status", { task_id: id }, undefined, undefined, ctx)).content[0].text, /resumed after compaction \(threshold\)/);
+		assert.match((await tools.get("subagent_cancel")!.execute("cancel", { task_id: id }, undefined, undefined, ctx)).content[0].text, /Cancellation requested/);
+		await tick();
+		assert.match((await tools.get("subagent_status")!.execute("cancelled", { task_id: id }, undefined, undefined, ctx)).content[0].text, /cancelled/);
+	});
+
+	test("once the last task is done the card asks for one frame when its finished row expires, so an idle terminal clears it", async () => {
 	const { pi, tools, fire } = fakePi();
 	const harness = deps();
 	let clock = 1000;
@@ -1700,7 +1720,33 @@ test("restored task history cannot enter the live panel or execute stop even wit
 	await opened;
 });
 
-test("Alt+S confirms a snapshot of active subagents and suppresses their follow-up delivery", async () => {
+test("Alt+S re-reads confirmed queued tasks before classifying their cancellation", async () => {
+		const { pi, tools, fire, shortcuts } = fakePi();
+		const harness = deps();
+		let answerConfirmation: (confirmed: boolean) => void = () => {};
+		gentleAgents(pi, {}, harness.deps);
+		const { ctx, dialogs } = fakeContext(fakeTui, () => new Promise<boolean>((resolve) => {
+			answerConfirmation = resolve;
+		}));
+		await fire("session_start", ctx);
+		await tools.get("subagent_run")!.execute("first", { agent: "explore", task: "First", mode: "background" }, undefined, undefined, ctx);
+		await tools.get("subagent_run")!.execute("second", { agent: "explore", task: "Second", mode: "background" }, undefined, undefined, ctx);
+		await tools.get("subagent_run")!.execute("queued", { agent: "explore", task: "Queued", mode: "background" }, undefined, undefined, ctx);
+		await tick();
+		const shortcut = shortcuts.get("alt+s");
+		assert.ok(shortcut);
+		const stopping = shortcut.handler(ctx);
+		await tick();
+		harness.children[0].emit({ type: "agent_end", messages: [{ role: "assistant", content: [{ type: "text", text: "done" }], stopReason: "stop" }] });
+		harness.children[0].emit({ type: "agent_settled" });
+		await tick();
+		assert.equal(harness.children.length, 3, "the confirmed queued task started while confirmation was open");
+		answerConfirmation(true);
+		await stopping;
+		assert.deepEqual(dialogs, ["confirm:Stop 3 active subagents?:Only these 3 subagents will stop. Current work may be incomplete.", "notify:Cancellation requested for 2 running subagents."]);
+	});
+
+	test("Alt+S confirms a snapshot of active subagents and suppresses their follow-up delivery", async () => {
 	const { pi, tools, fire, shortcuts, sent } = fakePi();
 	const harness = deps();
 	let answerConfirmation: (confirmed: boolean) => void = () => {};
@@ -1720,7 +1766,7 @@ test("Alt+S confirms a snapshot of active subagents and suppresses their follow-
 	await tick();
 	answerConfirmation(true);
 	await stopping;
-	assert.deepEqual(dialogs, ["confirm:Stop 1 active subagent?:Only these 1 subagent will stop. Current work may be incomplete.", "notify:Stopped 1 subagent."]);
+	assert.deepEqual(dialogs, ["confirm:Stop 1 active subagent?:Only these 1 subagent will stop. Current work may be incomplete.", "notify:Cancellation requested for 1 running subagent."]);
 	assert.equal(sent.length, 0, "intentional cancellation does not start a follow-up turn");
 	assert.match((await tools.get("subagent_list_tasks")!.execute("c3", {}, undefined, undefined, ctx)).content[0].text, /running/, "a subagent started during confirmation remains active");
 	const secondConfirmation = shortcut.handler(ctx);
@@ -2071,7 +2117,7 @@ test("aborting the caller's signal cancels the subagent, records it, and says wh
 	assert.equal(details.status, "cancelled", "the run is recorded as cancelled");
 	assert.match((yielded as { content: Array<{ text: string }> }).content[0].text, /cancelled/);
 	assert.ok(
-		dialogs.some((entry) => entry.startsWith("notify:") && /cancelled/.test(entry) && /tool call was aborted/.test(entry)),
+		dialogs.some((entry) => entry.startsWith("notify:") && /Cancellation requested/.test(entry) && /tool call was aborted/.test(entry)),
 		"a warning names the abort and the cancellation",
 	);
 	assert.equal(harness.children[0].killed.length > 0, true, "the runner terminated the child");

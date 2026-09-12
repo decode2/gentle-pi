@@ -698,7 +698,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 				ctx.ui.notify(`Task ${selected.agent} already finished.`, "warning");
 				return;
 			}
-			if (runner.cancel(current.id)) ctx.ui.notify(`Stopped ${current.agent}.`);
+			if (runner.cancel(current.id)) ctx.ui.notify(`Cancellation requested for ${current.agent}.`);
 			else ctx.ui.notify(`Task ${current.agent} already finished.`, "warning");
 		} finally {
 			stoppingTaskIds.delete(selected.id);
@@ -712,13 +712,25 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			ctx.ui.notify("No active subagents to stop.");
 			return Promise.resolve();
 		}
-		const count = active.length;
+		const confirmedIds = new Set(active.map((task) => task.id));
+		const count = confirmedIds.size;
 		const noun = count === 1 ? "subagent" : "subagents";
 		const confirmation = (async () => {
 			try {
 				if (!await ctx.ui.confirm(`Stop ${count} active ${noun}?`, `Only these ${count} ${noun} will stop. Current work may be incomplete.`)) return;
-				const cancelled = active.filter((task) => runner.cancel(task.id)).length;
-				ctx.ui.notify(`Stopped ${cancelled} ${cancelled === 1 ? "subagent" : "subagents"}.`);
+				let queued = 0;
+				let requested = 0;
+				for (const id of confirmedIds) {
+					const current = store.get(id);
+					if (!isOwnedActive(current) || !runner.cancel(id)) continue;
+					if (current.status === TASK_STATUS.QUEUED) queued += 1;
+					else requested += 1;
+				}
+				const parts = [
+					queued > 0 ? `Cancelled ${queued} queued ${queued === 1 ? "subagent" : "subagents"}.` : undefined,
+					requested > 0 ? `Cancellation requested for ${requested} running ${requested === 1 ? "subagent" : "subagents"}.` : undefined,
+				].filter((part): part is string => part !== undefined);
+				ctx.ui.notify(parts.join(" ") || "No active subagents to stop.");
 			} finally {
 				stopAllConfirmation = undefined;
 			}
@@ -926,7 +938,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		const onAbort = (): void => {
 			if (runner.cancel(task.id)) {
 				ctx.ui.notify(
-					`Subagent ${task.agent} cancelled: the tool call was aborted${abortReasonText(signal?.reason)}. The run is recorded as cancelled.`,
+					`Cancellation requested for subagent ${task.agent}: the tool call was aborted${abortReasonText(signal?.reason)}. The run will be recorded when its process stops.`,
 					"warning",
 				);
 			}
@@ -1100,12 +1112,19 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 
 	tool("cancel",  "Cancel a queued or running subagent task.", { required: ["task_id"], properties: { task_id: { type: "string" } } }, async (params) => {
 		const id = String(params.task_id);
-		return runner.cancel(id) ? text(`Cancelled task ${id}.`) : text(`Error: task ${id} is not running.`, { error: "not running" });
+		const task = await resolveTask(id);
+		const current = task ? store.get(id) : undefined;
+		if (!current || !runner.cancel(id)) return text(`Error: task ${id} is not running.`, { error: "not running" });
+		return current.status === TASK_STATUS.QUEUED
+			? text(`Cancelled task ${id}.`)
+			: text(`Cancellation requested for task ${id}; it remains active until its process stops.`);
 	});
 
-	tool("send_message", "Steer a running subagent with a message delivered before its next model call.", { required: ["task_id", "message"], properties: { task_id: { type: "string" }, message: { type: "string" } } }, async (params) => {
+	tool("send_message", "Request a steering message for a running subagent; child RPC receipt only confirms queue admission, not model application.", { required: ["task_id", "message"], properties: { task_id: { type: "string" }, message: { type: "string" } } }, async (params) => {
 		const id = String(params.task_id);
-		return runner.steer(id, String(params.message ?? "")) ? text(`Message queued for task ${id}.`) : text(`Error: task ${id} is not running.`, { error: "not running" });
+		return runner.steer(id, String(params.message ?? ""))
+			? text(`Steering requested for task ${id}; awaiting child RPC receipt.`)
+			: text(`Error: task ${id} is not running.`, { error: "not running" });
 	});
 
 	tool(

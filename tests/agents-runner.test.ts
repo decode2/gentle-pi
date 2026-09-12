@@ -25,7 +25,7 @@ interface Harness {
 	spawnOptions: Array<{ env: NodeJS.ProcessEnv; stdio?: string[] }>;
 }
 
-function harness(options: { maxConcurrency?: number; answer?: Record<string, unknown>; exitOnKill?: boolean; state?: Record<string, unknown>; stateSuccess?: boolean; onNotification?: RunnerHooks["onNotification"]; onSuccessfulMutation?: RunnerHooks["onSuccessfulMutation"]; onFinish?: RunnerHooks["onFinish"] } = {}): Harness {
+function harness(options: { maxConcurrency?: number; answer?: Record<string, unknown>; exitOnKill?: boolean; state?: Record<string, unknown>; stateSuccess?: boolean; steerSuccess?: boolean; getStateWriteFailure?: boolean; onNotification?: RunnerHooks["onNotification"]; onSuccessfulMutation?: RunnerHooks["onSuccessfulMutation"]; onFinish?: RunnerHooks["onFinish"] } = {}): Harness {
 	const children: FakeChild[] = [];
 	const timers: Harness["timers"] = [];
 	const asks: Harness["asks"] = [];
@@ -36,12 +36,22 @@ function harness(options: { maxConcurrency?: number; answer?: Record<string, unk
 		spawn: (_command, _args, launchOptions) => {
 			spawnOptions.push({ env: launchOptions.env, stdio: launchOptions.stdio });
 			const fake = fakeChild({ exitOnKill: options.exitOnKill });
+			if (options.getStateWriteFailure) {
+				const originalWrite = fake.child.stdin.write.bind(fake.child.stdin) as unknown as (chunk: string, callback?: (error?: Error | null) => void) => boolean;
+				fake.child.stdin.write = ((chunk: string, callback?: (error?: Error | null) => void): boolean => {
+					const command = JSON.parse(chunk) as { id?: unknown; type?: string };
+					if (command.type !== "get_state") return originalWrite(chunk, callback);
+					callback?.(new Error("write failed"));
+					queueMicrotask(() => fake.emit({ type: "response", id: command.id, success: true, data: { sessionFile: "/sessions/delayed-child.jsonl" } }));
+					return false;
+				}) as unknown as typeof fake.child.stdin.write;
+			}
 			if (options.state !== undefined) {
 				fake.child.stdin.removeAllListeners("data");
 				fake.child.stdin.on("data", (chunk) => {
 					const command = JSON.parse(String(chunk));
 					fake.written.push(command);
-					fake.emit({ type: "response", id: command.id, success: command.type !== "get_state" || options.stateSuccess !== false,
+					fake.emit({ type: "response", id: command.id, success: (command.type !== "get_state" || options.stateSuccess !== false) && (command.type !== "steer" || options.steerSuccess !== false),
 						data: command.type === "get_state" ? options.state : undefined });
 				});
 			}
@@ -747,7 +757,148 @@ test("AgentRunner has no total-duration watchdog but keeps active work alive and
 	assert.match(store.get(task.id)?.error ?? "", /stalled/);
 });
 
-test("AgentRunner.cancelAll stops every queued and running task", async () => {
+test("non-steering write callback failures preserve pending correlation for a later response", async () => {
+		const { store, runner } = harness({ getStateWriteFailure: true });
+		const task = runner.run(request());
+		await tick();
+		assert.equal(store.get(task.id)?.sessionPath, "/sessions/delayed-child.jsonl", "the later get_state response reaches its existing handler");
+		runner.cancel(task.id);
+	});
+
+	test("automatic compaction validates its lifecycle without changing task identity or control access", async () => {
+		const { store, runner, children } = harness();
+		const task = runner.run(request());
+		await tick();
+		const child = children[0];
+		child.emit({ type: "compaction_start", reason: "threshold" });
+		assert.equal(store.get(task.id)?.id, task.id, "compaction preserves the task id");
+		assert.equal(store.get(task.id)?.parentSessionId, "s1", "compaction preserves ownership");
+		assert.equal(store.get(task.id)?.lastStep, "compacting (threshold)");
+		assert.equal(runner.steer(task.id, "Keep control available"), true, "steering remains requestable while compacting");
+		await tick();
+		assert.equal(store.get(task.id)?.lastStep, "compacting (threshold)", "control receipts do not hide compaction state");
+		assert.ok(store.thread(task.id).items.some((item) => item.kind === "note" && item.text === "steering accepted by child RPC"), "receipt is not model application");
+		child.emit({ type: "compaction_end", reason: "threshold", result: { summary: "summary", firstKeptEntryId: "entry", tokensBefore: 1 }, aborted: false, willRetry: false });
+		assert.equal(store.get(task.id)?.lastStep, "resumed after compaction (threshold)");
+		assert.equal(runner.steer(task.id, "Control after resume"), true, "steering remains requestable after compaction");
+		assert.equal(runner.cancel(task.id), true, "stop remains requestable after compaction");
+		await tick();
+		assert.equal(store.get(task.id)?.status, TASK_STATUS.CANCELLED);
+	});
+
+	test("automatic compaction rejects malformed, duplicate, mismatched, and terminal frames", async () => {
+		const { store, runner, children } = harness();
+		const task = runner.run(request());
+		await tick();
+		const child = children[0];
+		child.emit({ type: "compaction_start", reason: "overflow" });
+		assert.equal(store.get(task.id)?.lastStep, "compacting (overflow)");
+		child.emit({ type: "compaction_start", reason: "overflow" });
+		child.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+		child.emit({ type: "compaction_end", reason: "overflow", result: {}, aborted: "no", willRetry: false });
+		assert.equal(store.get(task.id)?.lastStep, "compacting (overflow)", "invalid transitions do not change active compaction state");
+		child.emit({ type: "compaction_end", reason: "overflow", result: { summary: "summary", firstKeptEntryId: "entry", tokensBefore: 1 }, aborted: false, willRetry: true });
+		assert.equal(store.get(task.id)?.lastStep, "resumed after compaction (overflow)");
+		child.emit({ type: "compaction_end", reason: "overflow", result: { summary: "summary", firstKeptEntryId: "entry", tokensBefore: 1 }, aborted: false, willRetry: true });
+		assert.equal(store.get(task.id)?.lastStep, "resumed after compaction (overflow)", "a duplicate end cannot reapply state");
+		child.emit({ type: "compaction_start", reason: "manual" });
+		assert.equal(store.get(task.id)?.lastStep, "resumed after compaction (overflow)", "manual compaction is outside this automatic lifecycle");
+		runner.cancel(task.id);
+		child.emit({ type: "compaction_start", reason: "threshold" });
+		child.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+		await tick();
+		assert.equal(store.get(task.id)?.status, TASK_STATUS.CANCELLED, "late frames cannot revive a terminal task");
+	});
+
+	test("steering reports requested state before child receipt and records RPC rejection", async () => {
+		const accepted = harness();
+		const acceptedTask = accepted.runner.run(request());
+		await tick();
+		assert.equal(accepted.runner.steer(acceptedTask.id, "Use focused checks"), true);
+		assert.ok(accepted.store.thread(acceptedTask.id).items.some((item) => item.kind === "note" && item.text === "steering requested: Use focused checks"));
+		await tick();
+		assert.ok(accepted.store.thread(acceptedTask.id).items.some((item) => item.kind === "note" && item.text === "steering accepted by child RPC"));
+		accepted.runner.cancel(acceptedTask.id);
+
+		const rejected = harness({ state: {}, steerSuccess: false });
+		const rejectedTask = rejected.runner.run(request());
+		await tick();
+		assert.equal(rejected.runner.steer(rejectedTask.id, "This will be rejected"), true);
+		await tick();
+		assert.ok(rejected.store.thread(rejectedTask.id).items.some((item) => item.kind === "note" && item.text === "steering rejected by child RPC"));
+		const rejectedSteer = rejected.children[0].written.find((command) => command.type === "steer");
+		rejected.runner.cancel(rejectedTask.id);
+		rejected.children[0].emit({ type: "response", id: rejectedSteer?.id, success: true });
+		await tick();
+		assert.ok(!rejected.store.thread(rejectedTask.id).items.some((item) => item.kind === "note" && item.text === "steering accepted by child RPC"), "late responses after cancellation cannot supersede a rejection");
+	});
+
+	test("automatic compaction classifies only complete success, abort, and failure ends", async () => {
+		const result = { summary: "summary", firstKeptEntryId: "entry", tokensBefore: 1 };
+		for (const [end, expected] of [
+			[{ type: "compaction_end", reason: "threshold", result, aborted: false, willRetry: false }, "resumed after compaction (threshold)"],
+			[{ type: "compaction_end", reason: "threshold", aborted: true, willRetry: false }, "automatic compaction aborted (threshold)"],
+			[{ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false, errorMessage: "quota exceeded" }, "automatic compaction failed (threshold)"],
+		] as const) {
+			const { store, runner, children } = harness();
+			const task = runner.run(request());
+			await tick();
+			children[0].emit({ type: "compaction_start", reason: "threshold" });
+			children[0].emit({ ...end });
+			assert.equal(store.get(task.id)?.lastStep, expected);
+			runner.cancel(task.id);
+		}
+	});
+
+	test("automatic compaction retains active state for malformed or contradictory ends", async () => {
+		for (const end of [
+			{ type: "compaction_end", reason: "threshold", aborted: false, willRetry: false },
+			{ type: "compaction_end", reason: "threshold", result: null, aborted: false, willRetry: false },
+			{ type: "compaction_end", reason: "threshold", result: 1, aborted: false, willRetry: false },
+			{ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false },
+			{ type: "compaction_end", reason: "threshold", result: { summary: "summary", firstKeptEntryId: "entry" }, aborted: false, willRetry: false },
+			{ type: "compaction_end", reason: "threshold", result: { summary: "summary", firstKeptEntryId: "entry", tokensBefore: 1 }, aborted: true, willRetry: false },
+			{ type: "compaction_end", reason: "threshold", result: { summary: "summary", firstKeptEntryId: "entry", tokensBefore: 1 }, aborted: false, willRetry: false, errorMessage: "contradictory" },
+			{ type: "compaction_end", reason: "unknown", result: { summary: "summary", firstKeptEntryId: "entry", tokensBefore: 1 }, aborted: false, willRetry: false },
+		] as const) {
+			const { store, runner, children } = harness();
+			const task = runner.run(request());
+			await tick();
+			children[0].emit({ type: "compaction_start", reason: "threshold" });
+			children[0].emit({ ...end });
+			assert.equal(store.get(task.id)?.lastStep, "compacting (threshold)");
+			runner.cancel(task.id);
+		}
+	});
+
+	test("steering transport failures settle pending receipts without accepting late responses", async () => {
+		for (const failure of ["throw", "callback", "error"] as const) {
+			const { store, runner, children } = harness();
+			const task = runner.run(request());
+			await tick();
+			const child = children[0];
+			const originalWrite = child.child.stdin.write.bind(child.child.stdin) as unknown as (chunk: string, callback?: (error?: Error | null) => void) => boolean;
+			let steerId: string | undefined;
+			child.child.stdin.write = ((chunk: string, callback?: (error?: Error | null) => void): boolean => {
+				const command = JSON.parse(chunk) as { id?: unknown; type?: string };
+				if (command.type !== "steer") return originalWrite(chunk, callback);
+				steerId = typeof command.id === "string" ? command.id : undefined;
+				if (failure === "throw") throw new Error("write failed");
+				if (failure === "callback") callback?.(new Error("write failed"));
+				else child.child.stdin.emit("error", new Error("write failed"));
+				return false;
+			}) as unknown as typeof child.child.stdin.write;
+			assert.equal(runner.steer(task.id, "Expect transport failure"), true);
+			await tick();
+			assert.ok(store.thread(task.id).items.some((item) => item.kind === "note" && item.text === "steering transport failed before child RPC receipt"), `${failure} surfaces transport failure`);
+			runner.cancel(task.id);
+			child.emit({ type: "response", id: steerId, success: true });
+			await tick();
+			assert.ok(!store.thread(task.id).items.some((item) => item.kind === "note" && item.text === "steering accepted by child RPC"), `${failure} ignores a late response`);
+		}
+	});
+
+	test("AgentRunner.cancelAll stops every queued and running task", async () => {
 	const { store, runner, children } = harness({ maxConcurrency: 1 });
 	const running = runner.run(request());
 	const queued = runner.run(request());

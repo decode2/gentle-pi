@@ -153,6 +153,7 @@ interface ProcessLike {
 }
 
 interface Pending {
+	command: string;
 	resolve(value: Record<string, unknown>): void;
 }
 
@@ -186,6 +187,7 @@ interface LiveTask {
 	acknowledgedIpcIds: Set<string>;
 	acknowledgedIpcOrder: string[];
 	mutationStarts: Map<string, { toolName: "write" | "edit"; toolCallId: string; path: string }>;
+	autoCompaction?: "threshold" | "overflow";
 }
 
 const CHILD_MARKER = "GENTLE_PI_AGENTS_CHILD";
@@ -195,6 +197,14 @@ const DEFAULT_TOOLS: readonly string[] = [];
 const TERMINATION_GRACE_MS = 250;
 const GROUP_CONFIRM_MS = 25;
 const GROUP_CONFIRM_DEADLINE_MS = 1_000;
+function isCompactionResult(value: unknown): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const result = value as Record<string, unknown>;
+	return typeof result.summary === "string"
+		&& typeof result.firstKeptEntryId === "string"
+		&& typeof result.tokensBefore === "number";
+}
+
 const QUERY_REJECTION_ERRORS = new Set([
 	"invalid child IPC frame",
 	"invalid child IPC correlation",
@@ -401,9 +411,17 @@ export class AgentRunner {
 	}
 
 	steer(id: string, message: string): boolean {
-		if (!this.live.has(id)) return false;
-		void this.send(id, { type: "steer", message });
-		this.store.apply(id, { type: TASK_EVENT.NOTE, text: `steered: ${message}` }, this.deps.now());
+		const live = this.live.get(id);
+		if (!live || live.terminal) return false;
+		this.store.apply(id, { type: TASK_EVENT.NOTE, text: `steering requested: ${message}` }, this.deps.now());
+		void this.send(id, { type: "steer", message }).then((response) => {
+			const current = this.store.get(id);
+			if (this.live.get(id) !== live || live.terminal || !current || isFinished(current.status)) return;
+			const step = response.error === "child RPC transport failed"
+				? "steering transport failed before child RPC receipt"
+				: response.success === true ? "steering accepted by child RPC" : "steering rejected by child RPC";
+			this.store.apply(id, { type: TASK_EVENT.NOTE, text: step }, this.deps.now());
+		});
 		return true;
 	}
 
@@ -474,7 +492,7 @@ export class AgentRunner {
 			try { request.onLaunch?.(); }
 			catch (error) { this.requestStop(id, TASK_STATUS.FAILED, `could not register launched worktree: ${error instanceof Error ? error.message : String(error)}`); }
 		});
-		child.stdin.on("error", () => {});
+		child.stdin.on("error", () => this.failPendingSteering(live));
 		this.armStall(id, live);
 		const lines = new JsonLines((value) => this.receive(id, request, value));
 		child.stdout.setEncoding("utf8");
@@ -509,9 +527,29 @@ export class AgentRunner {
 		live.nextId += 1;
 		const requestId = `r${live.nextId}`;
 		return new Promise((resolve) => {
-			live.pending.set(requestId, { resolve });
+			live.pending.set(requestId, { command: typeof command.type === "string" ? command.type : "", resolve });
 			this.write(live, { id: requestId, ...command });
 		});
+	}
+
+	private settlePending(live: LiveTask, id: string, value: Record<string, unknown>): void {
+		const pending = live.pending.get(id);
+		if (!pending) return;
+		live.pending.delete(id);
+		pending.resolve(value);
+	}
+
+	private failPendingWrite(live: LiveTask, id: string | undefined): void {
+		if (!id) return;
+		const pending = live.pending.get(id);
+		if (pending?.command !== "steer") return;
+		this.settlePending(live, id, { success: false, error: "child RPC transport failed" });
+	}
+
+	private failPendingSteering(live: LiveTask): void {
+		for (const [id, pending] of live.pending) {
+			if (pending.command === "steer") this.settlePending(live, id, { success: false, error: "child RPC transport failed" });
+		}
 	}
 
 	private receiveChildMessage(id: string, value: unknown): void {
@@ -607,6 +645,7 @@ export class AgentRunner {
 		live.queries.clear();
 		for (const pending of live.replies.values()) pending.resolve(false);
 		live.replies.clear();
+		this.failPendingSteering(live);
 		live.child.channel?.unref?.();
 		if (live.child.connected !== false) {
 			try { live.child.disconnect?.(); }
@@ -615,10 +654,13 @@ export class AgentRunner {
 	}
 
 	private write(live: LiveTask, payload: Record<string, unknown>): void {
+		const id = typeof payload.id === "string" ? payload.id : undefined;
 		try {
-			live.child.stdin.write(`${JSON.stringify(payload)}\n`);
+			live.child.stdin.write(`${JSON.stringify(payload)}\n`, (error) => {
+				if (error) this.failPendingWrite(live, id);
+			});
 		} catch {
-			// the child is gone; the exit handler settles the task
+			this.failPendingWrite(live, id);
 		}
 	}
 
@@ -635,18 +677,52 @@ export class AgentRunner {
 		live.observationGuard = undefined;
 	}
 
+	private receiveAutomaticCompaction(id: string, live: LiveTask, raw: Record<string, unknown>): boolean {
+		if (raw.type !== "compaction_start" && raw.type !== "compaction_end") return false;
+		const task = this.store.get(id);
+		if (!task || live.terminal || isFinished(task.status)) return true;
+		const reason = raw.reason;
+		if (raw.type === "compaction_start") {
+			if ((reason !== "threshold" && reason !== "overflow") || live.autoCompaction !== undefined) return true;
+			live.autoCompaction = reason;
+			const step = `compacting (${reason})`;
+			this.store.apply(id, { type: TASK_EVENT.NOTE, text: `automatic compaction started (${reason})` }, this.deps.now());
+			this.store.update(id, { lastStep: step });
+			return true;
+		}
+		if ((reason !== "threshold" && reason !== "overflow") || live.autoCompaction !== reason || typeof raw.aborted !== "boolean" || typeof raw.willRetry !== "boolean") return true;
+		const hasResult = Object.prototype.hasOwnProperty.call(raw, "result");
+		const result = raw.result;
+		const step = raw.aborted
+			? !hasResult && raw.willRetry === false
+				? `automatic compaction aborted (${reason})`
+				: undefined
+			: typeof raw.errorMessage === "string"
+				? !hasResult && raw.willRetry === false
+					? `automatic compaction failed (${reason})`
+					: undefined
+				: isCompactionResult(result)
+					? `resumed after compaction (${reason})`
+					: undefined;
+		if (!step) return true;
+		live.autoCompaction = undefined;
+		this.store.apply(id, { type: TASK_EVENT.NOTE, text: step }, this.deps.now());
+		this.store.update(id, { lastStep: step });
+		return true;
+	}
+
 	private receive(id: string, request: TaskRequest, value: unknown): void {
 		const live = this.live.get(id);
 		if (!live || live.terminal || !value || typeof value !== "object") return;
 		const raw = value as Record<string, unknown>;
+		// Automatic compaction remains subject to the existing frame-driven watchdog;
+		// this lifecycle projection grants no timeout exemption or reset policy.
 		this.armStall(id, live);
+		if (this.receiveAutomaticCompaction(id, live, raw)) return;
 		if (raw.type === "response") {
 			if (!live.observationPreparation) this.checkObservationGrant(live);
 			const pending = typeof raw.id === "string" ? live.pending.get(raw.id) : undefined;
-			if (pending) {
-				live.pending.delete(raw.id as string);
-				pending.resolve(raw);
-			}
+			if (pending) this.settlePending(live, raw.id as string, raw);
 			return;
 		}
 		this.checkObservationGrant(live);

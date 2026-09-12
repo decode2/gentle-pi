@@ -1,0 +1,84 @@
+name: Agents Compaction Control
+
+on:
+  push:
+    branches:
+      - fix/agents-compaction-control
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    if: github.repository == 'decode2/gentle-pi'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            platform: unix
+          - os: macos-latest
+            platform: unix
+          - os: windows-latest
+            platform: windows
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    env:
+      npm_config_ignore_scripts: "true"
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - name: Report checkout provenance
+        shell: bash
+        run: echo "Checked out commit $GITHUB_SHA"
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        env:
+          npm_config_store_dir: ${{ runner.temp }}/pnpm-store
+        with:
+          version: 11.1.1
+          dest: ${{ runner.temp }}/setup-pnpm
+      - name: Install pinned dependencies without lifecycle scripts (Windows)
+        id: install_windows
+        if: matrix.platform == 'windows'
+        shell: pwsh
+        run: pnpm install --frozen-lockfile --ignore-scripts --store-dir "$env:RUNNER_TEMP\pnpm-store"
+      - name: Install pinned dependencies without lifecycle scripts (Unix)
+        id: install_unix
+        if: matrix.platform == 'unix'
+        shell: bash
+        run: pnpm install --frozen-lockfile --ignore-scripts --store-dir "$RUNNER_TEMP/pnpm-store"
+      - name: Run compaction-control regression tests (Windows)
+        if: "!cancelled() && steps.install_windows.outcome == 'success'"
+        shell: pwsh
+        run: |
+          $testExitCode = 0
+          node --experimental-strip-types --test tests/agents-runner.test.ts
+          if ($LASTEXITCODE -ne 0) { $testExitCode = $LASTEXITCODE }
+          node --experimental-strip-types --test tests/gentle-agents.test.ts
+          if ($LASTEXITCODE -ne 0 -and $testExitCode -eq 0) { $testExitCode = $LASTEXITCODE }
+          exit $testExitCode
+      - name: Run compaction-control regression tests (Unix)
+        if: "!cancelled() && steps.install_unix.outcome == 'success'"
+        shell: bash
+        run: |
+          test_exit_code=0
+          node --experimental-strip-types --test tests/agents-runner.test.ts || test_exit_code=$?
+          node --experimental-strip-types --test tests/gentle-agents.test.ts || {
+            second_exit_code=$?
+            if [ "$test_exit_code" -eq 0 ]; then test_exit_code=$second_exit_code; fi
+          }
+          exit "$test_exit_code"
+      - name: Typecheck (Windows)
+        if: "!cancelled() && steps.install_windows.outcome == 'success'"
+        shell: pwsh
+        run: pnpm run typecheck
+      - name: Typecheck (Unix)
+        if: "!cancelled() && steps.install_unix.outcome == 'success'"
+        shell: bash
+        run: pnpm run typecheck
