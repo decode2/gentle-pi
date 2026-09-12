@@ -1,0 +1,59 @@
+name: Agents Compaction Types Diagnostic
+
+on:
+  push:
+    branches:
+      - test/agents-compaction-types
+
+permissions:
+  contents: read
+
+jobs:
+  typecheck:
+    if: github.repository == 'decode2/gentle-pi'
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - label: base
+            ref: 41e5408ec6c36164bb2e9cc8a1405591801adfda
+          - label: candidate
+            ref: 7d87e698442f156de1a1d667bf3cc4d5f9d54c72
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      npm_config_ignore_scripts: "true"
+    steps:
+      - name: Checkout ${{ matrix.label }} source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ matrix.ref }}
+      - name: Verify checkout provenance
+        shell: bash
+        run: |
+          actual_ref="$(git rev-parse HEAD)"
+          echo "Expected ref: ${{ matrix.ref }}"
+          echo "Actual ref: $actual_ref"
+          test "$actual_ref" = "${{ matrix.ref }}"
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        env:
+          npm_config_store_dir: ${{ runner.temp }}/pnpm-store
+        with:
+          version: 11.1.1
+          dest: ${{ runner.temp }}/setup-pnpm
+      - name: Report tool versions
+        shell: bash
+        run: |
+          node --version
+          pnpm --version
+      - name: Install pinned dependencies without lifecycle scripts
+        shell: bash
+        run: pnpm install --frozen-lockfile --ignore-scripts --store-dir "$RUNNER_TEMP/pnpm-store"
+      - name: Run raw TypeScript diagnostics
+        shell: bash
+        run: pnpm exec tsc -p tsconfig.json --pretty false
