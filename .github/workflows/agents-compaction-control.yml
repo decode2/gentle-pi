@@ -4,14 +4,63 @@ on:
   push:
     branches:
       - fix/agents-compaction-control
+      - test/agents-compaction-timeout-probe-7d87e698
   workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
+  hosted-linux-characterization:
+    if: github.repository == 'decode2/gentle-pi' && github.ref == 'refs/heads/test/agents-compaction-timeout-probe-7d87e698'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.1.1
+          dest: ${{ runner.temp }}/setup-pnpm
+      - name: Install pinned dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts --store-dir "$RUNNER_TEMP/pnpm-store"
+      - name: Run reduced probe in isolated network namespace
+        run: |
+          set +e
+          receipt="$RUNNER_TEMP/probe-receipt/receipt.json"
+          mkdir -p "$RUNNER_TEMP/probe-receipt" "$RUNNER_TEMP/probe-home" "$RUNNER_TEMP/probe-tmp"
+          node_path="$(command -v node || true)"
+          uid="$(id -u)"
+          gid="$(id -g)"
+          outer_net="$(readlink /proc/self/ns/net || true)"
+          if [ -z "$node_path" ] || [ -z "$outer_net" ]; then
+            printf '%s\n' '{"status":"failure","category":"infrastructure/isolation","error":"node or outer namespace provenance unavailable"}' > "$receipt"
+            exit 1
+          fi
+          sudo -n /usr/bin/unshare --net --setgid "$gid" --setuid "$uid" -- /usr/bin/env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP/probe-home" TMPDIR="$RUNNER_TEMP/probe-tmp" PI_OFFLINE=1 PI_TELEMETRY=0 PROBE_ROOT="$GITHUB_WORKSPACE" PROBE_OUTER_NET="$outer_net" EXPECTED_SOURCE_SHA="$GITHUB_SHA" PROBE_NODE="$node_path" "$node_path" --experimental-strip-types "$GITHUB_WORKSPACE/scripts/test-agents-compaction-timeout.mjs" > "$receipt"
+          code=$?
+          if [ ! -s "$receipt" ]; then
+            printf '%s\n' '{"status":"failure","category":"infrastructure/isolation","error":"isolated probe did not produce a receipt"}' > "$receipt"
+            code=1
+          fi
+          exit "$code"
+      - name: Upload bounded characterization receipt
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agents-compaction-timeout-probe-receipt
+          path: ${{ runner.temp }}/probe-receipt/receipt.json
+          retention-days: 3
+          if-no-files-found: error
+
   validate:
-    if: github.repository == 'decode2/gentle-pi'
+    if: github.repository == 'decode2/gentle-pi' && github.ref != 'refs/heads/test/agents-compaction-timeout-probe-7d87e698'
     strategy:
       fail-fast: false
       matrix:
