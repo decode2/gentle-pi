@@ -44,6 +44,10 @@ function recordProcessProbe(evidence, pid, group) {
   if (evidence.existenceProbes.length < 8) evidence.existenceProbes.push({ target: "child-handle", path: "existence-probe", result: processPresence(pid) });
   if (evidence.existenceProbes.length < 8) evidence.existenceProbes.push({ target: "owned-group", path: "existence-probe", result: processGroupPresence(group) });
 }
+function closeCounters(child) {
+  const valid = (value) => Number.isInteger(value) && value >= 0 && value <= MAX_MESSAGES;
+  return { closesGot: valid(child?._closesGot) ? child._closesGot : "unavailable", closesNeeded: valid(child?._closesNeeded) ? child._closesNeeded : "unavailable" };
+}
 let activeFailure;
 function fail(error) { if (!activeFailure) activeFailure = error instanceof Error ? error : new Error(String(error)); }
 function namespace() { try { return readlinkSync("/proc/self/ns/net"); } catch { return undefined; } }
@@ -118,7 +122,7 @@ async function waitForCleanup(child, group, closed, deadlineAt) {
   }
   throw new Error("deadline waiting for physical child close and process group disappearance");
 }
-async function cleanup(child, group, closed, ownedRoot, evidence) {
+async function cleanup(child, group, closed, ownedRoot, evidence, closeObserver) {
   evidence.cleanupPhase = "cleanup-started";
   let cleanupError;
   let cleanupObserved = false;
@@ -142,6 +146,8 @@ async function cleanup(child, group, closed, ownedRoot, evidence) {
   evidence.ownedProcess.pidState = processPresence(child?.pid);
   evidence.ownedProcess.groupState = processGroupPresence(group);
   recordProcessProbe(evidence, child?.pid, group);
+  evidence.closeCounters = closeCounters(child);
+  evidence.closeObserverAttached = child && closeObserver ? child.listeners("close").includes(closeObserver) : "unknown";
   try { rmSync(ownedRoot, { recursive: true, force: true }); } catch (error) { remember(error); }
   evidence.cleanupPhase = "cleanup-finished";
   evidence.cleanupError = cleanupError?.message;
@@ -170,7 +176,7 @@ function validateProbeReceipt(value, caseName) {
   return { sdkVersion: value.sdkVersion, networkNamespace: value.networkNamespace, outerNetworkNamespace: value.outerNetworkNamespace, calls: value.calls, providerDeltas: value.providerDeltas, case: value.case, category: value.category };
 }
 async function runCase(caseName) {
-  const caseEvidence = { case: caseName, operationPhase: "created", cleanupPhase: "unobserved", physicalCloseObserved: false, processGroupGone: false, cleanupError: undefined, verificationState: "unobserved", milestone: { sdkVersion: "unavailable", networkNamespace: "unavailable", outerNetworkNamespace: OUTER_NET ?? "unavailable", calls: 0, providerDeltas: 0, postStartRpcUpdates: 0 }, virtualCallbacks: { fired: 0, canceled: 0 }, signals: [], existenceProbes: [], childEvents: { exit: false, close: false, disconnect: false, stdoutEnd: false, stdoutClose: false, stderrEnd: false, stderrClose: false }, ownedProcess: { pid: "unknown", pidState: "unknown", groupState: "unknown" }, runnerStatus: "unobserved" };
+  const caseEvidence = { case: caseName, operationPhase: "created", cleanupPhase: "unobserved", physicalCloseObserved: false, processGroupGone: false, cleanupError: undefined, closeCounters: { closesGot: "unavailable", closesNeeded: "unavailable" }, closeObserverAttached: "unknown", verificationState: "unobserved", milestone: { sdkVersion: "unavailable", networkNamespace: "unavailable", outerNetworkNamespace: OUTER_NET ?? "unavailable", calls: 0, providerDeltas: 0, postStartRpcUpdates: 0 }, virtualCallbacks: { fired: 0, canceled: 0 }, signals: [], existenceProbes: [], childEvents: { exit: false, close: false, disconnect: false, stdoutEnd: false, stdoutClose: false, stderrEnd: false, stderrClose: false }, ownedProcess: { pid: "unknown", pidState: "unknown", groupState: "unknown" }, runnerStatus: "unobserved" };
   currentCaseEvidence = caseEvidence;
   const startedAt = Date.now();
       const deadlineAt = startedAt + TOTAL_DEADLINE_MS;
@@ -185,6 +191,7 @@ async function runCase(caseName) {
   const closed = { value: false, promise: undefined, resolve: undefined };
   closed.promise = new Promise((resolve) => { closed.resolve = resolve; });
   let result;
+  let closeObserver;
   try {
     const spawn = (command, args, options) => {
       assert.equal(command, NODE);
@@ -210,7 +217,8 @@ async function runCase(caseName) {
       child.stderr?.on("data", (chunk) => { state.bytes += Buffer.byteLength(String(chunk)); if (state.bytes > MAX_BYTES) fail(new Error("stderr bound exceeded")); });
       child.on("message", (value) => { try { state.bytes += Buffer.byteLength(JSON.stringify(value)); if (++state.messages > MAX_MESSAGES || state.bytes > MAX_BYTES) throw new Error("IPC bound exceeded"); if (value && typeof value === "object" && value.probeReceipt) { const validated = validateProbeReceipt(value.probeReceipt, caseName); caseEvidence.verificationState = validated ? "validated" : "rejected"; if (!validated) throw new Error("probe receipt metadata rejected"); state.receipt = validated; } } catch (error) { fail(error); } });
       child.on("exit", () => { caseEvidence.childEvents.exit = true; });
-      child.on("close", () => { caseEvidence.childEvents.close = true; closed.value = true; closed.resolve(); });
+      closeObserver = () => { caseEvidence.childEvents.close = true; closed.value = true; closed.resolve(); };
+      child.on("close", closeObserver);
       child.on("disconnect", () => { caseEvidence.childEvents.disconnect = true; });
       child.stdout?.on("end", () => { caseEvidence.childEvents.stdoutEnd = true; });
       child.stdout?.on("close", () => { caseEvidence.childEvents.stdoutClose = true; });
@@ -263,7 +271,7 @@ async function runCase(caseName) {
   } finally {
     caseEvidence.operationPhase = state.phase;
     caseEvidence.runnerStatus = task ? store.get(task.id)?.status ?? caseEvidence.runnerStatus : caseEvidence.runnerStatus;
-    const cleanupError = await cleanup(child, group, closed, ownedRoot, caseEvidence);
+    const cleanupError = await cleanup(child, group, closed, ownedRoot, caseEvidence, closeObserver);
     caseEvidence.runnerStatus = task ? store.get(task.id)?.status ?? caseEvidence.runnerStatus : caseEvidence.runnerStatus;
     if (cleanupError && !activeFailure) throw cleanupError;
   }
@@ -272,7 +280,7 @@ async function runCase(caseName) {
   caseEvidence.ownedProcess.groupState = processGroupPresence(group);
   result.physicalCloseObserved = caseEvidence.physicalCloseObserved;
   result.processGroupGone = caseEvidence.processGroupGone;
-  result.diagnostics = { operationPhase: caseEvidence.operationPhase, cleanupPhase: caseEvidence.cleanupPhase, verificationState: caseEvidence.verificationState, milestone: caseEvidence.milestone, virtualCallbacks: caseEvidence.virtualCallbacks, signals: caseEvidence.signals, existenceProbes: caseEvidence.existenceProbes, childEvents: caseEvidence.childEvents, ownedProcess: caseEvidence.ownedProcess, runnerStatus: caseEvidence.runnerStatus };
+  result.diagnostics = { operationPhase: caseEvidence.operationPhase, cleanupPhase: caseEvidence.cleanupPhase, verificationState: caseEvidence.verificationState, milestone: caseEvidence.milestone, closeCounters: caseEvidence.closeCounters, closeObserverAttached: caseEvidence.closeObserverAttached, virtualCallbacks: caseEvidence.virtualCallbacks, signals: caseEvidence.signals, existenceProbes: caseEvidence.existenceProbes, childEvents: caseEvidence.childEvents, ownedProcess: caseEvidence.ownedProcess, runnerStatus: caseEvidence.runnerStatus };
   return result;
 }
 function categoryFor(error) {
@@ -292,7 +300,7 @@ async function main() {
     for (const caseName of ["silent", "finite-deltas"]) { currentCase = caseName; results.push(await runCase(caseName)); }
     return { status: "success", category: "behavior", sdkVersion: "0.85.1", sourceSha: ACTUAL_SOURCE_SHA, nodeSha256: NODE_SHA256, cases: results, mechanics: "virtual default 240000ms; not actual elapsed 240000ms and not a production timeout recommendation" };
   } catch (error) {
-    return { status: "failure", category: categoryFor(activeFailure ?? error), error: String(activeFailure ?? error).slice(0, 400), sdkVersion: "unobserved", sourceSha: ACTUAL_SOURCE_SHA ?? "unavailable", nodeSha256: NODE_SHA256, failedCase: currentCaseEvidence?.case ?? currentCase, physicalCloseObserved: currentCaseEvidence?.physicalCloseObserved ?? false, processGroupGone: currentCaseEvidence?.processGroupGone ?? false, cleanupError: currentCaseEvidence?.cleanupError, diagnostics: currentCaseEvidence ? { operationPhase: currentCaseEvidence.operationPhase, cleanupPhase: currentCaseEvidence.cleanupPhase, verificationState: currentCaseEvidence.verificationState, milestone: currentCaseEvidence.milestone, virtualCallbacks: currentCaseEvidence.virtualCallbacks, signals: currentCaseEvidence.signals, existenceProbes: currentCaseEvidence.existenceProbes, childEvents: currentCaseEvidence.childEvents, ownedProcess: currentCaseEvidence.ownedProcess, runnerStatus: currentCaseEvidence.runnerStatus } : undefined, cases: results };
+    return { status: "failure", category: categoryFor(activeFailure ?? error), error: String(activeFailure ?? error).slice(0, 400), sdkVersion: "unobserved", sourceSha: ACTUAL_SOURCE_SHA ?? "unavailable", nodeSha256: NODE_SHA256, failedCase: currentCaseEvidence?.case ?? currentCase, physicalCloseObserved: currentCaseEvidence?.physicalCloseObserved ?? false, processGroupGone: currentCaseEvidence?.processGroupGone ?? false, cleanupError: currentCaseEvidence?.cleanupError, diagnostics: currentCaseEvidence ? { operationPhase: currentCaseEvidence.operationPhase, cleanupPhase: currentCaseEvidence.cleanupPhase, verificationState: currentCaseEvidence.verificationState, milestone: currentCaseEvidence.milestone, closeCounters: currentCaseEvidence.closeCounters, closeObserverAttached: currentCaseEvidence.closeObserverAttached, virtualCallbacks: currentCaseEvidence.virtualCallbacks, signals: currentCaseEvidence.signals, existenceProbes: currentCaseEvidence.existenceProbes, childEvents: currentCaseEvidence.childEvents, ownedProcess: currentCaseEvidence.ownedProcess, runnerStatus: currentCaseEvidence.runnerStatus } : undefined, cases: results };
   }
 }
 function boundedOutput(receipt) {
