@@ -4,6 +4,7 @@ on:
   push:
     branches:
       - fix/agents-compaction-control
+      - ci/agents-compaction-type-diagnostics
   workflow_dispatch:
 
 permissions:
@@ -11,7 +12,7 @@ permissions:
 
 jobs:
   validate:
-    if: github.repository == 'decode2/gentle-pi'
+    if: github.repository == 'decode2/gentle-pi' && github.ref != 'refs/heads/ci/agents-compaction-type-diagnostics'
     strategy:
       fail-fast: false
       matrix:
@@ -82,3 +83,167 @@ jobs:
         if: "!cancelled() && steps.install_unix.outcome == 'success'"
         shell: bash
         run: pnpm run typecheck
+
+  diagnose-types:
+    if: github.repository == 'decode2/gentle-pi' && github.ref == 'refs/heads/ci/agents-compaction-type-diagnostics'
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    env:
+      NODE_VERSION: 24
+      PNPM_VERSION: 11.1.1
+      npm_config_ignore_scripts: "true"
+      STORE_DIR: ${{ runner.temp }}/pnpm-store
+      EVIDENCE_DIR: ${{ runner.temp }}/agents-compaction-type-diagnostics
+    steps:
+      - name: Checkout base revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: decode2/gentle-pi
+          ref: 41e5408ec6c36164bb2e9cc8a1405591801adfda
+          path: base
+          persist-credentials: false
+      - name: Checkout candidate revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: decode2/gentle-pi
+          ref: 7d87e698442f156de1a1d667bf3cc4d5f9d54c72
+          path: candidate
+          persist-credentials: false
+      - name: Prepare evidence directories
+        shell: bash
+        run: mkdir -p "$EVIDENCE_DIR/base" "$EVIDENCE_DIR/candidate"
+      - name: Setup Node.js
+        id: setup_node
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+      - name: Setup pnpm
+        id: setup_pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+          dest: ${{ runner.temp }}/setup-pnpm
+      - name: Initialize provenance
+        id: provenance
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p "$EVIDENCE_DIR/base" "$EVIDENCE_DIR/candidate"
+          {
+            echo "workflow_sha=$GITHUB_SHA"
+            echo "base_sha=41e5408ec6c36164bb2e9cc8a1405591801adfda"
+            echo "candidate_sha=7d87e698442f156de1a1d667bf3cc4d5f9d54c72"
+            node --version
+            pnpm --version
+          } > "$EVIDENCE_DIR/provenance.txt"
+          printf 'base_head=' >> "$EVIDENCE_DIR/provenance.txt"
+          git -C base rev-parse HEAD >> "$EVIDENCE_DIR/provenance.txt"
+          printf 'candidate_head=' >> "$EVIDENCE_DIR/provenance.txt"
+          git -C candidate rev-parse HEAD >> "$EVIDENCE_DIR/provenance.txt"
+          sha256sum base/package.json base/pnpm-lock.yaml candidate/package.json candidate/pnpm-lock.yaml >> "$EVIDENCE_DIR/provenance.txt"
+      - name: Assert revisions and identical inputs
+        id: assert_inputs
+        shell: bash
+        run: |
+          set +e
+          status=0
+          test "$(git -C base rev-parse HEAD)" = "41e5408ec6c36164bb2e9cc8a1405591801adfda" || status=1
+          test "$(git -C candidate rev-parse HEAD)" = "7d87e698442f156de1a1d667bf3cc4d5f9d54c72" || status=1
+          cmp -- base/package.json candidate/package.json || status=1
+          cmp -- base/pnpm-lock.yaml candidate/pnpm-lock.yaml || status=1
+          printf '%s\n' "$status" > "$EVIDENCE_DIR/input-assertion.exit"
+          exit "$status"
+      - name: Install base dependencies
+        if: "${{ always() && steps.setup_node.outcome == 'success' && steps.setup_pnpm.outcome == 'success' && steps.provenance.outcome == 'success' && steps.assert_inputs.outcome == 'success' }}"
+        shell: bash
+        run: |
+          set +e
+          (cd base && pnpm install --frozen-lockfile --ignore-scripts --store-dir "$STORE_DIR") > "$EVIDENCE_DIR/base/install.log" 2>&1
+          printf '%s\n' "$?" > "$EVIDENCE_DIR/base/install.exit"
+      - name: Install candidate dependencies
+        if: "${{ always() && steps.setup_node.outcome == 'success' && steps.setup_pnpm.outcome == 'success' && steps.provenance.outcome == 'success' && steps.assert_inputs.outcome == 'success' }}"
+        shell: bash
+        run: |
+          set +e
+          (cd candidate && pnpm install --frozen-lockfile --ignore-scripts --store-dir "$STORE_DIR") > "$EVIDENCE_DIR/candidate/install.log" 2>&1
+          printf '%s\n' "$?" > "$EVIDENCE_DIR/candidate/install.exit"
+      - name: Record infrastructure-blocked installations
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          for revision in base candidate; do
+            if [ ! -f "$EVIDENCE_DIR/$revision/install.exit" ]; then
+              printf 'infrastructure-blocked: prerequisite setup, provenance, or input assertion failed\n' > "$EVIDENCE_DIR/$revision/install.log"
+              printf '125\n' > "$EVIDENCE_DIR/$revision/install.exit"
+            fi
+          done
+      - name: Run diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          shared_status="${{ steps.setup_node.outcome == 'success' && steps.setup_pnpm.outcome == 'success' && steps.provenance.outcome == 'success' && steps.assert_inputs.outcome == 'success' }}"
+          for revision in base candidate; do
+            if [ "$shared_status" != "true" ] || [ "$(cat "$EVIDENCE_DIR/$revision/install.exit" 2>/dev/null)" != "0" ]; then
+              printf 'infrastructure-blocked: prerequisites or installation failed; no compiler result produced\n' > "$EVIDENCE_DIR/$revision/tsc.log"
+              printf '125\n' > "$EVIDENCE_DIR/$revision/tsc.exit"
+              printf 'infrastructure-blocked: prerequisites or installation failed; no ratchet result produced\n' > "$EVIDENCE_DIR/$revision/ratchet.log"
+              printf '125\n' > "$EVIDENCE_DIR/$revision/ratchet.exit"
+              continue
+            fi
+            tsc="$(cd "$revision" && node -p "require('node:module').createRequire(process.cwd() + '/scripts/check-types.mjs').resolve('typescript/bin/tsc')" 2> "$EVIDENCE_DIR/$revision/tsc.resolve.log")"
+            resolve_status=$?
+            if [ "$resolve_status" -eq 0 ]; then
+              echo "typescript_${revision}=$(cd "$revision" && node "$tsc" --version)" >> "$EVIDENCE_DIR/provenance.txt"
+              (cd "$revision" && node "$tsc" -p "$PWD/tsconfig.json" --pretty false) > "$EVIDENCE_DIR/$revision/tsc.log" 2>&1
+              tsc_status=$?
+            else
+              tsc_status=$resolve_status
+            fi
+            printf '%s\n' "$tsc_status" > "$EVIDENCE_DIR/$revision/tsc.exit"
+            (cd "$revision" && node scripts/check-types.mjs) > "$EVIDENCE_DIR/$revision/ratchet.log" 2>&1
+            printf '%s\n' "$?" > "$EVIDENCE_DIR/$revision/ratchet.exit"
+          done
+      - name: Print diagnostic evidence
+        if: always()
+        shell: bash
+        run: |
+          for revision in base candidate; do
+            for evidence in install.log tsc.resolve.log tsc.log ratchet.log; do
+              echo "===== $revision/$evidence ====="
+              if [ -f "$EVIDENCE_DIR/$revision/$evidence" ]; then cat "$EVIDENCE_DIR/$revision/$evidence"; fi
+            done
+            echo "===== $revision/status ====="
+            cat "$EVIDENCE_DIR/$revision/install.exit" "$EVIDENCE_DIR/$revision/tsc.exit" "$EVIDENCE_DIR/$revision/ratchet.exit"
+          done
+      - name: Upload diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: agents-compaction-type-diagnostics-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/agents-compaction-type-diagnostics
+          retention-days: 7
+          if-no-files-found: error
+      - name: Fail on diagnostic failures or missing evidence
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          status=0
+          for required in provenance.txt input-assertion.exit; do
+            test -f "$EVIDENCE_DIR/$required" || status=1
+          done
+          for revision in base candidate; do
+            for required in install.exit tsc.log tsc.exit ratchet.log ratchet.exit; do
+              test -f "$EVIDENCE_DIR/$revision/$required" || status=1
+            done
+            for result in install tsc ratchet; do
+              test "$(cat "$EVIDENCE_DIR/$revision/$result.exit" 2>/dev/null)" = 0 || status=1
+            done
+          done
+          test "$(cat "$EVIDENCE_DIR/input-assertion.exit" 2>/dev/null)" = 0 || status=1
+          exit "$status"
