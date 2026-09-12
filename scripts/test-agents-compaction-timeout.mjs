@@ -33,6 +33,17 @@ const VIRTUAL_TIMEOUT = 240000;
 const TOTAL_DEADLINE_MS = 15000;
 const MAX_BYTES = 128 * 1024;
 const MAX_MESSAGES = 256;
+const PHASES = ["created", "spawned", "initial-response", "compaction-started", "summary-receipt", "watchdog-fired", "runner-settled", "cleanup-started", "cleanup-finished"];
+function processPresence(pid) {
+  if (!pid) return "unknown";
+  try { process.kill(pid, 0); return "present"; }
+  catch (error) { if (error.code === "ESRCH") return "gone"; if (error.code === "EPERM") return "permission-denied"; return "unknown"; }
+}
+function processGroupPresence(group) { return group ? processPresence(-group) : "unknown"; }
+function recordProcessProbe(evidence, pid, group) {
+  if (evidence.existenceProbes.length < 8) evidence.existenceProbes.push({ target: "child-handle", path: "existence-probe", result: processPresence(pid) });
+  if (evidence.existenceProbes.length < 8) evidence.existenceProbes.push({ target: "owned-group", path: "existence-probe", result: processGroupPresence(group) });
+}
 let activeFailure;
 function fail(error) { if (!activeFailure) activeFailure = error instanceof Error ? error : new Error(String(error)); }
 function namespace() { try { return readlinkSync("/proc/self/ns/net"); } catch { return undefined; } }
@@ -91,8 +102,8 @@ function observeFrame(state, frame) {
   state.messages += 1;
   if (state.messages > MAX_MESSAGES) throw new Error("RPC message bound exceeded");
   if (frame.type === "response" && frame.command === "get_state" && frame.success === true) state.getState = true;
-  if (frame.type === "response" && frame.command === "prompt" && frame.success === true) state.prompt = true;
-  if (frame.type === "compaction_start" && frame.reason === "threshold") { state.compaction = true; state.compactionStarts += 1; }
+  if (frame.type === "response" && frame.command === "prompt" && frame.success === true) { state.prompt = true; state.phase = "initial-response"; }
+  if (frame.type === "compaction_start" && frame.reason === "threshold") { state.compaction = true; state.compactionStarts += 1; state.phase = "compaction-started"; }
   if (frame.type === "compaction_end") state.compactionEnds += 1;
   if (frame.type === "message_update") { state.rpcUpdates += 1; if (state.compaction) state.rpcUpdatesAfterCompaction += 1; if (state.rpcUpdates <= 3) state.initialEvents.push(frame.assistantMessageEvent?.type); }
   if (state.timedOut) state.lateFrames += 1;
@@ -108,6 +119,7 @@ async function waitForCleanup(child, group, closed, deadlineAt) {
   throw new Error("deadline waiting for physical child close and process group disappearance");
 }
 async function cleanup(child, group, closed, ownedRoot, evidence) {
+  evidence.cleanupPhase = "cleanup-started";
   let cleanupError;
   let cleanupObserved = false;
   const remember = (error) => { cleanupError ??= error instanceof Error ? error : new Error(String(error)); };
@@ -127,7 +139,11 @@ async function cleanup(child, group, closed, ownedRoot, evidence) {
   }
   evidence.physicalCloseObserved = Boolean(child && closed.value);
   evidence.processGroupGone = evidence.physicalCloseObserved && cleanupObserved;
+  evidence.ownedProcess.pidState = processPresence(child?.pid);
+  evidence.ownedProcess.groupState = processGroupPresence(group);
+  recordProcessProbe(evidence, child?.pid, group);
   try { rmSync(ownedRoot, { recursive: true, force: true }); } catch (error) { remember(error); }
+  evidence.cleanupPhase = "cleanup-finished";
   evidence.cleanupError = cleanupError?.message;
   return cleanupError;
 }
@@ -142,8 +158,19 @@ async function cleanup(child, group, closed, ownedRoot, evidence) {
 
 
 let currentCaseEvidence;
+function validateProbeReceipt(value, caseName) {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const keys = Object.keys(value).sort();
+  if (keys.join(",") !== "calls,case,category,networkNamespace,outerNetworkNamespace,providerDeltas,sdkVersion") return undefined;
+  if (value.case !== caseName || value.category !== "summary-held") return undefined;
+  if (typeof value.sdkVersion !== "string" || value.sdkVersion.length > 32) return undefined;
+  if (!["networkNamespace", "outerNetworkNamespace"].every((key) => typeof value[key] === "string" && value[key].length > 0 && value[key].length <= 128)) return undefined;
+  if (!Number.isInteger(value.calls) || value.calls < 1 || value.calls > 2) return undefined;
+  if (!Number.isInteger(value.providerDeltas) || value.providerDeltas < 0 || value.providerDeltas > 2) return undefined;
+  return { sdkVersion: value.sdkVersion, networkNamespace: value.networkNamespace, outerNetworkNamespace: value.outerNetworkNamespace, calls: value.calls, providerDeltas: value.providerDeltas, case: value.case, category: value.category };
+}
 async function runCase(caseName) {
-  const caseEvidence = { case: caseName, physicalCloseObserved: false, processGroupGone: false, cleanupError: undefined };
+  const caseEvidence = { case: caseName, operationPhase: "created", cleanupPhase: "unobserved", physicalCloseObserved: false, processGroupGone: false, cleanupError: undefined, verificationState: "unobserved", milestone: { sdkVersion: "unavailable", networkNamespace: "unavailable", outerNetworkNamespace: OUTER_NET ?? "unavailable", calls: 0, providerDeltas: 0, postStartRpcUpdates: 0 }, virtualCallbacks: { fired: 0, canceled: 0 }, signals: [], existenceProbes: [], childEvents: { exit: false, close: false, disconnect: false, stdoutEnd: false, stdoutClose: false, stderrEnd: false, stderrClose: false }, ownedProcess: { pid: "unknown", pidState: "unknown", groupState: "unknown" }, runnerStatus: "unobserved" };
   currentCaseEvidence = caseEvidence;
   const startedAt = Date.now();
       const deadlineAt = startedAt + TOTAL_DEADLINE_MS;
@@ -151,7 +178,7 @@ async function runCase(caseName) {
   for (const name of ["home", "tmp", "config", "cache", "data", "sessions"]) mkdirSync(join(ownedRoot, name), { recursive: true });
   const scheduler = new VirtualScheduler();
   const store = new TaskStore();
-  const state = { messages: 0, bytes: 0, getState: false, prompt: false, compaction: false, compactionStarts: 0, compactionEnds: 0, rpcUpdates: 0, rpcUpdatesAfterCompaction: 0, initialEvents: [], lateFrames: 0, receipt: undefined, timedOut: false };
+  const state = { messages: 0, bytes: 0, getState: false, prompt: false, compaction: false, compactionStarts: 0, compactionEnds: 0, rpcUpdates: 0, rpcUpdatesAfterCompaction: 0, initialEvents: [], lateFrames: 0, receipt: undefined, timedOut: false, phase: "created" };
   let child;
   let group;
   let task;
@@ -167,18 +194,40 @@ async function runCase(caseName) {
       assert.equal(args.includes("--mode") && args[args.indexOf("--mode") + 1] === "rpc", true);
       child = nodeSpawn(command, args, options);
       group = child.pid;
+      const originalKill = child.kill.bind(child);
+      child.kill = (signalName) => {
+        const outcome = { target: "child-handle", path: caseEvidence.cleanupPhase === "cleanup-started" ? "emergency" : "runner", signal: signalName === 0 ? "0" : signalName === "SIGTERM" || signalName === "SIGKILL" ? signalName : "other", result: "unknown" };
+        try { const result = originalKill(signalName); outcome.result = result === true ? "sent" : "returned"; return result; }
+        catch (error) { outcome.result = error.code === "ESRCH" ? "gone" : error.code === "EPERM" ? "permission-denied" : "error"; throw error; }
+        finally { if (caseEvidence.signals.length < 8) caseEvidence.signals.push(outcome); }
+      };
+      caseEvidence.operationPhase = state.phase = "spawned";
+      caseEvidence.ownedProcess.pid = child.pid;
+      caseEvidence.ownedProcess.pidState = processPresence(child.pid);
+      caseEvidence.ownedProcess.groupState = processGroupPresence(group);
+      recordProcessProbe(caseEvidence, child.pid, group);
       boundedLines(child.stdout, (frame) => { try { observeFrame(state, frame); } catch (error) { fail(error); } });
       child.stderr?.on("data", (chunk) => { state.bytes += Buffer.byteLength(String(chunk)); if (state.bytes > MAX_BYTES) fail(new Error("stderr bound exceeded")); });
-      child.on("message", (value) => { try { state.bytes += Buffer.byteLength(JSON.stringify(value)); if (++state.messages > MAX_MESSAGES || state.bytes > MAX_BYTES) throw new Error("IPC bound exceeded"); if (value && typeof value === "object" && value.probeReceipt) state.receipt = value.probeReceipt; } catch (error) { fail(error); } });
-      child.on("close", () => { closed.value = true; closed.resolve(); });
+      child.on("message", (value) => { try { state.bytes += Buffer.byteLength(JSON.stringify(value)); if (++state.messages > MAX_MESSAGES || state.bytes > MAX_BYTES) throw new Error("IPC bound exceeded"); if (value && typeof value === "object" && value.probeReceipt) { const validated = validateProbeReceipt(value.probeReceipt, caseName); caseEvidence.verificationState = validated ? "validated" : "rejected"; if (!validated) throw new Error("probe receipt metadata rejected"); state.receipt = validated; } } catch (error) { fail(error); } });
+      child.on("exit", () => { caseEvidence.childEvents.exit = true; });
+      child.on("close", () => { caseEvidence.childEvents.close = true; closed.value = true; closed.resolve(); });
+      child.on("disconnect", () => { caseEvidence.childEvents.disconnect = true; });
+      child.stdout?.on("end", () => { caseEvidence.childEvents.stdoutEnd = true; });
+      child.stdout?.on("close", () => { caseEvidence.childEvents.stdoutClose = true; });
+      child.stderr?.on("end", () => { caseEvidence.childEvents.stderrEnd = true; });
+      child.stderr?.on("close", () => { caseEvidence.childEvents.stderrClose = true; });
       return child;
     };
-    const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: VIRTUAL_TIMEOUT }, { spawn, now: () => scheduler.now(), schedule: (fn, ms) => scheduler.schedule(fn, ms), pi: { command: NODE, args: ["--experimental-import-meta-resolve", "--experimental-strip-types", CHILD] }, process: { platform: "linux", kill: (pid, signal) => process.kill(pid, signal) } }, { askUser: async () => ({ cancelled: true }) });
+    const schedule = (fn, ms) => { let done = false; const cancel = scheduler.schedule(() => { done = true; caseEvidence.virtualCallbacks.fired += 1; fn(); }, ms); return () => { if (!done) { done = true; caseEvidence.virtualCallbacks.canceled += 1; } return cancel(); }; };
+    const signal = (pid, signalName) => { const outcome = { target: pid < 0 ? "owned-group" : "child-handle", path: signalName === 0 ? "existence-probe" : "runner", signal: signalName === 0 ? "0" : signalName === "SIGTERM" || signalName === "SIGKILL" ? signalName : "other", result: "unknown" }; try { const result = process.kill(pid, signalName); outcome.result = result === true ? "sent" : "returned"; return result; } catch (error) { outcome.result = error.code === "ESRCH" ? "gone" : error.code === "EPERM" ? "permission-denied" : "error"; throw error; } finally { if (caseEvidence.signals.length < 8) caseEvidence.signals.push(outcome); } };
+    const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: VIRTUAL_TIMEOUT }, { spawn, now: () => scheduler.now(), schedule, pi: { command: NODE, args: ["--experimental-import-meta-resolve", "--experimental-strip-types", CHILD] }, process: { platform: "linux", kill: signal } }, { askUser: async () => ({ cancelled: true }) });
     task = runner.run(makeRequest(caseName, ownedRoot));
     await waitUntil(() => state.getState, "get_state barrier", deadlineAt);
     await waitUntil(() => state.prompt, "prompt barrier", deadlineAt);
     await waitUntil(() => state.compaction, "threshold compaction_start", deadlineAt);
     await waitUntil(() => state.receipt !== undefined, "private held receipt", deadlineAt);
+    state.phase = "summary-receipt";
+    caseEvidence.milestone = { sdkVersion: state.receipt.sdkVersion ?? "unavailable", networkNamespace: state.receipt.networkNamespace ?? "unavailable", outerNetworkNamespace: state.receipt.outerNetworkNamespace ?? "unavailable", calls: state.receipt.calls ?? 0, providerDeltas: state.receipt.providerDeltas ?? 0, postStartRpcUpdates: state.rpcUpdatesAfterCompaction };
     assert.equal(state.compactionStarts, 1);
     assert.equal(state.compactionEnds, 0);
     assert.equal(state.rpcUpdatesAfterCompaction, 0);
@@ -193,11 +242,14 @@ async function runCase(caseName) {
     scheduler.advance(VIRTUAL_TIMEOUT - 1);
     assert.equal(store.get(task.id)?.status, TASK_STATUS.RUNNING);
     state.timedOut = true;
+    state.phase = "watchdog-fired";
     scheduler.advance(1);
     scheduler.advance(250);
     await boundedWait(closed.promise, "physical child close", deadlineAt);
     scheduler.advance(25);
     const finished = await boundedWait(runner.waitFor(task.id), "runner cleanup", deadlineAt);
+    caseEvidence.runnerStatus = finished.status;
+    state.phase = "runner-settled";
     assert.equal(finished.status, TASK_STATUS.TIMED_OUT);
     assert.equal(finished.result, "initial response");
     assert.equal(finished.error, "stalled for 4 min");
@@ -209,12 +261,18 @@ async function runCase(caseName) {
     fail(error);
     throw error;
   } finally {
+    caseEvidence.operationPhase = state.phase;
+    caseEvidence.runnerStatus = task ? store.get(task.id)?.status ?? caseEvidence.runnerStatus : caseEvidence.runnerStatus;
     const cleanupError = await cleanup(child, group, closed, ownedRoot, caseEvidence);
+    caseEvidence.runnerStatus = task ? store.get(task.id)?.status ?? caseEvidence.runnerStatus : caseEvidence.runnerStatus;
     if (cleanupError && !activeFailure) throw cleanupError;
   }
   if (activeFailure) throw activeFailure;
+  caseEvidence.ownedProcess.pidState = processPresence(child?.pid);
+  caseEvidence.ownedProcess.groupState = processGroupPresence(group);
   result.physicalCloseObserved = caseEvidence.physicalCloseObserved;
   result.processGroupGone = caseEvidence.processGroupGone;
+  result.diagnostics = { operationPhase: caseEvidence.operationPhase, cleanupPhase: caseEvidence.cleanupPhase, verificationState: caseEvidence.verificationState, milestone: caseEvidence.milestone, virtualCallbacks: caseEvidence.virtualCallbacks, signals: caseEvidence.signals, existenceProbes: caseEvidence.existenceProbes, childEvents: caseEvidence.childEvents, ownedProcess: caseEvidence.ownedProcess, runnerStatus: caseEvidence.runnerStatus };
   return result;
 }
 function categoryFor(error) {
@@ -234,9 +292,19 @@ async function main() {
     for (const caseName of ["silent", "finite-deltas"]) { currentCase = caseName; results.push(await runCase(caseName)); }
     return { status: "success", category: "behavior", sdkVersion: "0.85.1", sourceSha: ACTUAL_SOURCE_SHA, nodeSha256: NODE_SHA256, cases: results, mechanics: "virtual default 240000ms; not actual elapsed 240000ms and not a production timeout recommendation" };
   } catch (error) {
-    return { status: "failure", category: categoryFor(activeFailure ?? error), error: String(activeFailure ?? error).slice(0, 400), sdkVersion: "unobserved", sourceSha: ACTUAL_SOURCE_SHA ?? "unavailable", nodeSha256: NODE_SHA256, failedCase: currentCaseEvidence?.case ?? currentCase, physicalCloseObserved: currentCaseEvidence?.physicalCloseObserved ?? false, processGroupGone: currentCaseEvidence?.processGroupGone ?? false, cleanupError: currentCaseEvidence?.cleanupError, cases: results };
+    return { status: "failure", category: categoryFor(activeFailure ?? error), error: String(activeFailure ?? error).slice(0, 400), sdkVersion: "unobserved", sourceSha: ACTUAL_SOURCE_SHA ?? "unavailable", nodeSha256: NODE_SHA256, failedCase: currentCaseEvidence?.case ?? currentCase, physicalCloseObserved: currentCaseEvidence?.physicalCloseObserved ?? false, processGroupGone: currentCaseEvidence?.processGroupGone ?? false, cleanupError: currentCaseEvidence?.cleanupError, diagnostics: currentCaseEvidence ? { operationPhase: currentCaseEvidence.operationPhase, cleanupPhase: currentCaseEvidence.cleanupPhase, verificationState: currentCaseEvidence.verificationState, milestone: currentCaseEvidence.milestone, virtualCallbacks: currentCaseEvidence.virtualCallbacks, signals: currentCaseEvidence.signals, existenceProbes: currentCaseEvidence.existenceProbes, childEvents: currentCaseEvidence.childEvents, ownedProcess: currentCaseEvidence.ownedProcess, runnerStatus: currentCaseEvidence.runnerStatus } : undefined, cases: results };
   }
 }
+function boundedOutput(receipt) {
+  const json = JSON.stringify(receipt);
+  if (Buffer.byteLength(json) <= 16 * 1024) return { receipt, json };
+  const sourceSha = typeof receipt.sourceSha === "string" && /^[0-9a-f]{40}$/i.test(receipt.sourceSha) ? receipt.sourceSha : "unavailable";
+  const failedCase = receipt.failedCase === "silent" || receipt.failedCase === "finite-deltas" ? receipt.failedCase : "unavailable";
+  const priorCategory = ["behavior", "cleanup", "dependency/package", "SDK/fixture-contract", "infrastructure/isolation"].includes(receipt.category) ? receipt.category : "unknown";
+  const fallback = { status: "failure", category: "diagnostic/receipt-overflow", error: "bounded diagnostic receipt exceeded 16KiB", priorFailure: receipt.status === "failure" ? "present" : "absent", priorCategory, sourceSha, failedCase, physicalCloseObserved: receipt.physicalCloseObserved === true, processGroupGone: receipt.processGroupGone === true, cleanupErrorPresent: typeof receipt.cleanupError === "string", verificationState: "rejected" };
+  return { receipt: fallback, json: JSON.stringify(fallback) };
+}
 const receipt = await main();
-process.stdout.write(`${JSON.stringify(receipt)}\n`);
-if (receipt.status !== "success") process.exitCode = 1;
+const output = boundedOutput(receipt);
+process.stdout.write(`${output.json}\n`);
+if (output.receipt.status !== "success") process.exitCode = 1;
