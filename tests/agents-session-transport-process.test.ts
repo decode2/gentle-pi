@@ -1,9 +1,12 @@
 import assert from "node:assert/strict";
+import { EventEmitter } from "node:events";
+import { PassThrough } from "node:stream";
 import { spawn } from "node:child_process";
 import { lstat, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import nodeTest from "node:test";
+import type { TestContext } from "node:test";
 const test = process.platform === "win32" ? nodeTest.skip : nodeTest;
 
 const fixture = resolve("tests/fixtures/agents-session-transport-process.mjs");
@@ -14,6 +17,33 @@ type Reply = { requestId: string; ok: boolean; result?: Record<string, unknown>;
 type Callback = { event: "callback"; requestId: string; pid: number; id: string; senderSessionId: string; message: string };
 type Pending = { timer: ReturnType<typeof setTimeout>; settled: boolean; resolve: (reply: Reply) => void; reject: (error: Error) => void };
 type Exit = { code: number | null; signal: NodeJS.Signals | null };
+type SpawnedProcess = EventEmitter & {
+	pid: number | undefined;
+	stdin: (NodeJS.WritableStream & EventEmitter) | null;
+	stdout: (NodeJS.ReadableStream & EventEmitter) | null;
+	stderr: (NodeJS.ReadableStream & EventEmitter) | null;
+	exitCode: number | null;
+	signalCode: NodeJS.Signals | null;
+	kill(signal?: NodeJS.Signals): boolean;
+};
+type SpawnProcess = (...args: Parameters<typeof spawn>) => SpawnedProcess;
+
+class MemoryProcess extends EventEmitter implements SpawnedProcess {
+	pid = undefined;
+	stdin = new PassThrough();
+	stdout = new PassThrough();
+	stderr = new PassThrough();
+	exitCode: number | null = null;
+	signalCode: NodeJS.Signals | null = null;
+	kill(): boolean {
+		this.exitCode = 0;
+		this.emit("exit", 0, null);
+		this.emit("close", 0, null);
+		return true;
+	}
+}
+
+const memorySpawn: SpawnProcess = () => new MemoryProcess();
 
 const bounded = async <T>(label: string, operation: Promise<T>) => {
 	let timer: ReturnType<typeof setTimeout> | undefined;
@@ -21,8 +51,8 @@ const bounded = async <T>(label: string, operation: Promise<T>) => {
 	finally { if (timer) clearTimeout(timer); }
 };
 
-function child(agentHome: string) {
-	const process = spawn(globalThis.process.execPath, ["--experimental-strip-types", fixture], {
+function child(agentHome: string, spawnProcess: SpawnProcess = spawn) {
+	const process = spawnProcess(globalThis.process.execPath, ["--experimental-strip-types", fixture], {
 		env: { GENTLE_AGENT_HOME: agentHome }, stdio: ["pipe", "pipe", "pipe"],
 	});
 	const replies = new Map<string, Pending>();
@@ -110,6 +140,41 @@ function child(agentHome: string) {
 	};
 	return { process, command, callback, terminate, exited: terminal, exitedPromise, pendingCount: () => replies.size, raw: (frame: string) => process.stdin!.write(frame), termination };
 }
+
+test("stdin EPIPE rejects the pending command without escaping the transport helper", async (t: TestContext) => {
+	const owned = child("fixture", memorySpawn);
+	const expected = Object.assign(new Error("fixture EPIPE"), { code: "EPIPE" });
+	const pending = owned.command("pending");
+	const observed = pending.then(() => undefined, (error) => error);
+	let primary: unknown;
+	try {
+		assert.doesNotThrow(() => owned.process.stdin!.emit("error", expected), "stdin EPIPE must be handled by the transport helper");
+		assert.strictEqual(await bounded("EPIPE command rejection", observed), expected, "the pending command receives the stdin error instance");
+		assert.equal(owned.pendingCount(), 0, "stdin failure drains pending commands");
+	} catch (error) {
+		primary = error;
+	} finally {
+		const lateErrors: Error[] = [];
+		const onStdinError = (error: Error) => { lateErrors.push(error); };
+		owned.process.stdin!.on("error", onStdinError);
+		try {
+			owned.process.stdin!.end();
+			owned.process.emit("exit", 1, null);
+			owned.process.emit("close", 1, null);
+			await bounded("memory transport command settlement", observed);
+			await bounded("memory transport pending drain", (async () => {
+				while (owned.pendingCount() !== 0) await new Promise((resolve) => setImmediate(resolve));
+			})());
+			assert.deepEqual(lateErrors, [], "cleanup must not emit an additional stdin error");
+		} catch (error) {
+			if (primary === undefined) primary = error;
+			else t.diagnostic(`EPIPE cleanup secondary failure: ${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			owned.process.stdin!.off("error", onStdinError);
+		}
+	}
+	if (primary !== undefined) throw primary;
+});
 
 async function ensureStopped(owned: ReturnType<typeof child>) {
 	if (owned.exited()) return;
