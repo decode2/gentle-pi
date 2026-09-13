@@ -60,6 +60,55 @@ function view(done: (outcome: unknown) => void = () => {}) {
 	return { component, renders: () => renders };
 }
 
+const ARROW_UP = "\u001b[A";
+const ARROW_DOWN = "\u001b[B";
+const ARROW_LEFT = "\u001b[D";
+const ARROW_RIGHT = "\u001b[C";
+const ENTER = "\r";
+const ESCAPE = "\u001b";
+const SHIFT_TAB = "\u001b[Z";
+// Keyboard stops use the option control's existing visible arrow prefix: "→ ".
+const KEYBOARD_FOCUS_ORDER = ["Direct", "Staged", "Custom answer", "Submit", "Cancel"];
+
+function keyboardRequest(multiSelect = false) {
+	const result = createFrozenQuestionnaireRequest("keyboard-correlation", { questions: [{
+		question: "Choose a route", header: "Route", options: [
+			{ label: "Direct", description: "Fast" }, { label: "Staged", description: "Careful" },
+		],
+		...(multiSelect ? { multiSelect: true } : {}),
+	}] });
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error("valid keyboard fixture");
+	return result.request;
+}
+
+function keyboardView(done: (outcome: unknown) => void = () => {}, multiSelect = false) {
+	return new QuestionnaireTuiPresentation({
+		request: keyboardRequest(multiSelect), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone: done,
+	});
+}
+
+function renderedText(component: QuestionnaireTuiPresentation, width = 80): string[] {
+	return component.render(width).map((line) => stripTerminalSequences(line).trim());
+}
+
+function focusedControl(lines: readonly string[], label: string): number {
+	const row = lines.findIndex((line) => line.startsWith("→ ") && line.includes(label));
+	assert.ok(row >= 0, `keyboard focus is visible on ${label}`);
+	return row;
+}
+
+function assertFocusPath(component: QuestionnaireTuiPresentation, key: string, labels: readonly string[], width = 80): void {
+	assert.ok(labels.length > 0, "keyboard focus path has a starting control");
+	const maxSteps = labels.length + 3;
+	focusedControl(renderedText(component, width), labels[0]!);
+	for (let step = 1; step < labels.length; step++) {
+		assert.ok(step < maxSteps, "keyboard focus walk remains bounded");
+		component.handleInput(key);
+		focusedControl(renderedText(component, width), labels[step]!);
+	}
+}
+
 function mouse(width: number, y = 0, height = 24): TuiMouseEvent {
 	return { type: "click", button: "left", x: 0, y, screenX: 0, screenY: y, width, height, shift: false, alt: false, ctrl: false };
 }
@@ -83,6 +132,123 @@ function clickVisible(component: QuestionnaireTuiPresentation, label: string | R
 	assert.ok(y >= 0, `${width}-column layout contains ${String(label)}`);
 	component.handleMouse(mouse(width, y, lines.length));
 }
+
+test("arrow navigation traverses options, Custom answer, primary, and Cancel with visible focus", () => {
+	const outcomes: unknown[] = [];
+	const component = keyboardView((outcome) => outcomes.push(outcome));
+	const initial = renderedText(component);
+	assert.ok(initial.some((line) => line.includes("Custom answer")), "Custom answer is always visible without a selection");
+	assertFocusPath(component, ARROW_DOWN, KEYBOARD_FOCUS_ORDER);
+	assert.equal(outcomes.length, 0, "focus movement does not complete the questionnaire");
+	assert.doesNotMatch(renderedText(component).join("\n"), /\(●\)/, "focus movement does not select an option");
+	component.handleInput(ARROW_DOWN);
+	focusedControl(renderedText(component), "Cancel");
+	assert.equal(outcomes.length, 0, "down clamps at the outer focus boundary");
+
+	assertFocusPath(component, ARROW_UP, [...KEYBOARD_FOCUS_ORDER].reverse());
+	component.handleInput(ARROW_UP);
+	focusedControl(renderedText(component), "Direct");
+	assert.equal(outcomes.length, 0, "up clamps at the outer focus boundary");
+
+	component.handleInput(ENTER);
+	assert.match(renderedText(component).join("\n"), /→ \(●\) Direct/, "Enter selects an option without submitting");
+	assert.equal(outcomes.length, 0);
+	assertFocusPath(component, ARROW_DOWN, KEYBOARD_FOCUS_ORDER.slice(0, 4));
+	component.handleInput(ENTER);
+	assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+		questionIndex: 0, question: "Choose a route", kind: "option", answer: "Direct",
+	}] }], "Enter on the focused primary submits the selected option");
+
+	const cancelled: unknown[] = [];
+	const cancelView = keyboardView((outcome) => cancelled.push(outcome));
+	assertFocusPath(cancelView, ARROW_DOWN, KEYBOARD_FOCUS_ORDER);
+	cancelView.handleInput(ENTER);
+	assert.deepEqual(cancelled, [{ correlationId: "keyboard-correlation", cancelled: true, answers: [] }],
+		"Enter on the independently focused Cancel action cancels without fabricating an answer");
+});
+
+test("Tab and Shift+Tab traverse the same bounded focus order without opening Custom answer", () => {
+	const outcomes: unknown[] = [];
+	const component = keyboardView((outcome) => outcomes.push(outcome));
+	assertFocusPath(component, "\t", KEYBOARD_FOCUS_ORDER);
+	assert.equal(outcomes.length, 0);
+	let visible = renderedText(component).join("\n");
+	assert.doesNotMatch(visible, /Custom response \(Esc/, "focusing Custom answer does not auto-open the editor");
+	assert.doesNotMatch(visible, /\(●\)/, "tab focus does not select an option");
+
+	assertFocusPath(component, SHIFT_TAB, [...KEYBOARD_FOCUS_ORDER].reverse());
+	assertFocusPath(component, "\t", KEYBOARD_FOCUS_ORDER.slice(0, 3));
+	component.handleInput(ENTER);
+	assert.match(renderedText(component).join("\n"), /Custom response \(Esc/, "Enter opens the focused custom answer editor");
+	component.handleInput("draft");
+	assert.equal(outcomes.length, 0, "typing a custom draft does not complete the questionnaire");
+	component.handleInput("\t");
+	focusedControl(renderedText(component), "Submit");
+	visible = renderedText(component).join("\n");
+	assert.match(visible, /draft/, "Tab closes the editor while retaining its draft");
+	assert.equal(outcomes.length, 0);
+
+	component.handleInput(SHIFT_TAB);
+	focusedControl(renderedText(component), "Custom answer");
+	assert.doesNotMatch(renderedText(component).join("\n"), /Custom response \(Esc/, "Shift+Tab returns to Custom answer without reopening its editor");
+	component.handleInput(ENTER);
+	assert.match(renderedText(component).join("\n"), /Custom response \(Esc/);
+	component.handleInput(SHIFT_TAB);
+	focusedControl(renderedText(component), "Staged");
+	assert.match(renderedText(component).join("\n"), /draft/, "Shift+Tab closes the editor while retaining its draft");
+	component.handleInput("\t");
+	focusedControl(renderedText(component), "Custom answer");
+	component.handleInput(ENTER);
+	assert.match(renderedText(component).join("\n"), /Custom response \(Esc/);
+	component.handleInput(ESCAPE);
+	focusedControl(renderedText(component), "Custom answer");
+	assert.match(renderedText(component).join("\n"), /draft/, "Escape closes the editor without discarding its draft");
+	assert.equal(outcomes.length, 0);
+	component.handleInput(ESCAPE);
+	assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: true, answers: [] }],
+		"a second Escape outside the editor cancels the questionnaire");
+});
+
+test("custom editor arrows and Enter preserve cursor edits, newlines, and literal action letters", () => {
+	const outcomes: unknown[] = [];
+	const component = keyboardView((outcome) => outcomes.push(outcome));
+	assertFocusPath(component, "\t", KEYBOARD_FOCUS_ORDER.slice(0, 3));
+	component.handleInput(ENTER);
+	component.handleInput("abcd");
+	component.handleInput(ARROW_LEFT);
+	component.handleInput(ARROW_LEFT);
+	component.handleInput("X");
+	component.handleInput(ARROW_RIGHT);
+	component.handleInput(ENTER);
+	component.handleInput("n/s");
+	component.handleInput(ARROW_UP);
+	component.handleInput(ARROW_DOWN);
+	assert.equal(outcomes.length, 0, "editor arrows and literal n/s never trigger questionnaire actions");
+
+	component.handleInput("\t");
+	focusedControl(renderedText(component), "Submit");
+	assert.match(renderedText(component).join("\n"), /abXc\nn\/sd/, "editor navigation retains the exact multiline draft");
+	component.handleInput(ENTER);
+	assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+		questionIndex: 0, question: "Choose a route", kind: "custom", answer: "abXc\nn/sd",
+	}] }], "keyboard Submit emits the exact custom draft without option selection");
+});
+
+test("multi-select Enter toggles focused options and waits for the primary action", () => {
+	const outcomes: unknown[] = [];
+	const component = keyboardView((outcome) => outcomes.push(outcome), true);
+	focusedControl(renderedText(component), "Direct");
+	component.handleInput(ENTER);
+	assert.match(renderedText(component).join("\n"), /→ \[x\] Direct/);
+	assert.equal(outcomes.length, 0, "selecting a multi-select option does not complete the questionnaire");
+	component.handleInput(ARROW_DOWN);
+	component.handleInput(ENTER);
+	assert.match(renderedText(component).join("\n"), /→ \[x\] Staged/);
+	assert.equal(outcomes.length, 0);
+	assertFocusPath(component, ARROW_DOWN, ["Staged", "Custom answer", "Submit"]);
+	component.handleInput(ENTER);
+	assert.equal(outcomes.length, 1, "the primary action is the first keyboard action that completes multi-select");
+});
 
 test("Ctrl+G launches the external editor only from a custom-answer draft", async () => {
 	const calls: string[] = [];

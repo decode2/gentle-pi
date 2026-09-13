@@ -128,6 +128,18 @@ function actionRow(lines: readonly string[], label: "Next" | "Submit" | "Cancel"
 	return row;
 }
 
+function keyboardActionRow(lines: readonly string[], label: "Next" | "Submit" | "Cancel"): number {
+	const row = text(lines).findIndex((line) => line === label || line === `→ ${label}`);
+	assert.ok(row >= 0, `${label} is inside the visible keyboard footer`);
+	return row;
+}
+
+function focusedKeyboardRow(lines: readonly string[], label: string): number {
+	const row = text(lines).findIndex((line) => line.startsWith("→ ") && line.includes(label));
+	assert.ok(row >= 0, `${label} has a visible keyboard focus marker`);
+	return row;
+}
+
 function optionRow(lines: readonly string[], label: string): number {
 	const row = text(lines).findIndex((line) => line.includes(label));
 	assert.ok(row >= 0, `${label} is inside the visible option body`);
@@ -255,6 +267,47 @@ test("wheel scrolls the long body while the sticky footer remains inside the ter
 	const after = frame(component, width, rows);
 	assert.notDeepEqual(after, before, "wheel changes the body without hiding the footer");
 	assertFooter(after, "Next");
+});
+
+test("keyboard focus scrolls Custom answer into the visible body while the sticky footer stays fixed", () => {
+	for (const { width, rows } of [{ width: 20, rows: 10 }, { width: 80, rows: 16 }]) {
+		const outcomes: unknown[] = [];
+		const component = view(rows, (outcome) => outcomes.push(outcome));
+		let lines = frame(component, width, rows);
+		const initialFooter = keyboardActionRow(lines, "Next");
+
+		component.handleInput("\u001b[B");
+		component.handleInput("\u001b[B");
+		lines = frame(component, width, rows);
+		const custom = focusedKeyboardRow(lines, "Custom answer");
+		assert.ok(custom < keyboardActionRow(lines, "Next"), `${width}x${rows} Custom answer is visible in the body, not the footer`);
+		assert.equal(keyboardActionRow(lines, "Next"), initialFooter, `${width}x${rows} focus scrolling does not move the sticky Next footer`);
+		assert.equal(lines.length, frame(component, width, rows).length, `${width}x${rows} focus scrolling preserves the frame height`);
+		assert.equal(outcomes.length, 0, `${width}x${rows} focus movement does not complete the questionnaire`);
+
+		component.handleInput("\r");
+		component.handleInput("\t");
+		lines = frame(component, width, rows);
+		const nextFooter = keyboardActionRow(lines, "Next");
+		assert.equal(focusedKeyboardRow(lines, "Next"), nextFooter, `${width}x${rows} Next is keyboard-reachable in the sticky footer`);
+		component.handleInput("\r");
+		lines = frame(component, width, rows);
+		assert.match(text(lines).join("\n"), /Question 2:/, `${width}x${rows} keyboard Next advances to the next question`);
+		assert.equal(outcomes.length, 0);
+
+		const secondFooter = keyboardActionRow(lines, "Submit");
+		component.handleInput("\u001b[B");
+		component.handleInput("\u001b[B");
+		component.handleInput("\u001b[B");
+		lines = frame(component, width, rows);
+		assert.equal(focusedKeyboardRow(lines, "Submit"), secondFooter, `${width}x${rows} Submit is keyboard-reachable after the body scroll`);
+		assert.equal(keyboardActionRow(lines, "Submit"), secondFooter, `${width}x${rows} Submit stays in the sticky footer`);
+		component.handleInput("\u001b[B");
+		lines = frame(component, width, rows);
+		assert.equal(focusedKeyboardRow(lines, "Cancel"), secondFooter + 1, `${width}x${rows} Cancel is keyboard-reachable after Submit`);
+		assert.equal(keyboardActionRow(lines, "Submit"), secondFooter, `${width}x${rows} Cancel focus does not move the sticky footer`);
+		assert.equal(outcomes.length, 0, `${width}x${rows} reaching footer actions does not auto-submit or cancel`);
+	}
 });
 
 for (const rows of [1, 2, 3]) {
