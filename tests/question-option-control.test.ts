@@ -162,7 +162,7 @@ test("rejects pointer events whose width differs from the rendered frame", () =>
 	const staged = row(control, 42, "Staged");
 	assert.equal(control.handleMouse(mouse("move", "none", staged.y, 41, staged.lines.length)), undefined);
 	assert.equal(control.handleMouse(mouse("click", "left", staged.y, 41, staged.lines.length)), undefined);
-	assert.deepEqual(actions, []);
+	assert.deepEqual([...actions], []);
 	assert.doesNotMatch(control.render(42).join("\n"), new RegExp(hover.replace(/[\[\]]/g, "\\$&")));
 	control.render(0);
 	assert.equal(control.handleMouse(mouse("click", "left", staged.y, 42, staged.lines.length)), undefined);
