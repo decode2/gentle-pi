@@ -881,7 +881,7 @@ test("without raw input, Ctrl+] retains the visible one-line fallback and never 
 		assert.equal(host.onHandleCalls, 1, "the fallback still receives a public overlay handle without hiding it");
 		host.component!.handleInput("\u001d");
 		assert.deepEqual(host.handle.setHiddenCalls, [], "a handle alone must never make the collapsed view unrecoverable");
-		assert.deepEqual(host.component!.render(48).map((line) => line.trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
+		assert.deepEqual(host.component!.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
 	} finally { await cleanup(); }
 });
 
