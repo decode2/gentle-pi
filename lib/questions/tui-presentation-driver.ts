@@ -125,7 +125,7 @@ export function createTuiQuestionPresentationDriver(
 				return view;
 			}, {
 				overlay: true,
-				overlayOptions: { width: "100%", maxHeight: "100%", anchor: "center", margin: 0 },
+				overlayOptions: { width: "100%", maxHeight: "100%", anchor: "bottom-center", margin: 0 },
 				onHandle: (handle) => {
 					if (terminal) return;
 					overlayHandle = handle;

@@ -1,8 +1,15 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ExtensionUIContext, TerminalInputHandler, Theme } from "@earendil-works/pi-coding-agent";
+import { KeybindingsManager, Theme, type ExtensionUIContext, type TerminalInputHandler } from "@earendil-works/pi-coding-agent";
 import { stripTerminalSequences, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
-import type { Component, KeybindingsManager, OverlayHandle, OverlayOptions, Terminal, TUI } from "@earendil-works/pi-tui";
+import type {
+	Component,
+	OverlayHandle,
+	OverlayUnfocusOptions,
+	Terminal,
+	TUI,
+	TuiStopOptions,
+} from "@earendil-works/pi-tui";
 import type { QuestionnaireExternalEditor } from "../lib/questions/external-editor.ts";
 import { createTuiQuestionPresentationDriver } from "../lib/questions/tui-presentation-driver.ts";
 import { validateAndFormat } from "../lib/questions/response.ts";
@@ -17,17 +24,103 @@ type CustomFactory<T> = (
 	done: (result: T) => void,
 ) => CustomComponent | Promise<CustomComponent>;
 
-type CustomOptions = {
-	overlay?: boolean;
-	overlayOptions?: OverlayOptions | (() => OverlayOptions);
-	onHandle?: (handle: OverlayHandle) => void;
+type CustomOptions = NonNullable<Parameters<ExtensionUIContext["custom"]>[1]>;
+
+const testForegroundColors = {
+	accent: "",
+	border: "",
+	borderAccent: "",
+	borderMuted: "",
+	success: "",
+	error: "",
+	warning: "",
+	muted: "",
+	dim: "",
+	text: "",
+	thinkingText: "",
+	userMessageText: "",
+	customMessageText: "",
+	customMessageLabel: "",
+	toolTitle: "",
+	toolOutput: "",
+	mdHeading: "",
+	mdLink: "",
+	mdLinkUrl: "",
+	mdCode: "",
+	mdCodeBlock: "",
+	mdCodeBlockBorder: "",
+	mdQuote: "",
+	mdQuoteBorder: "",
+	mdHr: "",
+	mdListBullet: "",
+	toolDiffAdded: "",
+	toolDiffRemoved: "",
+	toolDiffContext: "",
+	syntaxComment: "",
+	syntaxKeyword: "",
+	syntaxFunction: "",
+	syntaxVariable: "",
+	syntaxString: "",
+	syntaxNumber: "",
+	syntaxType: "",
+	syntaxOperator: "",
+	syntaxPunctuation: "",
+	thinkingOff: "",
+	thinkingMinimal: "",
+	thinkingLow: "",
+	thinkingMedium: "",
+	thinkingHigh: "",
+	thinkingXhigh: "",
+	bashMode: "",
 };
 
-const theme = {
-	fg: (_color: string, text: string) => text,
-	bg: (_color: string, text: string) => text,
-	bold: (text: string) => text,
-} as unknown as Theme;
+const testBackgroundColors = {
+	selectedBg: "",
+	userMessageBg: "",
+	customMessageBg: "",
+	toolPendingBg: "",
+	toolSuccessBg: "",
+	toolErrorBg: "",
+};
+
+const theme = new Theme(testForegroundColors, testBackgroundColors, "truecolor");
+// The public coding-agent surface exposes this manager as a type; use the public TUI manager at runtime.
+const testKeybindings = new KeybindingsManager();
+
+class FailingTheme extends Theme {
+	constructor() {
+		super(testForegroundColors, testBackgroundColors, "truecolor");
+	}
+
+	override fg(_color: Parameters<Theme["fg"]>[0], _text: string): string {
+		throw new Error("view theme failure");
+	}
+}
+
+function questionnaireComponent(component: CustomComponent): QuestionnaireTuiPresentation {
+	if (!(component instanceof QuestionnaireTuiPresentation)) throw new Error("expected questionnaire presentation component");
+	return component;
+}
+
+function synchronousComponent(component: CustomComponent | Promise<CustomComponent>, message: string): CustomComponent {
+	assert.equal(component instanceof Promise, false, message);
+	if (component instanceof Promise) throw new Error(message);
+	return component;
+}
+
+function isQuestionnaireExternalEditor(value: unknown): value is QuestionnaireExternalEditor {
+	return typeof value === "function";
+}
+
+function injectedExternalEditor(view: QuestionnaireTuiPresentation): QuestionnaireExternalEditor | undefined {
+	const options: unknown = Object.getOwnPropertyDescriptor(view, "presentationOptions")?.value;
+	if (typeof options !== "object" || options === null || !("externalEditor" in options)) return undefined;
+	const editor: unknown = options.externalEditor;
+	return isQuestionnaireExternalEditor(editor) ? editor : undefined;
+}
+
+type EventTargetAddArguments = Parameters<EventTarget["addEventListener"]>;
+type EventTargetRemoveArguments = Parameters<EventTarget["removeEventListener"]>;
 
 function request() {
 	const result = createFrozenQuestionnaireRequest("tui-driver-correlation", { questions: [{
@@ -51,14 +144,8 @@ function owned(outcome: unknown) {
 }
 
 class FakeCustomHost implements Pick<ExtensionUIContext, "custom"> {
-	readonly lifecycle: string[] = [];
-	readonly tui = {
-		terminal: { rows: 24 },
-		requestRender: (force?: boolean) => { this.lifecycle.push(`render:${force === true}`); },
-		stop: (options?: { preserveScreen?: boolean }) => { this.lifecycle.push(`stop:${options?.preserveScreen === true}`); },
-		start: () => { this.lifecycle.push("start"); },
-	} as TUI;
-	readonly keybindings = {} as KeybindingsManager;
+	readonly tui: TestTui;
+	readonly keybindings = testKeybindings;
 	readonly received: Array<{ tui: TUI; theme: Theme; keybindings: KeybindingsManager }> = [];
 	readonly receivedOptions: Array<CustomOptions | undefined> = [];
 	calls = 0;
@@ -66,28 +153,36 @@ class FakeCustomHost implements Pick<ExtensionUIContext, "custom"> {
 	disposedAtDone = false;
 	rawOutcome: unknown;
 	component: QuestionnaireTuiPresentation | undefined;
+	notifyHandler: ((message: string, type?: "info" | "warning" | "error") => void) | undefined;
 	private readonly run: (component: QuestionnaireTuiPresentation) => void;
 	private readonly hostError: Error | undefined;
 	private readonly factoryTheme: Theme;
 	constructor(run: (component: QuestionnaireTuiPresentation) => void, hostError?: Error, factoryTheme: Theme = theme) {
+		this.tui = new TestTui();
 		this.run = run;
 		this.hostError = hostError;
 		this.factoryTheme = factoryTheme;
 	}
 
+	get lifecycle(): string[] { return this.tui.lifecycle; }
+
+	notify(message: string, type?: "info" | "warning" | "error"): void {
+		this.notifyHandler?.(message, type);
+	}
+
 	async custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T> {
 		this.calls++;
 		this.receivedOptions.push(options);
-		let resolve!: (result: T) => void;
+		let resolve: ((result: T | PromiseLike<T>) => void) | undefined;
 		const result = new Promise<T>((done) => { resolve = done; });
 		const component = await factory(this.tui, this.factoryTheme, this.keybindings, (outcome) => {
 			this.doneCalls++;
 			this.rawOutcome = outcome;
 			this.disposedAtDone = this.component?.render(48).length === 0;
-			resolve(outcome);
+			resolve?.(outcome);
 		});
 		this.received.push({ tui: this.tui, theme: this.factoryTheme, keybindings: this.keybindings });
-		this.component = component as QuestionnaireTuiPresentation;
+		this.component = questionnaireComponent(component);
 		if (this.hostError) throw this.hostError;
 		this.run(this.component);
 		return result;
@@ -135,25 +230,53 @@ class TestTerminal implements Terminal {
 	}
 }
 
+class TestTui extends TuiAltScreen {
+	readonly lifecycle: string[] = [];
+	startOverride: (() => void) | undefined;
+	stopOverride: (() => void) | undefined;
+	requestRenderOverride: (() => void) | undefined;
+
+	constructor() {
+		const terminal = new TestTerminal();
+		terminal.rows = 24;
+		super(terminal);
+	}
+
+	override start(): void {
+		this.lifecycle.push("start");
+		this.startOverride?.();
+	}
+
+	override stop(options?: TuiStopOptions): void {
+		this.lifecycle.push(`stop:${options?.preserveScreen === true}`);
+		this.stopOverride?.();
+	}
+
+	override requestRender(force?: boolean): void {
+		this.lifecycle.push(`render:${force === true}`);
+		this.requestRenderOverride?.();
+	}
+}
+
 class PublicTuiHost implements Pick<ExtensionUIContext, "custom"> {
 	readonly terminal = new TestTerminal();
 	readonly tui = new TuiAltScreen(this.terminal);
-	readonly keybindings = {} as KeybindingsManager;
+	readonly keybindings = testKeybindings;
 	component: QuestionnaireTuiPresentation | undefined;
 	handle: OverlayHandle | undefined;
 	doneCalls = 0;
 	rawOutcome: unknown;
 
 	async custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T> {
-		let resolve!: (result: T) => void;
+		let resolve: ((result: T | PromiseLike<T>) => void) | undefined;
 		const result = new Promise<T>((done) => { resolve = done; });
 		const component = await factory(this.tui, theme, this.keybindings, (outcome) => {
 			this.doneCalls++;
 			this.rawOutcome = outcome;
 			this.handle?.hide();
-			resolve(outcome);
+			resolve?.(outcome);
 		});
-		this.component = component as QuestionnaireTuiPresentation;
+		this.component = questionnaireComponent(component);
 		assert.equal(options?.overlay, true, "the public host test receives an overlay presentation");
 		const overlayOptions = typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
 		const handle = this.tui.showOverlay(component, overlayOptions);
@@ -162,12 +285,6 @@ class PublicTuiHost implements Pick<ExtensionUIContext, "custom"> {
 		return result;
 	}
 }
-
-type FutureTuiDriverFactory = (
-	ui: Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "notify">>,
-	localize?: Parameters<typeof createTuiQuestionPresentationDriver>[1],
-	externalEditor?: QuestionnaireExternalEditor,
-) => ReturnType<typeof createTuiQuestionPresentationDriver>;
 
 async function settleExternalEditor(): Promise<void> {
 	await Promise.resolve();
@@ -193,8 +310,9 @@ function feedSgrClick(terminal: TestTerminal, x: number, y: number): void {
 async function captureDriverExternalEditor(host: FakeCustomHost, editor: QuestionnaireExternalEditor) {
 	const presenting = createTuiQuestionPresentationDriver(host, undefined, editor).present(request());
 	await settleExternalEditor();
-	const externalEditor = (host.component as unknown as { presentationOptions?: { externalEditor?: QuestionnaireExternalEditor } } | undefined)
-		?.presentationOptions?.externalEditor;
+	const view = host.component;
+	if (!view) throw new Error("driver-created view is unavailable");
+	const externalEditor = injectedExternalEditor(view);
 	if (!externalEditor) throw new Error("driver-created view exposes an injected external editor");
 	return {
 		externalEditor,
@@ -217,8 +335,8 @@ async function expectUndefinedRejection(operation: () => Promise<unknown>): Prom
 }
 
 class SyncThrowAfterFactoryHost implements Pick<ExtensionUIContext, "custom"> {
-	readonly tui = { terminal: { rows: 24 }, requestRender: () => {} } as TUI;
-	readonly keybindings = {} as KeybindingsManager;
+	readonly tui = new TestTui();
+	readonly keybindings = testKeybindings;
 	readonly error = new Error("synchronous custom failure");
 	calls = 0;
 	doneCalls = 0;
@@ -226,30 +344,33 @@ class SyncThrowAfterFactoryHost implements Pick<ExtensionUIContext, "custom"> {
 
 	custom<T>(factory: CustomFactory<T>, _options?: CustomOptions): Promise<T> {
 		this.calls++;
-		this.component = factory(this.tui, theme, this.keybindings, () => { this.doneCalls++; }) as QuestionnaireTuiPresentation;
+		const component = synchronousComponent(factory(this.tui, theme, this.keybindings, () => { this.doneCalls++; }), "adapter factory is synchronous");
+		this.component = questionnaireComponent(component);
 		throw this.error;
 	}
 }
 
 class RejectBeforeLateFactoryHost implements Pick<ExtensionUIContext, "custom"> {
-	readonly tui = { terminal: { rows: 24 }, requestRender: () => {} } as TUI;
-	readonly keybindings = {} as KeybindingsManager;
+	readonly tui = new TestTui();
+	readonly keybindings = testKeybindings;
 	readonly error = new Error("custom rejected before factory");
 	calls = 0;
 	doneCalls = 0;
-	private factory: CustomFactory<unknown> | undefined;
+	private invokeFactory: (() => CustomComponent) | undefined;
 
 	custom<T>(factory: CustomFactory<T>, _options?: CustomOptions): Promise<T> {
 		this.calls++;
-		this.factory = factory as unknown as CustomFactory<unknown>;
-		return Promise.reject(this.error) as Promise<T>;
+		this.invokeFactory = () => synchronousComponent(
+			factory(this.tui, theme, this.keybindings, () => { this.doneCalls++; }),
+			"adapter factory is synchronous",
+		);
+		return Promise.reject<T>(this.error);
 	}
 
 	invokeLateFactory(): CustomComponent {
-		assert.ok(this.factory, "host retained the public factory");
-		const component = this.factory(this.tui, theme, this.keybindings, () => { this.doneCalls++; });
-		assert.equal(component instanceof Promise, false, "adapter factory is synchronous");
-		return component as CustomComponent;
+		const invoke = this.invokeFactory;
+		assert.ok(invoke, "host retained the public factory");
+		return invoke();
 	}
 }
 
@@ -276,7 +397,7 @@ test("future external editing stops the TUI before invocation and restores a for
 		component.handleInput("driver draft");
 		component.handleInput("\u0007");
 	});
-	const driver = (createTuiQuestionPresentationDriver as unknown as FutureTuiDriverFactory)(host, undefined, async (draft) => {
+	const driver = createTuiQuestionPresentationDriver(host, undefined, async (draft) => {
 		host.lifecycle.push(`editor:${draft}`);
 		calls.push(draft);
 		return "driver result";
@@ -300,8 +421,8 @@ test("future external editing restores the TUI and reports localized rejection t
 		component.handleInput("failure draft");
 		component.handleInput("\u0007");
 	});
-	const ui = Object.assign(host, { notify(message: string, level?: string) { notices.push(`${level}:${message}`); } }) as Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "notify">>;
-	const driver = (createTuiQuestionPresentationDriver as unknown as FutureTuiDriverFactory)(ui,
+	host.notifyHandler = (message, type) => { notices.push(`${type}:${message}`); };
+	const driver = createTuiQuestionPresentationDriver(host,
 		(key, fallback) => key === "editor.failed" ? "Editor fehlgeschlagen" : fallback,
 		async (draft) => {
 			host.lifecycle.push(`editor:${draft}`);
@@ -327,9 +448,9 @@ test("an undefined start failure preserves the external draft and reports the vi
 		component.handleInput("original draft");
 		component.handleInput("\u0007");
 	});
-	host.tui.start = () => { host.lifecycle.push("start"); throw undefined; };
-	const ui = Object.assign(host, { notify(message: string, level?: string) { notices.push(`${level}:${message}`); } }) as Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "notify">>;
-	const presenting = createTuiQuestionPresentationDriver(ui, undefined, async () => "edited value").present(request());
+	host.tui.startOverride = () => { throw undefined; };
+	host.notifyHandler = (message, type) => { notices.push(`${type}:${message}`); };
+	const presenting = createTuiQuestionPresentationDriver(host, undefined, async () => "edited value").present(request());
 	try {
 		await settleExternalEditor();
 		assert.match(host.component!.render(48).join("\n"), /original draft/);
@@ -341,19 +462,28 @@ test("an undefined start failure preserves the external draft and reports the vi
 	}
 });
 
-for (const scenario of [
-	{ name: "an undefined editor failure before a start error", calls: 1, configure(host: FakeCustomHost) { host.tui.start = () => { host.lifecycle.push("start"); throw new Error("start"); }; }, editor: async () => { throw undefined; } },
-	{ name: "an undefined stop failure before a start error", calls: 0, configure(host: FakeCustomHost) { host.tui.stop = () => { host.lifecycle.push("stop:true"); throw undefined; }; host.tui.start = () => { host.lifecycle.push("start"); throw new Error("start"); }; }, editor: async () => "unused" },
-	{ name: "an undefined forced render failure after editor success", calls: 1, configure(host: FakeCustomHost) { host.tui.requestRender = (force?: boolean) => { host.lifecycle.push(`render:${force === true}`); throw undefined; }; }, editor: async () => "edited" },
-	{ name: "an undefined start failure before a render error", calls: 1, configure(host: FakeCustomHost) { host.tui.start = () => { host.lifecycle.push("start"); throw undefined; }; host.tui.requestRender = (force?: boolean) => { host.lifecycle.push(`render:${force === true}`); throw new Error("render"); }; }, editor: async () => "edited" },
-]) {
+type ExternalEditorScenario = {
+	name: string;
+	calls: number;
+	configure(host: FakeCustomHost): void;
+	editor: () => Promise<string>;
+};
+
+const externalEditorScenarios: readonly ExternalEditorScenario[] = [
+	{ name: "an undefined editor failure before a start error", calls: 1, configure(host) { host.tui.startOverride = () => { throw new Error("start"); }; }, editor: async () => { throw undefined; } },
+	{ name: "an undefined stop failure before a start error", calls: 0, configure(host) { host.tui.stopOverride = () => { throw undefined; }; host.tui.startOverride = () => { throw new Error("start"); }; }, editor: async () => "unused" },
+	{ name: "an undefined forced render failure after editor success", calls: 1, configure(host) { host.tui.requestRenderOverride = () => { throw undefined; }; }, editor: async () => "edited" },
+	{ name: "an undefined start failure before a render error", calls: 1, configure(host) { host.tui.startOverride = () => { throw undefined; }; host.tui.requestRenderOverride = () => { throw new Error("render"); }; }, editor: async () => "edited" },
+];
+
+for (const scenario of externalEditorScenarios) {
 	test(`driver wrapper preserves ${scenario.name}`, async () => {
 		const host = new FakeCustomHost(() => {});
 		let calls = 0;
 		scenario.configure(host);
-		const { externalEditor, cleanup } = await captureDriverExternalEditor(host, async (draft) => {
+		const { externalEditor, cleanup } = await captureDriverExternalEditor(host, async () => {
 			calls++;
-			return scenario.editor(draft);
+			return scenario.editor();
 		});
 		try {
 			await expectUndefinedRejection(() => externalEditor("draft"));
@@ -457,7 +587,7 @@ test("propagates a host rejection, disposes the created view, and fabricates no 
 });
 
 test("propagates a real view-factory failure without a local fallback", async () => {
-	const host = new FakeCustomHost(() => {}, undefined, null as unknown as Theme);
+	const host = new FakeCustomHost(() => {}, undefined, new FailingTheme());
 	await assert.rejects(createTuiQuestionPresentationDriver(host).present(request()));
 	assert.equal(host.calls, 1);
 	assert.equal(host.component, undefined);
@@ -466,7 +596,8 @@ test("propagates a real view-factory failure without a local fallback", async ()
 test("turns a synchronous custom throw after factory creation into a rejected promise and disposes it", async () => {
 	const host = new SyncThrowAfterFactoryHost();
 	let presenting: Promise<unknown> | undefined;
-	assert.doesNotThrow(() => { presenting = createTuiQuestionPresentationDriver(host).present(request()) as Promise<unknown>; });
+	assert.doesNotThrow(() => { presenting = createTuiQuestionPresentationDriver(host).present(request()); });
+	assert.ok(presenting, "the driver returns a promise even when the host throws synchronously");
 	await assert.rejects(presenting, host.error);
 	assert.equal(host.calls, 1);
 	assert.equal(host.component!.render(48).length, 0);
@@ -484,28 +615,42 @@ test("rejects before a late retained factory can create a live view or forward c
 	assert.equal(host.doneCalls, 0);
 });
 
-class TrackingAbortSignal {
-	aborted = false;
+class TrackingAbortSignal extends EventTarget implements AbortSignal {
+	private readonly controller = new AbortController();
 	addCalls = 0;
 	removeCalls = 0;
-	readonly listeners = new Set<() => void>();
+	readonly listeners = new Set<EventTargetAddArguments[1]>();
+	onabort: ((this: AbortSignal, ev: Event) => void) | null = null;
 
-	addEventListener(type: string, listener: () => void): void {
-		if (type !== "abort") return;
-		this.addCalls++;
-		this.listeners.add(listener);
+	get aborted(): boolean { return this.controller.signal.aborted; }
+	get reason(): AbortSignal["reason"] { return this.controller.signal.reason; }
+
+	override addEventListener(...args: EventTargetAddArguments): void {
+		const [type, listener] = args;
+		if (type === "abort" && listener !== null) {
+			this.addCalls++;
+			this.listeners.add(listener);
+		}
+		super.addEventListener(...args);
 	}
 
-	removeEventListener(type: string, listener: () => void): void {
-		if (type !== "abort") return;
-		this.removeCalls++;
-		this.listeners.delete(listener);
+	override removeEventListener(...args: EventTargetRemoveArguments): void {
+		const [type, listener] = args;
+		if (type === "abort" && listener !== null) {
+			this.removeCalls++;
+			this.listeners.delete(listener);
+		}
+		super.removeEventListener(...args);
 	}
 
-	abort(): void {
+	throwIfAborted(): void { this.controller.signal.throwIfAborted(); }
+
+	abort(reason?: unknown): void {
 		if (this.aborted) return;
-		this.aborted = true;
-		for (const listener of this.listeners) listener();
+		this.controller.abort(reason);
+		const event = new Event("abort");
+		this.dispatchEvent(event);
+		this.onabort?.call(this, event);
 	}
 }
 
@@ -519,28 +664,31 @@ class PreAbortedNoUiHost implements Pick<ExtensionUIContext, "custom"> {
 }
 
 class DeferredFactoryHost implements Pick<ExtensionUIContext, "custom"> {
-	readonly tui = { terminal: { rows: 24 }, requestRender: () => {} } as TUI;
-	readonly keybindings = {} as KeybindingsManager;
+	readonly tui = new TestTui();
+	readonly keybindings = testKeybindings;
+	readonly error = new Error("deferred host settled");
 	calls = 0;
 	doneCalls = 0;
-	private factory: CustomFactory<unknown> | undefined;
-	private settleResult: ((result: unknown) => void) | undefined;
+	private invokeFactory: (() => CustomComponent) | undefined;
+	private rejectResult: ((reason?: unknown) => void) | undefined;
 
 	custom<T>(factory: CustomFactory<T>, _options?: CustomOptions): Promise<T> {
 		this.calls++;
-		this.factory = factory as unknown as CustomFactory<unknown>;
-		return new Promise<T>((resolve) => { this.settleResult = resolve as (result: unknown) => void; });
+		this.invokeFactory = () => synchronousComponent(
+			factory(this.tui, theme, this.keybindings, () => { this.doneCalls++; }),
+			"adapter factory is synchronous",
+		);
+		return new Promise<T>((_resolve, reject) => { this.rejectResult = reject; });
 	}
 
 	invokeLateFactory(): CustomComponent {
-		assert.ok(this.factory, "host retained the public factory");
-		const component = this.factory(this.tui, theme, this.keybindings, () => { this.doneCalls++; });
-		assert.equal(component instanceof Promise, false, "adapter factory is synchronous");
-		return component as CustomComponent;
+		const invoke = this.invokeFactory;
+		assert.ok(invoke, "host retained the public factory");
+		return invoke();
 	}
 
 	settle(): void {
-		this.settleResult?.({ correlationId: "tui-driver-correlation", cancelled: true, answers: [] });
+		this.rejectResult?.(this.error);
 	}
 }
 
@@ -585,7 +733,7 @@ test("abort before a late retained factory leaves its component terminal and ine
 		assert.equal(host.doneCalls, 0);
 	} finally {
 		host.settle();
-		await presenting;
+		await assert.rejects(presenting, host.error);
 	}
 });
 
@@ -606,15 +754,32 @@ test("normal completion and host rejection detach abort listeners, and later abo
 	assert.equal(rejectedSignal.removeCalls, 1);
 });
 
+class TestOverlayHandle implements OverlayHandle {
+	hidden = false;
+	focused = true;
+	focusCalls = 0;
+	readonly setHiddenCalls: boolean[] = [];
+
+	hide(): void {}
+	setHidden(hidden: boolean): void {
+		this.hidden = hidden;
+		this.setHiddenCalls.push(hidden);
+	}
+	isHidden(): boolean { return this.hidden; }
+	focus(): void {
+		this.focused = true;
+		this.focusCalls++;
+	}
+	unfocus(_options?: OverlayUnfocusOptions): void { this.focused = false; }
+	isFocused(): boolean { return this.focused; }
+	getBounds(): undefined { return undefined; }
+}
+
 class RawOverlayHost implements Pick<ExtensionUIContext, "custom" | "onTerminalInput"> {
-	readonly tui = { terminal: { rows: 24 }, requestRender() {} } as TUI;
-	readonly keybindings = {} as KeybindingsManager;
+	readonly tui = new TestTui();
+	readonly keybindings = testKeybindings;
 	readonly listeners = new Set<TerminalInputHandler>();
-	readonly handle = {
-		hidden: false, focused: true, focusCalls: 0, setHiddenCalls: [] as boolean[],
-		hide() {}, setHidden(hidden: boolean) { this.hidden = hidden; this.setHiddenCalls.push(hidden); }, isHidden() { return this.hidden; },
-		focus() { this.focused = true; this.focusCalls++; }, unfocus() { this.focused = false; }, isFocused() { return this.focused; }, getBounds() { return undefined; },
-	};
+	readonly handle = new TestOverlayHandle();
 	component: QuestionnaireTuiPresentation | undefined;
 	doneCalls = 0;
 	onHandleCalls = 0;
@@ -624,7 +789,6 @@ class RawOverlayHost implements Pick<ExtensionUIContext, "custom" | "onTerminalI
 	customError: Error | undefined;
 	deferHandle = false;
 	private pendingHandle: ((handle: OverlayHandle) => void) | undefined;
-	private resolve: ((result: unknown) => void) | undefined;
 
 	onTerminalInput(handler: TerminalInputHandler): () => void {
 		this.onTerminalInputCalls++;
@@ -634,20 +798,32 @@ class RawOverlayHost implements Pick<ExtensionUIContext, "custom" | "onTerminalI
 	}
 
 	custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T> {
-		const component = factory(this.tui, theme, this.keybindings, (result) => { this.doneCalls++; this.resolve?.(result); });
-		assert.equal(component instanceof Promise, false, "the questionnaire factory remains synchronous");
-		this.component = component as QuestionnaireTuiPresentation;
+		let resolve: ((result: T | PromiseLike<T>) => void) | undefined;
+		const result = new Promise<T>((done) => { resolve = done; });
+		const component = synchronousComponent(factory(this.tui, theme, this.keybindings, (outcome) => {
+			this.doneCalls++;
+			resolve?.(outcome);
+		}), "the questionnaire factory remains synchronous");
+		this.component = questionnaireComponent(component);
 		if (options?.onHandle) {
 			const deliver = (handle: OverlayHandle) => { this.onHandleCalls++; options.onHandle?.(handle); };
 			if (this.deferHandle) this.pendingHandle = deliver;
-			else deliver(this.handle as unknown as OverlayHandle);
+			else deliver(this.handle);
 		}
 		if (this.customError) throw this.customError;
-		return new Promise<T>((resolve) => { this.resolve = resolve as (result: unknown) => void; });
+		return result;
 	}
 
-	deliverLateHandle() { this.pendingHandle?.(this.handle as unknown as OverlayHandle); }
+	deliverLateHandle() { this.pendingHandle?.(this.handle); }
 	raw(data: string) { return [...this.listeners].map((listener) => listener(data)).at(-1); }
+}
+
+function customOnlyUi(host: RawOverlayHost): Pick<ExtensionUIContext, "custom"> {
+	return {
+		custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T> {
+			return host.custom(factory, options);
+		},
+	};
 }
 
 async function startRawOverlay(host: RawOverlayHost, ui: Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "onTerminalInput">> = host) {
@@ -691,7 +867,7 @@ test("another focused overlay leaves Ctrl+] unconsumed and cannot hide the quest
 
 test("without raw input, Ctrl+] retains the visible one-line fallback and never hides the public handle", async () => {
 	const host = new RawOverlayHost();
-	const { cleanup } = await startRawOverlay(host, { custom: host.custom.bind(host) });
+	const { cleanup } = await startRawOverlay(host, customOnlyUi(host));
 	try {
 		assert.equal(host.onTerminalInputCalls, 0, "an unavailable public hook is not registered");
 		assert.equal(host.onHandleCalls, 1, "the fallback still receives a public overlay handle without hiding it");
