@@ -1,5 +1,5 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, isKeyRepeat, matchesKey, type Component, type OverlayHandle } from "@earendil-works/pi-tui";
+import { isKeyRelease, isKeyRepeat, matchesKey, type Component, type KeybindingsManager, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 import type {
 	FrozenQuestionnaireRequest,
 	QuestionPresentationDriver,
@@ -15,7 +15,20 @@ import {
 } from "./presentation-state.ts";
 
 type DisposedComponent = Component & { dispose(): void };
-type QuestionnaireTuiUI = Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "notify" | "onTerminalInput">>;
+type CustomComponent = Component & { dispose?(): void };
+type ExtensionCustomFactory = Parameters<ExtensionUIContext["custom"]>[0];
+type ExtensionCustomOptions = NonNullable<Parameters<ExtensionUIContext["custom"]>[1]>;
+type QuestionnaireCustomFactory<T> = (
+	tui: Parameters<ExtensionCustomFactory>[0],
+	theme: Parameters<ExtensionCustomFactory>[1],
+	keybindings: KeybindingsManager,
+	done: (result: T) => void,
+) => CustomComponent | Promise<CustomComponent>;
+type QuestionnaireTuiUI = {
+	custom<T>(factory: QuestionnaireCustomFactory<T>, options?: ExtensionCustomOptions): Promise<T>;
+	notify?: ExtensionUIContext["notify"];
+	onTerminalInput?: ExtensionUIContext["onTerminalInput"];
+};
 
 /** Bridges the public Pi custom-component host to the fullscreen questionnaire view. */
 export function createTuiQuestionPresentationDriver(
@@ -141,7 +154,7 @@ export function createTuiQuestionPresentationDriver(
 	} };
 }
 
-async function runExternalEditor(tui: import("@earendil-works/pi-tui").TUI, externalEditor: QuestionnaireExternalEditor, draft: string): Promise<string> {
+async function runExternalEditor(tui: TUI, externalEditor: QuestionnaireExternalEditor, draft: string): Promise<string> {
 	let primaryFailed = false;
 	try {
 		tui.stop({ preserveScreen: true });

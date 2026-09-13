@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { KeybindingsManager, Theme, type ExtensionUIContext, type TerminalInputHandler } from "@earendil-works/pi-coding-agent";
-import { stripTerminalSequences, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
+import { Theme, type ExtensionUIContext, type TerminalInputHandler } from "@earendil-works/pi-coding-agent";
+import { getKeybindings, stripTerminalSequences, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
 import type {
 	Component,
+	KeybindingsManager,
 	OverlayHandle,
 	OverlayUnfocusOptions,
 	Terminal,
@@ -17,14 +18,18 @@ import { QuestionnaireTuiPresentation } from "../lib/questions/tui-presentation-
 import { createFrozenQuestionnaireRequest } from "../lib/questions/validation.ts";
 
 type CustomComponent = Component & { dispose?(): void };
+type ExtensionCustomFactory = Parameters<ExtensionUIContext["custom"]>[0];
 type CustomFactory<T> = (
-	tui: TUI,
-	theme: Theme,
+	tui: Parameters<ExtensionCustomFactory>[0],
+	theme: Parameters<ExtensionCustomFactory>[1],
 	keybindings: KeybindingsManager,
 	done: (result: T) => void,
 ) => CustomComponent | Promise<CustomComponent>;
 
 type CustomOptions = NonNullable<Parameters<ExtensionUIContext["custom"]>[1]>;
+type CustomHost = {
+	custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T>;
+};
 
 const testForegroundColors = {
 	accent: "",
@@ -84,8 +89,7 @@ const testBackgroundColors = {
 };
 
 const theme = new Theme(testForegroundColors, testBackgroundColors, "truecolor");
-// The public coding-agent surface exposes this manager as a type; use the public TUI manager at runtime.
-const testKeybindings = new KeybindingsManager();
+const testKeybindings = getKeybindings();
 
 class FailingTheme extends Theme {
 	constructor() {
@@ -119,6 +123,10 @@ function injectedExternalEditor(view: QuestionnaireTuiPresentation): Questionnai
 	return isQuestionnaireExternalEditor(editor) ? editor : undefined;
 }
 
+function asPromise<T>(value: T | Promise<T>): Promise<T> {
+	return Promise.resolve(value);
+}
+
 type EventTargetAddArguments = Parameters<EventTarget["addEventListener"]>;
 type EventTargetRemoveArguments = Parameters<EventTarget["removeEventListener"]>;
 
@@ -143,7 +151,7 @@ function owned(outcome: unknown) {
 	return outcome;
 }
 
-class FakeCustomHost implements Pick<ExtensionUIContext, "custom"> {
+class FakeCustomHost implements CustomHost {
 	readonly tui: TestTui;
 	readonly keybindings = testKeybindings;
 	readonly received: Array<{ tui: TUI; theme: Theme; keybindings: KeybindingsManager }> = [];
@@ -258,7 +266,7 @@ class TestTui extends TuiAltScreen {
 	}
 }
 
-class PublicTuiHost implements Pick<ExtensionUIContext, "custom"> {
+class PublicTuiHost implements CustomHost {
 	readonly terminal = new TestTerminal();
 	readonly tui = new TuiAltScreen(this.terminal);
 	readonly keybindings = testKeybindings;
@@ -308,7 +316,7 @@ function feedSgrClick(terminal: TestTerminal, x: number, y: number): void {
 }
 
 async function captureDriverExternalEditor(host: FakeCustomHost, editor: QuestionnaireExternalEditor) {
-	const presenting = createTuiQuestionPresentationDriver(host, undefined, editor).present(request());
+	const presenting = asPromise(createTuiQuestionPresentationDriver(host, undefined, editor).present(request()));
 	await settleExternalEditor();
 	const view = host.component;
 	if (!view) throw new Error("driver-created view is unavailable");
@@ -334,7 +342,7 @@ async function expectUndefinedRejection(operation: () => Promise<unknown>): Prom
 	assert.equal(rejected, true);
 }
 
-class SyncThrowAfterFactoryHost implements Pick<ExtensionUIContext, "custom"> {
+class SyncThrowAfterFactoryHost implements CustomHost {
 	readonly tui = new TestTui();
 	readonly keybindings = testKeybindings;
 	readonly error = new Error("synchronous custom failure");
@@ -350,7 +358,7 @@ class SyncThrowAfterFactoryHost implements Pick<ExtensionUIContext, "custom"> {
 	}
 }
 
-class RejectBeforeLateFactoryHost implements Pick<ExtensionUIContext, "custom"> {
+class RejectBeforeLateFactoryHost implements CustomHost {
 	readonly tui = new TestTui();
 	readonly keybindings = testKeybindings;
 	readonly error = new Error("custom rejected before factory");
@@ -402,7 +410,7 @@ test("future external editing stops the TUI before invocation and restores a for
 		calls.push(draft);
 		return "driver result";
 	});
-	const presenting = driver.present(request());
+	const presenting = asPromise(driver.present(request()));
 	try {
 		await settleExternalEditor();
 		assert.deepEqual(calls, ["driver draft"]);
@@ -429,7 +437,7 @@ test("future external editing restores the TUI and reports localized rejection t
 			calls.push(draft);
 			throw new Error("editor rejected");
 		});
-	const presenting = driver.present(request());
+	const presenting = asPromise(driver.present(request()));
 	try {
 		await settleExternalEditor();
 		assert.deepEqual(calls, ["failure draft"]);
@@ -450,7 +458,7 @@ test("an undefined start failure preserves the external draft and reports the vi
 	});
 	host.tui.startOverride = () => { throw undefined; };
 	host.notifyHandler = (message, type) => { notices.push(`${type}:${message}`); };
-	const presenting = createTuiQuestionPresentationDriver(host, undefined, async () => "edited value").present(request());
+	const presenting = asPromise(createTuiQuestionPresentationDriver(host, undefined, async () => "edited value").present(request()));
 	try {
 		await settleExternalEditor();
 		assert.match(host.component!.render(48).join("\n"), /original draft/);
@@ -512,7 +520,7 @@ test("requests a full-width terminal-capped bottom-centered public overlay for t
 test("public fullscreen overlay bounds stay bottom-anchored and route physical clicks", async () => {
 	const host = new PublicTuiHost();
 	host.tui.start();
-	const presenting = createTuiQuestionPresentationDriver(host).present(request());
+	const presenting = asPromise(createTuiQuestionPresentationDriver(host).present(request()));
 	try {
 		await settleExternalEditor();
 		const component = host.component;
@@ -580,7 +588,7 @@ test("disposes before completion and ignores late input without a second done ca
 test("propagates a host rejection, disposes the created view, and fabricates no cancellation", async () => {
 	const hostError = new Error("host rejected custom UI");
 	const host = new FakeCustomHost(() => {}, hostError);
-	await assert.rejects(createTuiQuestionPresentationDriver(host).present(request()), hostError);
+	await assert.rejects(asPromise(createTuiQuestionPresentationDriver(host).present(request())), hostError);
 	assert.equal(host.component!.render(48).length, 0);
 	host.component!.handleInput("\u001b");
 	assert.equal(host.doneCalls, 0);
@@ -588,7 +596,7 @@ test("propagates a host rejection, disposes the created view, and fabricates no 
 
 test("propagates a real view-factory failure without a local fallback", async () => {
 	const host = new FakeCustomHost(() => {}, undefined, new FailingTheme());
-	await assert.rejects(createTuiQuestionPresentationDriver(host).present(request()));
+	await assert.rejects(asPromise(createTuiQuestionPresentationDriver(host).present(request())));
 	assert.equal(host.calls, 1);
 	assert.equal(host.component, undefined);
 });
@@ -596,7 +604,7 @@ test("propagates a real view-factory failure without a local fallback", async ()
 test("turns a synchronous custom throw after factory creation into a rejected promise and disposes it", async () => {
 	const host = new SyncThrowAfterFactoryHost();
 	let presenting: Promise<unknown> | undefined;
-	assert.doesNotThrow(() => { presenting = createTuiQuestionPresentationDriver(host).present(request()); });
+	assert.doesNotThrow(() => { presenting = asPromise(createTuiQuestionPresentationDriver(host).present(request())); });
 	assert.ok(presenting, "the driver returns a promise even when the host throws synchronously");
 	await assert.rejects(presenting, host.error);
 	assert.equal(host.calls, 1);
@@ -607,7 +615,7 @@ test("turns a synchronous custom throw after factory creation into a rejected pr
 
 test("rejects before a late retained factory can create a live view or forward completion", async () => {
 	const host = new RejectBeforeLateFactoryHost();
-	await assert.rejects(createTuiQuestionPresentationDriver(host).present(request()), host.error);
+	await assert.rejects(asPromise(createTuiQuestionPresentationDriver(host).present(request())), host.error);
 	const component = host.invokeLateFactory();
 	assert.deepEqual(component.render(48), []);
 	component.handleInput?.("\u001b");
@@ -654,7 +662,7 @@ class TrackingAbortSignal extends EventTarget implements AbortSignal {
 	}
 }
 
-class PreAbortedNoUiHost implements Pick<ExtensionUIContext, "custom"> {
+class PreAbortedNoUiHost implements CustomHost {
 	calls = 0;
 
 	custom<T>(_factory: CustomFactory<T>, _options?: CustomOptions): Promise<T> {
@@ -663,7 +671,7 @@ class PreAbortedNoUiHost implements Pick<ExtensionUIContext, "custom"> {
 	}
 }
 
-class DeferredFactoryHost implements Pick<ExtensionUIContext, "custom"> {
+class DeferredFactoryHost implements CustomHost {
 	readonly tui = new TestTui();
 	readonly keybindings = testKeybindings;
 	readonly error = new Error("deferred host settled");
@@ -724,7 +732,7 @@ test("abort after factory disposes before done and preserves reducer-committed p
 test("abort before a late retained factory leaves its component terminal and inert", async () => {
 	const signal = new TrackingAbortSignal();
 	const host = new DeferredFactoryHost();
-	const presenting = createTuiQuestionPresentationDriver(host).present(request(), signal);
+	const presenting = asPromise(createTuiQuestionPresentationDriver(host).present(request(), signal));
 	signal.abort();
 	const component = host.invokeLateFactory();
 	try {
@@ -748,7 +756,7 @@ test("normal completion and host rejection detach abort listeners, and later abo
 
 	const rejectedSignal = new TrackingAbortSignal();
 	const rejectedHost = new SyncThrowAfterFactoryHost();
-	await assert.rejects(createTuiQuestionPresentationDriver(rejectedHost).present(request(), rejectedSignal), rejectedHost.error);
+	await assert.rejects(asPromise(createTuiQuestionPresentationDriver(rejectedHost).present(request(), rejectedSignal)), rejectedHost.error);
 	assert.equal(rejectedSignal.addCalls, 1);
 	assert.equal(rejectedSignal.listeners.size, 0);
 	assert.equal(rejectedSignal.removeCalls, 1);
@@ -775,7 +783,7 @@ class TestOverlayHandle implements OverlayHandle {
 	getBounds(): undefined { return undefined; }
 }
 
-class RawOverlayHost implements Pick<ExtensionUIContext, "custom" | "onTerminalInput"> {
+class RawOverlayHost implements CustomHost, Pick<ExtensionUIContext, "onTerminalInput"> {
 	readonly tui = new TestTui();
 	readonly keybindings = testKeybindings;
 	readonly listeners = new Set<TerminalInputHandler>();
@@ -818,7 +826,7 @@ class RawOverlayHost implements Pick<ExtensionUIContext, "custom" | "onTerminalI
 	raw(data: string) { return [...this.listeners].map((listener) => listener(data)).at(-1); }
 }
 
-function customOnlyUi(host: RawOverlayHost): Pick<ExtensionUIContext, "custom"> {
+function customOnlyUi(host: RawOverlayHost): CustomHost {
 	return {
 		custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T> {
 			return host.custom(factory, options);
@@ -826,8 +834,8 @@ function customOnlyUi(host: RawOverlayHost): Pick<ExtensionUIContext, "custom"> 
 	};
 }
 
-async function startRawOverlay(host: RawOverlayHost, ui: Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "onTerminalInput">> = host) {
-	const presenting = createTuiQuestionPresentationDriver(ui).present(request());
+async function startRawOverlay(host: RawOverlayHost, ui: CustomHost & Partial<Pick<ExtensionUIContext, "onTerminalInput">> = host) {
+	const presenting = asPromise(createTuiQuestionPresentationDriver(ui).present(request()));
 	await Promise.resolve();
 	assert.ok(host.component, "the public custom factory created the questionnaire");
 	return { presenting, cleanup: async () => { host.component?.cancel(); await presenting; } };
@@ -908,7 +916,7 @@ test("raw routing declines Ctrl+] during an active bracketed paste so the focuse
 test("abort removes the active raw listener exactly once before the cancelled presentation settles", async () => {
 	const host = new RawOverlayHost();
 	const signal = new AbortController();
-	const presenting = createTuiQuestionPresentationDriver(host).present(request(), signal.signal);
+	const presenting = asPromise(createTuiQuestionPresentationDriver(host).present(request(), signal.signal));
 	try {
 		await Promise.resolve();
 		assert.equal(host.onTerminalInputCalls, 1);
@@ -940,7 +948,7 @@ test("a host rejection removes the registered raw listener without manufacturing
 	const host = new RawOverlayHost();
 	const error = new Error("host rejected questionnaire");
 	host.customError = error;
-	await assert.rejects(createTuiQuestionPresentationDriver(host).present(request()), error);
+	await assert.rejects(asPromise(createTuiQuestionPresentationDriver(host).present(request())), error);
 	assert.equal(host.onTerminalInputCalls, 1);
 	assert.equal(host.removeCalls, 1);
 	assert.equal(host.doneCalls, 0);
