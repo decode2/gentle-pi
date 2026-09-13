@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { CURSOR_MARKER, stripTerminalSequences, type TUI, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import { QuestionnaireTuiPresentation } from "../lib/questions/tui-presentation-view.ts";
 import { createFrozenQuestionnaireRequest } from "../lib/questions/validation.ts";
+
+// Markdown delegates styling to the SDK's process-wide theme callbacks.
+initTheme("dark");
 
 const theme = {
 	fg: (_color: string, text: string) => text,
@@ -43,6 +47,51 @@ function simpleRequest() {
 	return result.request;
 }
 
+function previewFocusRequest(multiSelect?: false) {
+	const longPreview = [
+		"LONG_PREVIEW_CONTENT begins the longer preview.",
+		...Array.from({ length: 8 }, (_, index) => `Long preview detail ${index + 1} remains available.`),
+		"LONG_PREVIEW_TAIL",
+	].join("\n");
+	const question = {
+		header: "Preview focus",
+		question: "Choose one route.",
+		options: [
+			{ label: "Short", description: "Brief.", preview: "SHORT_PREVIEW_CONTENT remains in the focused preview area." },
+			{ label: "Long preview", description: "Long.", preview: longPreview },
+			{ label: "Plain route", description: "None." },
+		],
+		...(multiSelect === undefined ? {} : { multiSelect }),
+	};
+	const result = createFrozenQuestionnaireRequest("preview-focus-geometry", { questions: [question] });
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error("valid preview-focus fixture");
+	return result.request;
+}
+
+const previewFocusLabels = ["Short", "Long preview", "Plain route"];
+const previewFocusOrder = ["Long preview", "Plain route", "Short"];
+
+function longPreviewRequest() {
+	const preview = [
+		"LONG_PREVIEW_CONTENT introduction.",
+		...Array.from({ length: 18 }, (_, index) => `Preview detail ${index + 1} remains in the body.`),
+		"PREVIEW_TAIL",
+	].join("\n");
+	const result = createFrozenQuestionnaireRequest("preview-tail-viewport", { questions: [{
+		header: "Preview tail",
+		question: "Choose the route after reading its preview.",
+		multiSelect: false,
+		options: [
+			{ label: "Long route", description: "A compact route description.", preview },
+			{ label: "Plain", description: "None." },
+		],
+	}] });
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error("valid preview-tail fixture");
+	return result.request;
+}
+
 function view(rows: number, done: (outcome: unknown) => void = () => {}, fixture = request()) {
 	return new QuestionnaireTuiPresentation({
 		request: fixture,
@@ -74,6 +123,48 @@ function actionRow(lines: readonly string[], label: "Next" | "Submit" | "Cancel"
 	const row = text(lines).findIndex((line) => line === label);
 	assert.ok(row >= 0, `${label} is inside the visible capped frame`);
 	return row;
+}
+
+function optionRow(lines: readonly string[], label: string): number {
+	const row = text(lines).findIndex((line) => line.includes(label));
+	assert.ok(row >= 0, `${label} is inside the visible option body`);
+	return row;
+}
+
+function eventAt(
+	type: TuiMouseEvent["type"], x: number, y: number, width: number, height: number,
+	button: TuiMouseEvent["button"] = "left", wheelDelta?: number,
+): TuiMouseEvent {
+	return { ...event(type, y, width, height, button, wheelDelta), x, screenX: x };
+}
+
+function assertStablePreviewGeometry(
+	before: readonly string[], after: readonly string[], width: number, labels: readonly string[] = previewFocusLabels,
+): void {
+	assert.equal(after.length, before.length, `${width}-column preview focus keeps the frame height stable`);
+	for (const label of labels) {
+		assert.equal(optionRow(after, label), optionRow(before, label), `${width}-column focus keeps ${label} in the same row`);
+	}
+	assert.equal(actionRow(after, "Submit"), actionRow(before, "Submit"), `${width}-column focus keeps Submit in the same row`);
+	assert.equal(actionRow(after, "Cancel"), actionRow(before, "Cancel"), `${width}-column focus keeps Cancel in the same row`);
+	assertFooter(after, "Submit");
+}
+
+function exercisePreviewFocusCycle(component: QuestionnaireTuiPresentation, width: number, rows: number): string[] {
+	let lines = frame(component, width, rows);
+	const initial = lines;
+	const states = [initial];
+	for (const label of previewFocusOrder) {
+		const target = optionRow(lines, label);
+		assert.equal(clickFrame(component, target, width, lines.length)?.handled, true, `${width}-column ${label} remains pointer-reachable`);
+		lines = frame(component, width, rows);
+		if (label === "Plain route") {
+			assert.doesNotMatch(text(lines).join("\n"), /Preview:|SHORT_PREVIEW_CONTENT|LONG_PREVIEW_CONTENT/, `${width}-column no-preview focus leaves its preview area empty`);
+		}
+		states.push(lines);
+	}
+	for (const state of states.slice(1)) assertStablePreviewGeometry(initial, state, width);
+	return lines;
 }
 
 function assertFooter(lines: readonly string[], primary: "Next" | "Submit") {
@@ -320,4 +411,60 @@ test("long matrix content caps, scrolls, resizes, and retains its sticky footer"
 	const resized = compactFrame(component, width, host.terminal.rows);
 	assert.equal(resized.length, host.terminal.rows, "overflow remains capped after a taller resize");
 	assertFooter(resized, "Submit");
+});
+
+test("single-select preview focus keeps option and footer geometry stable across roomy viewport widths", () => {
+	for (const width of [20, 63, 64, 80]) {
+		const rows = 60;
+		const component = view(rows, () => {}, previewFocusRequest(false));
+		const initial = frame(component, width, rows);
+		assert.ok(initial.length < rows, `${width}-column fixture exposes its natural height in a roomy terminal`);
+		assertFooter(initial, "Submit");
+		exercisePreviewFocusCycle(component, width, rows);
+	}
+});
+
+test("short preview-focus frames keep the footer reachable while focus changes", () => {
+	for (const width of [20, 63, 64, 80]) {
+		const rows = 16;
+		const outcomes: unknown[] = [];
+		const component = view(rows, (outcome) => outcomes.push(outcome), previewFocusRequest(false));
+		const final = exercisePreviewFocusCycle(component, width, rows);
+		const submit = actionRow(final, "Submit");
+		assert.equal(clickFrame(component, submit, width, final.length)?.handled, true, `${width}-column Submit remains pointer-reachable after focus`);
+		assert.equal(outcomes.length, 1, `${width}-column Submit completes the focused questionnaire`);
+	}
+});
+
+test("omitted multiSelect does not retain inline previews after focusing a no-preview option", () => {
+	const width = 80;
+	const rows = 60;
+	const component = view(rows, () => {}, previewFocusRequest());
+	const withPreview = frame(component, width, rows);
+	assert.match(text(withPreview).join("\n"), /SHORT_PREVIEW_CONTENT/, "the focused preview is initially rendered");
+	const plain = optionRow(withPreview, "Plain route");
+	assert.equal(clickFrame(component, plain, width, withPreview.length)?.handled, true, "the no-preview option can be focused");
+	const withoutPreview = frame(component, width, rows);
+	const visible = text(withoutPreview).join("\n");
+	assert.doesNotMatch(visible, /Preview:|SHORT_PREVIEW_CONTENT|LONG_PREVIEW_CONTENT/, "omitted single-select mode does not retain inline preview content");
+});
+
+test("a long focused preview keeps its tail reachable in a short viewport", () => {
+	const width = 80;
+	const rows = 10;
+	const component = view(rows, () => {}, longPreviewRequest());
+	let lines = frame(component, width, rows);
+	const previewRow = text(lines).findIndex((line) => line.includes("LONG_PREVIEW_CONTENT"));
+	assert.ok(previewRow >= 0 && previewRow < actionRow(lines, "Submit"), "the initial frame exposes a visible preview region for wheel input");
+	const previewX = stripTerminalSequences(lines[previewRow] ?? "").indexOf("LONG_PREVIEW_CONTENT");
+	assert.ok(previewX >= 0 && previewX < width, "the visible preview marker provides the wheel input column");
+	assert.doesNotMatch(text(lines).join("\n"), /PREVIEW_TAIL/, "the long preview tail starts below the visible viewport");
+	let reachedTail = false;
+	for (let index = 0; index < 120 && !reachedTail; index++) {
+		assert.equal(component.handleMouse(eventAt("wheel", previewX, previewRow, width, lines.length, "none", 1))?.handled, true, "wheel over the visible preview region is handled");
+		lines = frame(component, width, rows);
+		reachedTail = text(lines).some((line) => line.includes("PREVIEW_TAIL"));
+	}
+	assert.equal(reachedTail, true, "scrolling the preview viewport eventually reveals the long preview tail");
+	assertFooter(lines, "Submit");
 });
