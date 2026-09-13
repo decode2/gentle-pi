@@ -1,0 +1,215 @@
+name: PR799 Type Comparison
+
+on:
+  push:
+    branches:
+      - ci/pr799-type-comparison
+
+permissions:
+  contents: read
+
+jobs:
+  compare:
+    if: github.repository == 'decode2/gentle-pi' && github.ref == 'refs/heads/ci/pr799-type-comparison'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      NODE_VERSION: 24.20.0
+      PNPM_VERSION: 11.1.1
+    steps:
+      - name: Initialize evidence paths
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          evidence_dir="$RUNNER_TEMP/pr799-type-comparison"
+          store_dir="$RUNNER_TEMP/pr799-type-comparison-pnpm-store"
+          mkdir -p "$evidence_dir"/main "$evidence_dir"/pr799 "$evidence_dir"/integration
+          {
+            echo "EVIDENCE_DIR=$evidence_dir"
+            echo "STORE_DIR=$store_dir"
+          } >> "$GITHUB_ENV"
+
+      - name: Setup Node.js
+        id: setup_node
+        if: always()
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.20.0
+
+      - name: Setup pnpm
+        id: setup_pnpm
+        if: always()
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.1.1
+          dest: ${{ runner.temp }}/setup-pnpm
+
+      - name: Checkout main revision
+        id: checkout_main
+        if: always()
+        continue-on-error: true
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: Gentleman-Programming/gentle-pi
+          ref: 8ec0f98ba2b14261b7b53a45714814980cb0fac8
+          path: main
+          persist-credentials: false
+
+      - name: Checkout PR799 revision
+        id: checkout_pr799
+        if: always()
+        continue-on-error: true
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: decode2/gentle-pi
+          ref: 41e5408ec6c36164bb2e9cc8a1405591801adfda
+          path: pr799
+          persist-credentials: false
+
+      - name: Checkout integration revision
+        id: checkout_integration
+        if: always()
+        continue-on-error: true
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          repository: decode2/gentle-pi
+          ref: 401bd9a56b08d9a83e252b9714818d16277914d5
+          path: integration
+          persist-credentials: false
+
+      - name: Assert revisions and record input provenance
+        id: inputs
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          status=0
+          {
+            echo "workflow_sha=$GITHUB_SHA"
+            echo "tested_main_sha=8ec0f98ba2b14261b7b53a45714814980cb0fac8"
+            echo "tested_pr799_sha=41e5408ec6c36164bb2e9cc8a1405591801adfda"
+            echo "tested_integration_sha=401bd9a56b08d9a83e252b9714818d16277914d5"
+            echo "node=$NODE_VERSION"
+            echo "pnpm=$PNPM_VERSION"
+            echo "runner_os=$RUNNER_OS"
+          } > "$EVIDENCE_DIR/provenance.txt"
+          for revision in main pr799 integration; do
+            expected=""
+            case "$revision" in
+              main) expected=8ec0f98ba2b14261b7b53a45714814980cb0fac8 ;;
+              pr799) expected=41e5408ec6c36164bb2e9cc8a1405591801adfda ;;
+              integration) expected=401bd9a56b08d9a83e252b9714818d16277914d5 ;;
+            esac
+            if [ -d "$revision/.git" ] && actual=$(git -C "$revision" rev-parse HEAD 2>/dev/null); then
+              echo "${revision}_actual_sha=$actual" >> "$EVIDENCE_DIR/provenance.txt"
+              [ "$actual" = "$expected" ] || status=1
+            else
+              echo "${revision}_actual_sha=missing" >> "$EVIDENCE_DIR/provenance.txt"
+              status=1
+            fi
+            for input in package.json pnpm-lock.yaml tsconfig.json scripts/check-types.mjs scripts/types-baseline.json; do
+              if [ -f "$revision/$input" ]; then
+                sha256sum "$revision/$input" >> "$EVIDENCE_DIR/provenance.txt"
+                echo "${revision}_path_${input//\//_}=$revision/$input" >> "$EVIDENCE_DIR/provenance.txt"
+              else
+                echo "${revision}_path_${input//\//_}=missing" >> "$EVIDENCE_DIR/provenance.txt"
+                status=1
+              fi
+            done
+          done
+          for pair in "main pr799" "main integration" "pr799 integration"; do
+            set -- $pair
+            if cmp -- "$1/package.json" "$2/package.json" && cmp -- "$1/pnpm-lock.yaml" "$2/pnpm-lock.yaml"; then
+              echo "dependency_inputs_${1}_${2}=byte-identical" >> "$EVIDENCE_DIR/provenance.txt"
+            else
+              echo "dependency_inputs_${1}_${2}=different-frozen-inputs" >> "$EVIDENCE_DIR/provenance.txt"
+            fi
+          done
+          printf '%s\n' "$status" > "$EVIDENCE_DIR/input.exit"
+          exit "$status"
+
+      - name: Install each frozen dependency set
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          shared='${{ steps.setup_node.outcome == 'success' && steps.setup_pnpm.outcome == 'success' && steps.inputs.outcome == 'success' }}'
+          for revision in main pr799 integration; do
+            if [ "$shared" = true ] && [ -f "$revision/package.json" ] && [ -f "$revision/pnpm-lock.yaml" ]; then
+              (cd "$revision" && pnpm install --frozen-lockfile --ignore-scripts --store-dir "$STORE_DIR") > "$EVIDENCE_DIR/$revision/install.log" 2>&1
+              exit_code=$?
+            else
+              printf 'infrastructure-blocked: setup, checkout, or provenance prerequisite failed; install not attempted\n' > "$EVIDENCE_DIR/$revision/install.log"
+              exit_code=125
+            fi
+            printf '%s\n' "$exit_code" > "$EVIDENCE_DIR/$revision/install.exit"
+          done
+
+      - name: Run compiler and ratchet diagnostics
+        if: always()
+        shell: bash
+        run: |
+          set +e
+          for revision in main pr799 integration; do
+            install_exit=$(cat "$EVIDENCE_DIR/$revision/install.exit" 2>/dev/null)
+            if [ "$install_exit" != 0 ]; then
+              printf 'infrastructure-blocked: installation failed; no compiler result produced\n' > "$EVIDENCE_DIR/$revision/tsc.resolve.log"
+              printf 'infrastructure-blocked: installation failed; no compiler result produced\n' > "$EVIDENCE_DIR/$revision/tsc.log"
+              printf '125\n' > "$EVIDENCE_DIR/$revision/tsc.exit"
+              printf 'infrastructure-blocked: installation failed; no ratchet result produced\n' > "$EVIDENCE_DIR/$revision/ratchet.log"
+              printf '125\n' > "$EVIDENCE_DIR/$revision/ratchet.exit"
+              continue
+            fi
+            tsc=$(cd "$revision" && node -p "require('node:module').createRequire(process.cwd() + '/scripts/check-types.mjs').resolve('typescript/bin/tsc')") > "$EVIDENCE_DIR/$revision/tsc.resolve.log" 2>&1
+            resolve_exit=$?
+            if [ "$resolve_exit" -eq 0 ]; then
+              printf 'typescript_%s=' "$revision" >> "$EVIDENCE_DIR/provenance.txt"
+              (cd "$revision" && node "$tsc" --version) >> "$EVIDENCE_DIR/provenance.txt" 2>&1
+              (cd "$revision" && node "$tsc" -p "$PWD/tsconfig.json" --pretty false) > "$EVIDENCE_DIR/$revision/tsc.log" 2>&1
+              compiler_exit=$?
+            else
+              printf 'compiler-resolution-failed\n' >> "$EVIDENCE_DIR/$revision/tsc.log"
+              compiler_exit=$resolve_exit
+            fi
+            printf '%s\n' "$compiler_exit" > "$EVIDENCE_DIR/$revision/tsc.exit"
+            (cd "$revision" && node scripts/check-types.mjs) > "$EVIDENCE_DIR/$revision/ratchet.log" 2>&1
+            printf '%s\n' "$?" > "$EVIDENCE_DIR/$revision/ratchet.exit"
+          done
+
+      - name: Print bounded diagnostic summary
+        if: always()
+        shell: bash
+        run: |
+          for revision in main pr799 integration; do
+            errors=0
+            [ -f "$EVIDENCE_DIR/$revision/tsc.log" ] && errors=$(grep -c ': error TS[0-9]' "$EVIDENCE_DIR/$revision/tsc.log" 2>/dev/null || true)
+            printf '%s install=%s tsc=%s errors=%s ratchet=%s\n' "$revision" "$(cat "$EVIDENCE_DIR/$revision/install.exit" 2>/dev/null || echo missing)" "$(cat "$EVIDENCE_DIR/$revision/tsc.exit" 2>/dev/null || echo missing)" "$errors" "$(cat "$EVIDENCE_DIR/$revision/ratchet.exit" 2>/dev/null || echo missing)"
+          done
+
+      - name: Upload full diagnostic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: pr799-type-comparison-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/pr799-type-comparison
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Fail on incomplete evidence or diagnostic failures
+        if: always()
+        shell: bash
+        run: |
+          set -u
+          status=0
+          test -f "$EVIDENCE_DIR/provenance.txt" || status=1
+          test "$(cat "$EVIDENCE_DIR/input.exit" 2>/dev/null)" = 0 || status=1
+          for revision in main pr799 integration; do
+            for required in install.log install.exit tsc.resolve.log tsc.log tsc.exit ratchet.log ratchet.exit; do
+              test -f "$EVIDENCE_DIR/$revision/$required" || status=1
+            done
+            for result in install tsc ratchet; do
+              test "$(cat "$EVIDENCE_DIR/$revision/$result.exit" 2>/dev/null)" = 0 || status=1
+            done
+          done
+          exit "$status"
