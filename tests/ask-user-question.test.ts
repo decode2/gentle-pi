@@ -7,7 +7,7 @@ import test from "node:test";
 import { createAskUserQuestionExtension, type AskUserQuestionDependencies } from "../extensions/ask-user-question.ts";
 import type { QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
 import type { QuestionnaireGuidance } from "../lib/questions/guidance-config.ts";
-import type { QuestionPresentationDriver } from "../lib/questions/contract.ts";
+import type { QuestionPresentationDriver, RawQuestionnaireOutcome } from "../lib/questions/contract.ts";
 import type { QuestionnaireLocalizer } from "../lib/questions/localization.ts";
 import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
 import { createTuiQuestionPresentationDriver } from "../lib/questions/tui-presentation-driver.ts";
@@ -45,6 +45,16 @@ type EventContract = {
 };
 
 const eventContract = JSON.parse(readFileSync(new URL("./fixtures/questions/legacy-2.9.0/event-contract.json", import.meta.url), "utf8")) as EventContract;
+
+type ScenarioOutcome = Omit<RawQuestionnaireOutcome, "correlationId">;
+type ScenarioAction =
+	| { kind: "resolve"; outcome: ScenarioOutcome }
+	| { kind: "reject"; error: Error };
+
+function schemaObject(value: unknown, label: string): Record<string, unknown> {
+	assert.ok(value !== null && typeof value === "object" && !Array.isArray(value), `${label} must be an object`);
+	return value as Record<string, unknown>;
+}
 
 function owner(ownerName: "gentle-pi" | "legacy-external" | "disabled"): QuestionOwnerConfigResolution {
 	return ownerName === "gentle-pi"
@@ -163,13 +173,16 @@ test("registers the exact bounded questionnaire schema only in a TUI session", a
 	const tool = subject.tools[0]!;
 	assert.equal(tool.name, "ask_user_question");
 	assert.deepEqual(Object.keys(tool.parameters.properties ?? {}).sort(), ["questions"]);
-	const questions = tool.parameters.properties?.questions as { minItems?: number; maxItems?: number; items?: { properties?: Record<string, { maxLength?: number }> } };
+	const questions = schemaObject(tool.parameters.properties?.questions, "questions");
 	assert.equal(questions.minItems, 1);
 	assert.equal(questions.maxItems, 4);
-	assert.equal(questions.items?.properties?.header?.maxLength, 16);
-	assert.equal(questions.items?.properties?.options?.maxItems, 4);
-	assert.equal(questions.items?.properties?.options?.minItems, 2);
-	assert.equal((questions.items?.properties?.options as { items?: { properties?: Record<string, { maxLength?: number }> } }).items?.properties?.label?.maxLength, 60);
+	const questionProperties = schemaObject(schemaObject(questions.items, "question items").properties, "question properties");
+	assert.equal(schemaObject(questionProperties.header, "header").maxLength, 16);
+	const options = schemaObject(questionProperties.options, "options");
+	assert.equal(options.maxItems, 4);
+	assert.equal(options.minItems, 2);
+	const optionProperties = schemaObject(schemaObject(options.items, "option items").properties, "option properties");
+	assert.equal(schemaObject(optionProperties.label, "label").maxLength, 60);
 });
 
 test("default admitted TUI registration forwards an external-editor callback to the real driver", { concurrency: false }, async () => {
@@ -180,7 +193,7 @@ test("default admitted TUI registration forwards an external-editor callback to 
 		const tui = { terminal: { rows: 24 }, requestRender() {} };
 		const ui: TestUi = {
 			custom(factory: unknown) {
-				component = (factory as (tui: typeof tui, theme: { fg(color: string, text: string): string; bold(text: string): string }, keybindings: object, done: (outcome: unknown) => void) => typeof component)(
+				component = (factory as (tuiValue: typeof tui, theme: { fg(color: string, text: string): string; bold(text: string): string }, keybindings: object, done: (outcome: unknown) => void) => typeof component)(
 					tui,
 					{ fg: (_color, text) => text, bold: (text) => text },
 					{},
@@ -298,20 +311,20 @@ test("emits the legacy prompt before one blocked bracket and releases before eac
 		...event,
 		payload: event.payload === "promptPayload" ? valid.promptPayload : event.payload,
 	}));
-	const cases = [
+	const cases: Array<{ name: string; action: ScenarioAction }> = [
 		{
 			name: "selected",
-			action: { kind: "resolve" as const, outcome: { cancelled: false, answers: [{ questionIndex: 0, question: question.question, kind: "option", answer: question.options[0]!.label }] } },
+			action: { kind: "resolve", outcome: { cancelled: false, answers: [{ questionIndex: 0, question: question.question, kind: "option", answer: question.options[0]!.label }] } },
 		},
-		{ name: "cancelled", action: { kind: "resolve" as const, outcome: { cancelled: true, answers: [] } } },
-		{ name: "driver rejection", action: { kind: "reject" as const, error: new Error("scripted-dialog-rejection") } },
+		{ name: "cancelled", action: { kind: "resolve", outcome: { cancelled: true, answers: [] } } },
+		{ name: "driver rejection", action: { kind: "reject", error: new Error("scripted-dialog-rejection") } },
 	];
 
 	for (const scenario of cases) {
 		let entered!: () => void;
 		const enteredGate = new Promise<void>((resolve) => { entered = resolve; });
 		let release!: (action: (typeof cases)[number]["action"]) => void;
-		const driver: QuestionPresentationDriver = { present: (request) => new Promise((resolve, reject) => {
+		const driver: QuestionPresentationDriver = { present: (request) => new Promise<RawQuestionnaireOutcome>((resolve, reject) => {
 			entered();
 			release = (action) => {
 				if (action.kind === "reject") reject(action.error);
@@ -772,7 +785,7 @@ test("the admitted default TUI registration reads collapseKey from its owned fir
 		const tui = { terminal: { rows: 24 }, requestRender() {} };
 		const ui: TestUi = {
 			custom(factory: unknown) {
-				component = (factory as (tui: typeof tui, theme: { fg(color: string, text: string): string; bold(text: string): string }, keybindings: object, done: (outcome: unknown) => void) => typeof component)(
+				component = (factory as (tuiValue: typeof tui, theme: { fg(color: string, text: string): string; bold(text: string): string }, keybindings: object, done: (outcome: unknown) => void) => typeof component)(
 					tui,
 					{ fg: (_color, text) => text, bold: (text) => text },
 					{},

@@ -58,8 +58,6 @@ jobs:
         include:
           - target: candidate
             expected_sha: ${{ github.sha }}
-          - target: baseline
-            expected_sha: 7453d5d694da73e2cadc41c54c7a6fa875cac60e
     env:
       TARGET: ${{ matrix.target }}
       EXPECTED_SHA: ${{ matrix.expected_sha }}

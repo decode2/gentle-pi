@@ -29,7 +29,7 @@ const fakeFactory = async () => {
 	return fakeNodeHost;
 };
 
-mock.module("../lib/questions/external-editor-node-host.ts", { exports: { createQuestionnaireExternalEditorNodeHost: fakeFactory } });
+mock.module("../lib/questions/external-editor-node-host.ts", { namedExports: { createQuestionnaireExternalEditorNodeHost: fakeFactory } });
 const mockedNodeHost = await import("../lib/questions/external-editor-node-host.ts");
 const { createAskUserQuestionExtension } = await import("../extensions/ask-user-question.ts");
 
@@ -115,7 +115,7 @@ test("the admitted default TUI callback is lazy and runs the real runtime bridge
 		let trusted = false;
 		const tui = { terminal: { rows: 24 }, stop() {}, start() {}, requestRender() {} };
 		const ui = { custom(factory: unknown) {
-			component = (factory as (tui: typeof tui, theme: { fg(color: string, text: string): string; bold(text: string): string }, keybindings: object, done: (outcome: unknown) => void) => CapturedComponent)(tui, { fg: (_color, text) => text, bold: (text) => text }, {}, settle);
+			component = (factory as (tuiValue: typeof tui, theme: { fg(color: string, text: string): string; bold(text: string): string }, keybindings: object, done: (outcome: unknown) => void) => CapturedComponent)(tui, { fg: (_color, text) => text, bold: (text) => text }, {}, settle);
 			return pending;
 		} };
 		const execution = subject.tools[0]!.execute("external-editor", validInput, signal, undefined, { mode: "tui", cwd: "/execution-cwd", isProjectTrusted: () => trusted, ui });

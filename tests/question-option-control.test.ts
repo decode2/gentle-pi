@@ -62,7 +62,10 @@ test("multi-select toggles independently, honors public configured bindings, and
 	control.handleInput("x");
 	control.handleInput("x");
 	assert.deepEqual(actions.map((action) => action.type), ["focus-option", "toggle-option", "toggle-option"]);
-	assert.deepEqual(actions.slice(1).map((action) => action.selected), [true, false]);
+	assert.deepEqual(actions.slice(1).map((action) => {
+		if (action.type !== "toggle-option") throw new Error("expected toggle-option action");
+		return action.selected;
+	}), [true, false]);
 	assert.doesNotMatch(stripTerminalSequences(control.render(48).join("\n")), /\[x\] Staged/);
 });
 
@@ -165,7 +168,10 @@ test("rejects pointer events whose width differs from the rendered frame", () =>
 	assert.equal(control.handleMouse(mouse("click", "left", staged.y, 42, staged.lines.length)), undefined);
 	const fresh = row(control, 42, "Staged");
 	control.handleMouse(mouse("click", "left", fresh.y, 42, fresh.lines.length));
-	assert.deepEqual(actions.map((action) => action.option.id), ["staged"]);
+	assert.deepEqual(actions.map((action) => {
+		if (action.type !== "select-option") throw new Error("expected select-option action");
+		return action.option.id;
+	}), ["staged"]);
 });
 
 test("mouse observers follow item replacement and become inert after disposal", () => {

@@ -38,13 +38,14 @@ export function createQuestionnaireExternalEditorRuntime(
 async function createTemporaryFile(host: QuestionnaireExternalEditorRuntimeHost): Promise<ExternalEditorTemporaryFile> {
 	let directory: string | undefined;
 	try {
-		directory = await host.createTemporaryDirectory({ prefix: "pi-editor-", mode: 0o700 });
-		const path = await host.createTemporaryFile(directory, { name: "prompt.md", mode: 0o600 });
+		const temporaryDirectory = await host.createTemporaryDirectory({ prefix: "pi-editor-", mode: 0o700 });
+		directory = temporaryDirectory;
+		const path = await host.createTemporaryFile(temporaryDirectory, { name: "prompt.md", mode: 0o600 });
 		return {
 			path,
 			write: (draft) => host.writeFile(path, draft),
 			read: () => host.readFile(path),
-			cleanup: () => host.removeTemporaryDirectory(directory),
+			cleanup: () => host.removeTemporaryDirectory(temporaryDirectory),
 		};
 	} catch (error) {
 		if (directory !== undefined) {
