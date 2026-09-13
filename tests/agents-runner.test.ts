@@ -25,7 +25,7 @@ interface Harness {
 	spawnOptions: Array<{ env: NodeJS.ProcessEnv; stdio?: string[] }>;
 }
 
-function harness(options: { maxConcurrency?: number; answer?: Record<string, unknown>; exitOnKill?: boolean; state?: Record<string, unknown>; stateSuccess?: boolean; steerSuccess?: boolean; getStateWriteFailure?: boolean; onNotification?: RunnerHooks["onNotification"]; onSuccessfulMutation?: RunnerHooks["onSuccessfulMutation"]; onFinish?: RunnerHooks["onFinish"] } = {}): Harness {
+function harness(options: { maxConcurrency?: number; answer?: Record<string, unknown>; exitOnKill?: boolean; state?: Record<string, unknown>; stateSuccess?: boolean; steerSuccess?: boolean; getStateWriteFailure?: boolean; onNotification?: RunnerHooks["onNotification"]; onQuery?: RunnerHooks["onQuery"]; onSuccessfulMutation?: RunnerHooks["onSuccessfulMutation"]; onFinish?: RunnerHooks["onFinish"] } = {}): Harness {
 	const children: FakeChild[] = [];
 	const timers: Harness["timers"] = [];
 	const asks: Harness["asks"] = [];
@@ -76,6 +76,7 @@ function harness(options: { maxConcurrency?: number; answer?: Record<string, unk
 		},
 		onFinish: (task, observations) => { finishes.push(task.id); options.onFinish?.(task, observations); },
 		onNotification: options.onNotification,
+		onQuery: options.onQuery,
 		onSuccessfulMutation: options.onSuccessfulMutation,
 	});
 	return { store, runner, children, timers, asks, finishes, spawnOptions };
@@ -404,10 +405,10 @@ test("AgentRunner admits strict live notifications once and closes IPC before St
 		{ id: "n5", kind: "ack", accepted: false, error: "invalid child IPC frame" },
 	]);
 	runner.cancel(task.id);
-	children[0].message({ id: "after-stop", kind: "notification", message: "ignored" });
+	children[0].message({ id: "n6", kind: "notification", message: "ignored" });
 	await tick();
 	assert.equal(children[0].sent.length, 5);
-	assert.ok(children[0].disconnects > 0);
+	assert.equal(children[0].disconnects, 0);
 });
 
 test("AgentRunner rejects notifications from an inactive parent session with a static acknowledgement", async () => {
@@ -634,8 +635,8 @@ test("AgentRunner primary IPC cleanup respects native connection state", async (
 	for (const scenario of [
 		{ name: "connected=false finalize", connected: false, ending: "finalize", expectedDisconnects: 0, reentrant: false },
 		{ name: "connected=false cancel", connected: false, ending: "cancel", expectedDisconnects: 0, reentrant: false },
-		{ name: "connected=true reentrant cleanup", connected: true, ending: "cancel", expectedDisconnects: 1, reentrant: true },
-		{ name: "partial fake without connected", connected: undefined, ending: "cancel", expectedDisconnects: 1, reentrant: false },
+		{ name: "connected=true reentrant cleanup", connected: true, ending: "cancel", expectedDisconnects: 0, reentrant: true },
+		{ name: "partial fake without connected", connected: undefined, ending: "cancel", expectedDisconnects: 0, reentrant: false },
 	] as const) {
 		const h = ipcCleanupHarness(scenario.connected);
 		const task = h.runner.run(request());
@@ -660,6 +661,22 @@ test("AgentRunner primary IPC cleanup respects native connection state", async (
 		}
 		assert.equal(h.child.disconnects, scenario.expectedDisconnects, `${scenario.name}: later cleanup remains idempotent`);
 	}
+});
+
+test("logical IPC closure rejects a reentrant query without late admission or reply", async () => {
+	let task!: ReturnType<AgentRunner["run"]>;
+	let hookInvoked = false;
+	let cancelAccepted = false;
+	const h = harness({ onQuery: () => { hookInvoked = true; cancelAccepted = h.runner.cancel(task.id); return true; } });
+	task = h.runner.run(request());
+	await tick();
+	h.children[0].message({ id: "q1", kind: "query", message: "cancel now" });
+	await tick();
+	assert.equal(hookInvoked, true);
+	assert.equal(cancelAccepted, true);
+	assert.equal((await h.runner.waitFor(task.id)).status, TASK_STATUS.CANCELLED);
+	assert.equal(await h.runner.waitForQuery(task.id), undefined);
+	assert.deepEqual(h.children[0].sent, [], "logical closure prevents the reentrant query reply");
 });
 
 test("AgentRunner retains permission broker fd3 and assigns messaging IPC to fd4", async () => {

@@ -583,6 +583,7 @@ export class AgentRunner {
 			live.queries.set(parsed.frame.id, query);
 			if (!this.hooks.onQuery) rejectQuery("task parent cannot accept queries");
 			if (this.hooks.onQuery(task, parsed.frame.id, parsed.frame.message) === false) rejectQuery("task parent is not the active host session");
+			if (live.ipcClosed) return;
 			if (task.mode === AGENT_MODE.TASK && !this.firstQueries.has(id)) {
 				const first = { taskId: id, requestId: parsed.frame.id };
 				this.firstQueries.set(id, first);
@@ -607,6 +608,7 @@ export class AgentRunner {
 	}
 
 	private sendQueryError(live: LiveTask, id: string, error: string): void {
+		if (live.ipcClosed) return;
 		const safeError = QUERY_REJECTION_ERRORS.has(error) ? error : "parent rejected query";
 		try { live.child.send?.({ id, kind: "reply", error: safeError }, () => {}); }
 		catch { /* Child-owned IPC callback reports transport failure. */ }
@@ -623,6 +625,7 @@ export class AgentRunner {
 
 	private sendReply(live: LiveTask, id: string, frame: Record<string, unknown>): Promise<boolean> {
 		return new Promise((resolve) => {
+			if (live.ipcClosed) { resolve(false); return; }
 			live.replies.set(id, { resolve });
 			try {
 				if (!live.child.send) this.settleReply(live, id, false);
@@ -647,10 +650,6 @@ export class AgentRunner {
 		live.replies.clear();
 		this.failPendingSteering(live);
 		live.child.channel?.unref?.();
-		if (live.child.connected !== false) {
-			try { live.child.disconnect?.(); }
-			catch { /* Channel may already be disconnected. */ }
-		}
 	}
 
 	private write(live: LiveTask, payload: Record<string, unknown>): void {
