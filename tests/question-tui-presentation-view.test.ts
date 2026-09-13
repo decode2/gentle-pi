@@ -256,15 +256,19 @@ test("narrow Markdown fallback keeps every preview row across viewport scroll", 
 		request: narrowMarkdownRequest(), tui: { terminal: { rows: 10 }, requestRender() {} } as TUI, theme, onDone() {},
 	});
 	const seen = new Set<string>();
+	let previewRow: number | undefined;
 	for (let attempt = 0; attempt < 20 && seen.size < 4; attempt++) {
 		const lines = component.render(20);
-		for (const line of lines.map((value) => stripTerminalSequences(value))) {
-			if (line.trim() === "Preview:") seen.add("caption");
+		for (const [row, line] of lines.map((value) => stripTerminalSequences(value)).entries()) {
+			if (line.trim().startsWith("Preview:")) {
+				seen.add("caption");
+				previewRow = row;
+			}
 			if (line.includes("alpha bravo charlie")) seen.add("first-line");
 			if (line.trim() === "xxxx") seen.add("wrapped-tail");
 			if (line.includes("keep the detail")) seen.add("last-line");
 		}
-		if (seen.size < 4) component.handleMouse(wheel(20, 1, lines.length, 1));
+		if (seen.size < 4) component.handleMouse(wheel(20, previewRow ?? 1, lines.length, 1));
 	}
 	assert.ok(seen.has("caption"), "the narrow caption occupies its own row");
 	assert.ok(seen.has("first-line"), "the first wrapped Markdown row is visible");

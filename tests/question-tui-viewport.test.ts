@@ -72,6 +72,9 @@ function previewFocusRequest(multiSelect?: false) {
 const previewFocusLabels = ["Short", "Long preview", "Plain route"];
 const previewFocusOrder = ["Long preview", "Plain route", "Short"];
 
+const CTRL_PAGE_UP = "\u001b[5^";
+const CTRL_PAGE_DOWN = "\u001b[6^";
+
 function longPreviewRequest() {
 	const preview = [
 		"LONG_PREVIEW_CONTENT introduction.",
@@ -467,4 +470,64 @@ test("a long focused preview keeps its tail reachable in a short viewport", () =
 	}
 	assert.equal(reachedTail, true, "scrolling the preview viewport eventually reveals the long preview tail");
 	assertFooter(lines, "Submit");
+});
+
+test("preview scrolling rejects stale pointer geometry after the terminal height changes", () => {
+	const width = 80;
+	const host = { terminal: { rows: 10 }, requestRender() {} };
+	const component = new QuestionnaireTuiPresentation({ request: longPreviewRequest(), tui: host as TUI, theme, onDone() {} });
+	const lines = frame(component, width, host.terminal.rows);
+	const previewRow = text(lines).findIndex((line) => line.includes("LONG_PREVIEW_CONTENT"));
+	assert.ok(previewRow >= 0 && previewRow < actionRow(lines, "Submit"), "the preview marker is visible before resizing");
+	const previewX = stripTerminalSequences(lines[previewRow] ?? "").indexOf("LONG_PREVIEW_CONTENT");
+	assert.ok(previewX >= 0 && previewX < width, "the preview marker provides a valid pointer column");
+	assert.equal(component.handleMouse(eventAt("wheel", previewX, previewRow, width, lines.length, "none", 1))?.handled, true, "the visible preview region accepts wheel input");
+	frame(component, width, host.terminal.rows);
+
+	host.terminal.rows = 16;
+	assert.equal(component.handleMouse(eventAt("wheel", previewX, previewRow, width, lines.length, "none", 1)), undefined, "the old height makes preview pointer input stale");
+	const resizedWidth = 64;
+	const resized = frame(component, resizedWidth, host.terminal.rows);
+	assert.ok(resized.length > lines.length, "the taller terminal recomputes a larger but bounded preview slot");
+	assert.ok(resized.length <= host.terminal.rows, "the recomputed preview slot remains terminal-bounded");
+	assertFooter(resized, "Submit");
+	const resizedPreviewRow = text(resized).findIndex((line) => line.includes("LONG_PREVIEW_CONTENT"));
+	assert.ok(resizedPreviewRow >= 0 && resizedPreviewRow < actionRow(resized, "Submit"), "the resized frame exposes the preview marker");
+	const resizedPreviewX = stripTerminalSequences(resized[resizedPreviewRow] ?? "").indexOf("LONG_PREVIEW_CONTENT");
+	assert.ok(resizedPreviewX >= 0 && resizedPreviewX < resizedWidth, "the resized preview marker provides a current pointer column");
+	assert.equal(component.handleMouse(eventAt("wheel", resizedPreviewX, resizedPreviewRow, resizedWidth, resized.length, "none", 1))?.handled, true, "current resized preview coordinates remain routable");
+	assert.equal(frame(component, resizedWidth, host.terminal.rows).length, resized.length, "inner preview scrolling does not change reserved geometry");
+});
+
+test("keyboard preview paging reaches and returns from the tail without questionnaire actions", () => {
+	const width = 80;
+	const rows = 60;
+	const outcomes: unknown[] = [];
+	const component = view(rows, (outcome) => outcomes.push(outcome), longPreviewRequest());
+	let lines = frame(component, width, rows);
+	const focusedOption = text(lines).find((line) => line.startsWith("→") && line.includes("Long route"));
+	const focusedOptionPrefix = focusedOption?.split(" │ ")[0]?.trim();
+	assert.equal(focusedOptionPrefix, "→ ( ) Long route", "the long-preview option starts focused and unselected");
+	assert.match(text(lines).join("\n"), /Ctrl\+PgUp\/PgDn/, "overflow exposes a keyboard scrolling hint");
+	assert.doesNotMatch(text(lines).join("\n"), /PREVIEW_TAIL/, "the long-preview tail starts below the fixed slot");
+
+	let reachedTail = false;
+	for (let index = 0; index < 20 && !reachedTail; index++) {
+		component.handleInput(CTRL_PAGE_DOWN);
+		lines = frame(component, width, rows);
+		reachedTail = text(lines).some((line) => line.includes("PREVIEW_TAIL"));
+	}
+	assert.equal(reachedTail, true, "Ctrl+PgDn reaches the preview tail");
+	assert.equal(outcomes.length, 0, "preview paging does not submit or cancel the questionnaire");
+	assert.equal(text(lines).find((line) => line.startsWith("→") && line.includes("Long route"))?.split(" │ ")[0]?.trim(), focusedOptionPrefix, "preview paging does not change option focus or selection");
+
+	let returnedToTop = false;
+	for (let index = 0; index < 20 && !returnedToTop; index++) {
+		component.handleInput(CTRL_PAGE_UP);
+		lines = frame(component, width, rows);
+		returnedToTop = text(lines).some((line) => line.includes("LONG_PREVIEW_CONTENT"));
+	}
+	assert.equal(returnedToTop, true, "Ctrl+PgUp returns to the preview top");
+	assert.equal(outcomes.length, 0, "returning through the preview does not submit or cancel the questionnaire");
+	assert.equal(text(lines).find((line) => line.startsWith("→") && line.includes("Long route"))?.split(" │ ")[0]?.trim(), focusedOptionPrefix, "returning through the preview preserves option focus or selection");
 });

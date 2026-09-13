@@ -128,6 +128,11 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		const footerGap = this.renderedHeight > controls ? 1 : 0;
 		if (event.type === "wheel") {
 			if (event.y >= this.bodyVisibleHeight || !event.wheelDelta) return undefined;
+			const documentY = this.bodyScrollTop + event.y;
+			if (this.optionLayout && documentY >= 0 && documentY < this.documentHeight) {
+				const preview = super.handleMouse({ ...event, y: documentY, height: this.documentHeight });
+				if (preview?.handled) return preview;
+			}
 			const maximum = Math.max(0, this.bodyVirtualHeight - this.bodyVisibleHeight);
 			const next = Math.max(0, Math.min(maximum, this.bodyScrollTop + (event.wheelDelta < 0 ? -1 : 1)));
 			const changed = next !== this.bodyScrollTop;
@@ -161,6 +166,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (this.disposed) return [];
 		const bounded = Math.max(0, Math.floor(width));
 		const terminalRows = Math.max(0, Math.floor(this.presentationOptions.tui.terminal.rows));
+		this.optionLayout?.setPreviewViewportRows(terminalRows);
 		if (this.collapsed) {
 			if (bounded === 0 || terminalRows === 0) return [];
 			this.renderedWidth = bounded;
@@ -273,6 +279,13 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 			else if (!isKeyRepeat(data) && matchesKey(data, "escape")) this.closeEditor();
 			else if (matchesKey(data, "enter")) this.editor!.insertTextAtCursor("\n");
 			else this.handleEditorInput(data);
+			return;
+		}
+		// Ctrl+PageUp/PageDown are not used by the options control or fullscreen navigation;
+		// editing returns above first so the SDK Editor retains its page bindings.
+		if (matchesKey(data, "ctrl+pageUp") || matchesKey(data, "ctrl+pageDown")) {
+			const direction: -1 | 1 = matchesKey(data, "ctrl+pageUp") ? -1 : 1;
+			this.optionLayout?.scrollPreviewPage(direction);
 			return;
 		}
 		if (matchesKey(data, "tab")) return this.setTab(this.state.tabs[this.state.activeQuestionIndex] === "options" ? "custom" : "options");
@@ -546,6 +559,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 				} else {
 					this.optionLayout = new QuestionOptionPreviewLayout({
 						control: this.optionControl,
+						hasPreview: question.options.some((option) => option.preview !== undefined),
 						theme: this.presentationOptions.theme,
 						localize: this.presentationOptions.localize,
 					});
@@ -624,9 +638,20 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 const SINGLE_SELECT_SIDE_PANEL_MIN_WIDTH = 64;
 const SINGLE_SELECT_SIDE_PANEL_DIVIDER_WIDTH = 3;
 const SINGLE_SELECT_SIDE_PANEL_MIN_PREVIEW_WIDTH = 24;
+/** Leaves room for question navigation, tabs, option controls, and the sticky footer on short terminals. */
+const PREVIEW_SLOT_CHROME_ROWS = 8;
+const PREVIEW_SLOT_MAX_ROWS = 8;
+const PREVIEW_SCROLL_HINT = "Ctrl+PgUp/PgDn";
+const PREVIEW_SCROLL_HINT_COMPACT = "Ctrl Pg/Dn";
+const PREVIEW_SCROLL_HINT_FULL_WIDTH = "Preview: ".length + PREVIEW_SCROLL_HINT.length;
+
+function previewSlotRows(terminalRows: number): number {
+	return Math.max(1, Math.min(PREVIEW_SLOT_MAX_ROWS, Math.floor(terminalRows) - PREVIEW_SLOT_CHROME_ROWS));
+}
 
 interface QuestionOptionPreviewLayoutOptions {
 	readonly control: QuestionOptionControl;
+	readonly hasPreview: boolean;
 	readonly theme: QuestionnaireTuiPresentationTheme;
 	readonly localize?: QuestionnaireLocalizer;
 }
@@ -634,18 +659,24 @@ interface QuestionOptionPreviewLayoutOptions {
 /** Keeps focused single-select previews separate from the option rows without changing multi-select output. */
 class QuestionOptionPreviewLayout implements Component {
 	private readonly control: QuestionOptionControl;
+	private readonly hasPreview: boolean;
 	private readonly theme: QuestionnaireTuiPresentationTheme;
 	private readonly localize: QuestionnaireLocalizer | undefined;
 	private previewValue: string | undefined;
 	private markdown: Markdown | undefined;
 	private renderedWidth: number | undefined;
+	private previewViewportRows = PREVIEW_SLOT_MAX_ROWS;
+	private previewScrollTop = 0;
+	private previewVirtualHeight = 0;
 	private sidePanel = false;
 	private optionWidth = 0;
 	private optionHeight = 0;
+	private previewWidth = 0;
 	private disposed = false;
 
 	constructor(options: QuestionOptionPreviewLayoutOptions) {
 		this.control = options.control;
+		this.hasPreview = options.hasPreview;
 		this.theme = options.theme;
 		this.localize = options.localize;
 	}
@@ -655,14 +686,26 @@ class QuestionOptionPreviewLayout implements Component {
 		const bounded = Math.max(0, Math.floor(width));
 		if (bounded === 0) return [];
 		this.setPreview(this.control.getFocusedOption()?.preview);
-		if (this.previewValue !== undefined && bounded >= SINGLE_SELECT_SIDE_PANEL_MIN_WIDTH) {
+		if (!this.hasPreview) {
+			const options = this.control.render(bounded);
+			this.renderedWidth = bounded;
+			this.sidePanel = false;
+			this.optionWidth = bounded;
+			this.optionHeight = options.length;
+			this.previewWidth = 0;
+			this.previewVirtualHeight = 0;
+			this.previewScrollTop = 0;
+			return options;
+		}
+		if (bounded >= SINGLE_SELECT_SIDE_PANEL_MIN_WIDTH) {
 			const { optionWidth, previewWidth } = sidePanelWidths(bounded);
 			const options = this.control.render(optionWidth);
 			this.renderedWidth = bounded;
 			this.sidePanel = true;
 			this.optionWidth = optionWidth;
 			this.optionHeight = options.length;
-			return columns(options, this.previewLines(previewWidth), optionWidth, previewWidth, this.theme);
+			this.previewWidth = previewWidth;
+			return columns(options, this.previewSlotLines(previewWidth), optionWidth, previewWidth, this.theme);
 		}
 
 		const options = this.control.render(bounded);
@@ -670,12 +713,13 @@ class QuestionOptionPreviewLayout implements Component {
 		this.sidePanel = false;
 		this.optionWidth = bounded;
 		this.optionHeight = options.length;
-		if (this.previewValue === undefined) return options;
-		return [...options, "", ...this.previewLines(bounded)];
+		this.previewWidth = bounded;
+		return [...options, "", ...this.previewSlotLines(bounded)];
 	}
 
 	handleMouse(event: TuiMouseEvent) {
 		if (this.disposed || this.renderedWidth !== event.width) return undefined;
+		if (event.type === "wheel") return this.handlePreviewWheel(event);
 		if (this.sidePanel && (event.x < 0 || event.x >= this.optionWidth || event.y < 0 || event.y >= this.optionHeight)) return undefined;
 		if ((!this.sidePanel && event.y < 0) || event.y >= this.optionHeight) return undefined;
 		const width = this.sidePanel ? this.optionWidth : event.width;
@@ -695,22 +739,80 @@ class QuestionOptionPreviewLayout implements Component {
 		this.renderedWidth = undefined;
 		this.optionWidth = 0;
 		this.optionHeight = 0;
+		this.previewWidth = 0;
+		this.previewVirtualHeight = 0;
 		this.control.invalidate();
 		if (this.previewValue !== undefined) this.markdown = new Markdown(display(this.previewValue), 0, 0, getMarkdownTheme());
 		this.markdown?.invalidate();
+	}
+
+	setPreviewViewportRows(terminalRows: number): void {
+		const next = previewSlotRows(terminalRows);
+		if (next === this.previewViewportRows) return;
+		this.previewViewportRows = next;
+		const maximum = Math.max(0, this.previewVirtualHeight - next);
+		this.previewScrollTop = Math.max(0, Math.min(maximum, this.previewScrollTop));
+	}
+
+	scrollPreviewPage(direction: -1 | 1): boolean {
+		return this.scrollPreviewBy(direction * Math.max(1, this.previewViewportRows - 1));
 	}
 
 	private setPreview(preview: string | undefined): void {
 		if (preview === this.previewValue) return;
 		this.previewValue = preview;
 		this.markdown = preview === undefined ? undefined : new Markdown(display(preview), 0, 0, getMarkdownTheme());
+		this.previewScrollTop = 0;
+		this.previewVirtualHeight = 0;
 	}
 
-	private previewLines(width: number): string[] {
+	private previewSlotLines(width: number): string[] {
+		if (this.previewValue === undefined) {
+			this.previewVirtualHeight = 0;
+			this.previewScrollTop = 0;
+			return Array(this.previewViewportRows).fill("");
+		}
+		const content = this.previewLines(width);
+		const virtual = content.length > this.previewViewportRows ? this.previewLines(width, true) : content;
+		this.previewVirtualHeight = virtual.length;
+		const maximum = Math.max(0, virtual.length - this.previewViewportRows);
+		this.previewScrollTop = Math.max(0, Math.min(maximum, this.previewScrollTop));
+		const visible = virtual.slice(this.previewScrollTop, this.previewScrollTop + this.previewViewportRows);
+		return [...visible, ...Array(Math.max(0, this.previewViewportRows - visible.length)).fill("")];
+	}
+
+	private handlePreviewWheel(event: TuiMouseEvent) {
+		if (!event.wheelDelta || !this.isPreviewCoordinate(event)) return undefined;
+		return this.scrollPreviewBy(event.wheelDelta < 0 ? -1 : 1) ? { handled: true, render: true } : undefined;
+	}
+
+	private scrollPreviewBy(delta: number): boolean {
+		if (this.previewValue === undefined || this.previewVirtualHeight <= this.previewViewportRows) return false;
+		const maximum = this.previewVirtualHeight - this.previewViewportRows;
+		const next = Math.max(0, Math.min(maximum, this.previewScrollTop + delta));
+		if (next === this.previewScrollTop) return false;
+		this.previewScrollTop = next;
+		return true;
+	}
+
+	private isPreviewCoordinate(event: TuiMouseEvent): boolean {
+		if (event.x < 0 || event.x >= event.width || event.y < 0 || event.y >= event.height) return false;
+		if (this.sidePanel) {
+			const previewStart = this.optionWidth + SINGLE_SELECT_SIDE_PANEL_DIVIDER_WIDTH;
+			return event.x >= previewStart && event.x < previewStart + this.previewWidth && event.y < this.previewViewportRows;
+		}
+		const previewStart = this.optionHeight + 1;
+		return event.y >= previewStart && event.y < previewStart + this.previewViewportRows;
+	}
+
+	private previewLines(width: number, showScrollHint = false): string[] {
 		const lines = (this.markdown?.render(width) ?? []).map((line) => truncateToWidth(line, width, ""));
 		const rendered = lines.length === 0 ? [""] : lines;
-		const caption = truncateToWidth(this.localizeText("chrome.preview.caption", "Preview:"), width, "");
-		return [caption, ...rendered];
+		const caption = this.localizeText("chrome.preview.caption", "Preview:");
+		const localizedHint = this.localizeText("chrome.preview.scrollHint", PREVIEW_SCROLL_HINT);
+		const hintText = localizedHint === PREVIEW_SCROLL_HINT && width < PREVIEW_SCROLL_HINT_FULL_WIDTH ? PREVIEW_SCROLL_HINT_COMPACT : localizedHint;
+		const hint = showScrollHint ? ` ${hintText}` : "";
+		return [truncateToWidth(`${caption}${hint}`, width, ""), ...rendered];
 	}
 
 	private localizeText(key: string, fallback: string): string {
