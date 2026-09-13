@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionUIContext, TerminalInputHandler, Theme } from "@earendil-works/pi-coding-agent";
-import type { Component, KeybindingsManager, OverlayHandle, OverlayOptions, TUI } from "@earendil-works/pi-tui";
+import { stripTerminalSequences, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
+import type { Component, KeybindingsManager, OverlayHandle, OverlayOptions, Terminal, TUI } from "@earendil-works/pi-tui";
 import type { QuestionnaireExternalEditor } from "../lib/questions/external-editor.ts";
 import { createTuiQuestionPresentationDriver } from "../lib/questions/tui-presentation-driver.ts";
 import { validateAndFormat } from "../lib/questions/response.ts";
@@ -24,6 +25,7 @@ type CustomOptions = {
 
 const theme = {
 	fg: (_color: string, text: string) => text,
+	bg: (_color: string, text: string) => text,
 	bold: (text: string) => text,
 } as unknown as Theme;
 
@@ -92,6 +94,75 @@ class FakeCustomHost implements Pick<ExtensionUIContext, "custom"> {
 	}
 }
 
+class TestTerminal implements Terminal {
+	columns = 80;
+	rows = 32;
+	private inputHandler: ((data: string) => void) | undefined;
+	private resizeHandler: (() => void) | undefined;
+
+	get kittyProtocolActive(): boolean { return false; }
+
+	start(onInput: (data: string) => void, onResize: () => void): void {
+		this.inputHandler = onInput;
+		this.resizeHandler = onResize;
+	}
+
+	stop(): void {
+		this.inputHandler = undefined;
+		this.resizeHandler = undefined;
+	}
+
+	drainInput(): Promise<void> { return Promise.resolve(); }
+	write(_data: string): void {}
+	moveBy(_lines: number): void {}
+	hideCursor(): void {}
+	showCursor(): void {}
+	clearLine(): void {}
+	clearFromCursor(): void {}
+	clearScreen(): void {}
+	setTitle(_title: string): void {}
+	setProgress(_active: boolean): void {}
+
+	feed(data: string): void {
+		const inputHandler = this.inputHandler;
+		assert.ok(inputHandler, "the public TUI started its terminal input route");
+		inputHandler(data);
+	}
+
+	resize(rows: number): void {
+		this.rows = rows;
+		this.resizeHandler?.();
+	}
+}
+
+class PublicTuiHost implements Pick<ExtensionUIContext, "custom"> {
+	readonly terminal = new TestTerminal();
+	readonly tui = new TuiAltScreen(this.terminal);
+	readonly keybindings = {} as KeybindingsManager;
+	component: QuestionnaireTuiPresentation | undefined;
+	handle: OverlayHandle | undefined;
+	doneCalls = 0;
+	rawOutcome: unknown;
+
+	async custom<T>(factory: CustomFactory<T>, options?: CustomOptions): Promise<T> {
+		let resolve!: (result: T) => void;
+		const result = new Promise<T>((done) => { resolve = done; });
+		const component = await factory(this.tui, theme, this.keybindings, (outcome) => {
+			this.doneCalls++;
+			this.rawOutcome = outcome;
+			this.handle?.hide();
+			resolve(outcome);
+		});
+		this.component = component as QuestionnaireTuiPresentation;
+		assert.equal(options?.overlay, true, "the public host test receives an overlay presentation");
+		const overlayOptions = typeof options?.overlayOptions === "function" ? options.overlayOptions() : options?.overlayOptions;
+		const handle = this.tui.showOverlay(component, overlayOptions);
+		this.handle = handle;
+		options?.onHandle?.(handle);
+		return result;
+	}
+}
+
 type FutureTuiDriverFactory = (
 	ui: Pick<ExtensionUIContext, "custom"> & Partial<Pick<ExtensionUIContext, "notify">>,
 	localize?: Parameters<typeof createTuiQuestionPresentationDriver>[1],
@@ -110,6 +181,13 @@ function assertSubsequence(actual: readonly string[], expected: readonly string[
 		assert.ok(offset >= 0, `trace includes ${entry} after ${actual.join(", ")}`);
 		offset++;
 	}
+}
+
+function feedSgrClick(terminal: TestTerminal, x: number, y: number): void {
+	const press = `\u001b[<0;${x + 1};${y + 1}M`;
+	const release = `\u001b[<0;${x + 1};${y + 1}m`;
+	terminal.feed(press);
+	terminal.feed(release);
 }
 
 async function captureDriverExternalEditor(host: FakeCustomHost, editor: QuestionnaireExternalEditor) {
@@ -287,14 +365,69 @@ for (const scenario of [
 	});
 }
 
-test("requests a full-width terminal-capped public overlay for the questionnaire", async () => {
+test("requests a full-width terminal-capped bottom-centered public overlay for the questionnaire", async () => {
 	const host = new FakeCustomHost((component) => component.handleInput("\u001b"));
 	await createTuiQuestionPresentationDriver(host).present(request());
-	assert.deepEqual(host.receivedOptions.map(({ onHandle, ...options }) => options), [{
+	assert.deepEqual(host.receivedOptions.map((received) => {
+		assert.ok(received, "the driver supplies custom overlay options");
+		const { onHandle, ...options } = received;
+		return options;
+	}), [{
 		overlay: true,
-		overlayOptions: { width: "100%", maxHeight: "100%", anchor: "center", margin: 0 },
+		overlayOptions: { width: "100%", maxHeight: "100%", anchor: "bottom-center", margin: 0 },
 	}], "the host receives the unchanged public full-width terminal-capped overlay contract");
 	assert.equal(typeof host.receivedOptions[0]?.onHandle, "function", "the driver receives the public overlay handle at the top level");
+});
+
+test("public fullscreen overlay bounds stay bottom-anchored and route physical clicks", async () => {
+	const host = new PublicTuiHost();
+	host.tui.start();
+	const presenting = createTuiQuestionPresentationDriver(host).present(request());
+	try {
+		await settleExternalEditor();
+		const component = host.component;
+		const handle = host.handle;
+		assert.ok(component, "the public host creates the questionnaire view");
+		assert.ok(handle, "the public host exposes the overlay handle");
+
+		host.tui.renderNow(true);
+		const initialBounds = handle.getBounds();
+		assert.ok(initialBounds, "the public handle reports bounds after an actual TUI render");
+		assert.ok(initialBounds.height > 0, "the rendered questionnaire has a measured height");
+		assert.equal(initialBounds.row, host.terminal.rows - initialBounds.height, "the overlay is anchored to the terminal bottom");
+
+		const resizedRows = 16;
+		host.terminal.resize(resizedRows);
+		host.tui.renderNow(true);
+		const resizedBounds = handle.getBounds();
+		assert.ok(resizedBounds, "the public handle reports bounds after resize rendering");
+		assert.equal(resizedBounds.row, resizedRows - resizedBounds.height, "resize keeps the overlay bottom-anchored");
+		assert.notEqual(resizedBounds.row, initialBounds.row, "resize moves the physical overlay row");
+
+		const rendered = component.render(resizedBounds.width).map(stripTerminalSequences);
+		const localY = rendered.findIndex((line) => line.includes("Cancel"));
+		assert.ok(localY >= 0, "the actual rendered questionnaire exposes its cancel control");
+		const cancelLine = rendered[localY]!;
+		const cancelStart = cancelLine.indexOf("Cancel");
+		assert.ok(cancelStart >= 0, "the cancel control has a physical text column");
+		assert.ok(localY < resizedBounds.height, "the routed control is inside the measured overlay");
+		const localX = visibleWidth(cancelLine.slice(0, cancelStart));
+		assert.ok(localX >= 0 && localX < resizedBounds.width, "the routed control is inside the measured width");
+
+		const outsideY = resizedBounds.row > 0 ? resizedBounds.row - 1 : resizedBounds.row + resizedBounds.height;
+		assert.ok(outsideY >= 0 && outsideY < host.terminal.rows, "the fixture leaves a physical row outside the overlay");
+		feedSgrClick(host.terminal, localX, outsideY);
+		assert.equal(host.doneCalls, 0, "a physical click outside the overlay does not route to its controls");
+
+		feedSgrClick(host.terminal, localX, resizedBounds.row + localY);
+		await presenting;
+		assert.equal(host.doneCalls, 1, "a physical click at bounds.row + localY routes to the cancel control");
+		assert.deepEqual(owned(host.rawOutcome), { correlationId: "tui-driver-correlation", cancelled: true, answers: [] });
+	} finally {
+		if (host.doneCalls === 0) host.component?.cancel();
+		await presenting;
+		host.tui.stop();
+	}
 });
 
 test("returns the view's raw cancel outcome without driver formatting", async () => {

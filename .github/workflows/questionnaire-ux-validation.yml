@@ -45,7 +45,7 @@ jobs:
         run: pnpm install --frozen-lockfile --ignore-scripts
 
       - name: Run focused questionnaire tests
-        run: pnpm exec node --experimental-strip-types --experimental-test-module-mocks --test tests/ask-user-question.test.ts tests/question-option-control.test.ts tests/question-presentation-state.test.ts tests/question-tui-presentation-view.test.ts tests/questions-contract.test.ts tests/question-tui-viewport.test.ts tests/question-external-editor-wiring.test.ts tests/ask-user-choice.test.ts
+        run: pnpm exec node --experimental-strip-types --experimental-test-module-mocks --test tests/ask-user-question.test.ts tests/question-option-control.test.ts tests/question-presentation-state.test.ts tests/question-tui-presentation-view.test.ts tests/questions-contract.test.ts tests/question-tui-viewport.test.ts tests/question-external-editor-wiring.test.ts tests/ask-user-choice.test.ts tests/tui-presentation-driver.test.ts
 
   scoped-strict-typescript:
     name: SCOPED strict TypeScript (${{ matrix.target }})
@@ -120,4 +120,5 @@ jobs:
             tests/questions-contract.test.ts \
             tests/question-tui-viewport.test.ts \
             tests/question-external-editor-wiring.test.ts \
-            tests/ask-user-choice.test.ts
+            tests/ask-user-choice.test.ts \
+            tests/tui-presentation-driver.test.ts
