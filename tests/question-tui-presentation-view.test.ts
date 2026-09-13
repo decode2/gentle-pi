@@ -1,9 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { initTheme } from "@earendil-works/pi-coding-agent";
 import { StdinBuffer, stripTerminalSequences, type TUI, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import type { QuestionnaireExternalEditor } from "../lib/questions/external-editor.ts";
 import { QuestionnaireTuiPresentation } from "../lib/questions/tui-presentation-view.ts";
 import { createFrozenQuestionnaireRequest } from "../lib/questions/validation.ts";
+
+// Markdown delegates styling to the SDK's process-wide theme callbacks.
+initTheme("dark");
 
 const theme = {
 	fg: (_color: string, text: string) => text,
@@ -679,7 +683,7 @@ test("renders only static questionnaire chrome through an injected localizer", (
 	});
 
 	const translated = stripTerminalSequences(component.render(48).join("\n"));
-	assert.match(translated, /Frage 1:[\s\S]*Optionen[\s\S]*Eigene Antwort[\s\S]*Vorschau: exact preview[\s\S]*Weiter[\s\S]*Abbrechen/);
+	assert.match(translated, /Frage 1:[\s\S]*Optionen[\s\S]*Eigene Antwort[\s\S]*Vorschau:\nexact preview[\s\S]*Weiter[\s\S]*Abbrechen/);
 	assert.match(translated, /Route[\s\S]*Choose a route[\s\S]*Direct[\s\S]*Fast[\s\S]*exact preview/, "request content remains byte-preserved");
 
 	component.handleInput("\t");

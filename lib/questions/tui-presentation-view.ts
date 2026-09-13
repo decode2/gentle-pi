@@ -124,6 +124,8 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (this.disposed || this.collapsed || this.renderedWidth === undefined || this.renderedTerminalRows === undefined || this.renderedHeight === undefined ||
 			Math.max(0, Math.floor(this.presentationOptions.tui.terminal.rows)) !== this.renderedTerminalRows ||
 			event.width !== this.renderedWidth || event.height !== this.renderedHeight) return undefined;
+		const controls = Math.min(this.renderedHeight, 2);
+		const footerGap = this.renderedHeight > controls ? 1 : 0;
 		if (event.type === "wheel") {
 			if (event.y >= this.bodyVisibleHeight || !event.wheelDelta) return undefined;
 			const maximum = Math.max(0, this.bodyVirtualHeight - this.bodyVisibleHeight);
@@ -140,8 +142,14 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 			}
 			return this.handledMouseResult(event, true);
 		}
-		const controls = Math.min(this.renderedHeight, 2);
-		const footerY = event.y - this.bodyVisibleHeight;
+		if (footerGap > 0 && event.y === this.bodyVisibleHeight) {
+			if (event.type === "move") {
+				this.observeMouse("beforeMouse", event);
+				this.observeMouse("afterMouse", event);
+			}
+			return this.handledMouseResult(event, true);
+		}
+		const footerY = event.y - this.bodyVisibleHeight - footerGap;
 		const documentY = event.y < this.bodyVisibleHeight
 			? this.bodyScrollTop + event.y
 			: this.documentHeight - controls + footerY;
@@ -172,10 +180,11 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		const document = super.render(bounded).map((line) => truncateToWidth(line, bounded, ""));
 		this.documentHeight = document.length;
 		this.footerStart = Math.max(0, document.length - 2);
-		this.bodyVirtualHeight = this.footerStart + 1;
-		const height = Math.min(terminalRows, this.bodyVirtualHeight + 2);
+		this.bodyVirtualHeight = this.footerStart;
+		const height = Math.min(terminalRows, this.bodyVirtualHeight + 3);
 		const controls = Math.min(height, 2);
-		this.bodyVisibleHeight = height - controls;
+		const footerGap = height > controls ? 1 : 0;
+		this.bodyVisibleHeight = height - controls - footerGap;
 		const maximum = Math.max(0, this.bodyVirtualHeight - this.bodyVisibleHeight);
 		this.bodyScrollTop = Math.max(0, Math.min(maximum, this.bodyScrollTop));
 		const markerLine = document.findIndex((line) => line.includes(CURSOR_MARKER));
@@ -188,7 +197,12 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		const body = document.slice(this.bodyScrollTop, Math.min(this.footerStart, this.bodyScrollTop + this.bodyVisibleHeight));
 		this.bodyContentHeight = body.length;
 		const footer = document.slice(document.length - controls);
-		const lines = [...body, ...Array(Math.max(0, this.bodyVisibleHeight - body.length)).fill(""), ...footer];
+		const lines = [
+			...body,
+			...Array(Math.max(0, this.bodyVisibleHeight - body.length)).fill(""),
+			...(footerGap > 0 ? [""] : []),
+			...footer,
+		];
 		this.renderedWidth = bounded;
 		this.renderedTerminalRows = terminalRows;
 		this.renderedHeight = height;
