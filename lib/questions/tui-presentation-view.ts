@@ -2,7 +2,9 @@ import {
 	Box,
 	CURSOR_MARKER,
 	Editor,
+	Markdown,
 	isKeyRelease,
+	isKeyRepeat,
 	matchesKey,
 	parseKey,
 	Text,
@@ -13,9 +15,11 @@ import {
 	type TUI,
 	type TuiMouseEvent,
 	stripTerminalSequences,
+	visibleWidth,
 } from "@earendil-works/pi-tui";
+import { getMarkdownTheme } from "@earendil-works/pi-coding-agent";
 import { NativeFullscreenInteraction } from "../native-fullscreen-interaction.ts";
-import { NativePointerScope } from "../native-pointer-region.ts";
+import { NativePointerScope, type NativePointerMouseObserver } from "../native-pointer-region.ts";
 import type { FrozenQuestionnaireRequest, RawQuestionnaireOutcome } from "./contract.ts";
 import type { QuestionnaireExternalEditor } from "./external-editor.ts";
 import type { QuestionnaireLocalizer } from "./localization.ts";
@@ -57,6 +61,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	private state: QuestionnairePresentationState;
 	private pointerScope = new NativePointerScope();
 	private optionControl: QuestionOptionControl | undefined;
+	private optionLayout: QuestionOptionPreviewLayout | undefined;
 	private optionFocus: { readonly questionIndex: number; readonly id: string } | undefined;
 	private editor: Editor | undefined;
 	private editorQuestionIndex: number | undefined;
@@ -213,7 +218,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 
 	consumeRawCollapseInput(data: string): boolean {
 		if (this.disposed || this.pasteActive || !this.matchesCollapseKey(data)) return false;
-		if (!isKeyRelease(data)) this.toggleCollapsed();
+		if (!isKeyRelease(data) && !isKeyRepeat(data)) this.toggleCollapsed();
 		return true;
 	}
 
@@ -237,21 +242,30 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	private routeInput(data: string): void {
 		if (this.disposed || isKeyRelease(data)) return;
 		if (this.collapsed) {
-			if (this.matchesCollapseKey(data)) this.toggleCollapsed();
-			else if (matchesKey(data, "escape")) this.finish({ type: "cancel" });
+			if (this.matchesCollapseKey(data)) {
+				if (!isKeyRepeat(data)) this.toggleCollapsed();
+			} else if (matchesKey(data, "escape")) {
+				if (!isKeyRepeat(data)) this.finish({ type: "cancel" });
+			}
 			return;
 		}
 		if (this.editing && (this.pasteActive || data.includes("\u001b[200~"))) return this.handleEditorInput(data);
-		if (this.matchesCollapseKey(data)) return this.toggleCollapsed();
+		if (this.matchesCollapseKey(data)) {
+			if (!isKeyRepeat(data)) this.toggleCollapsed();
+			return;
+		}
 		if (this.editing) {
 			if (this.editing === "custom" && matchesKey(data, "ctrl+g")) this.launchExternalEditor();
-			else if (matchesKey(data, "escape")) this.closeEditor();
+			else if (!isKeyRepeat(data) && matchesKey(data, "escape")) this.closeEditor();
 			else if (matchesKey(data, "enter")) this.editor!.insertTextAtCursor("\n");
 			else this.handleEditorInput(data);
 			return;
 		}
 		if (matchesKey(data, "tab")) return this.setTab(this.state.tabs[this.state.activeQuestionIndex] === "options" ? "custom" : "options");
-		if (matchesKey(data, "escape")) return this.finish({ type: "cancel" });
+		if (matchesKey(data, "escape")) {
+			if (!isKeyRepeat(data)) this.finish({ type: "cancel" });
+			return;
+		}
 		if (data === "[") return this.focusQuestion(this.state.activeQuestionIndex - 1);
 		if (data === "]") return this.focusQuestion(this.state.activeQuestionIndex + 1);
 		if (data === "n") return this.activatePrimary();
@@ -261,7 +275,9 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 
 	private observeMouse(method: "beforeMouse" | "afterMouse", event: TuiMouseEvent): void {
 		this.pointerScope.createMouseObserver(() => this.presentationOptions.tui.requestRender())[method](event);
-		this.optionControl?.createMouseObserver(() => this.presentationOptions.tui.requestRender())[method](event);
+		const optionObserver = this.optionLayout?.createMouseObserver(() => this.presentationOptions.tui.requestRender())
+			?? this.optionControl?.createMouseObserver(() => this.presentationOptions.tui.requestRender());
+		optionObserver?.[method](event);
 	}
 
 	private matchesCollapseKey(data: string): boolean {
@@ -503,6 +519,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 				this.optionControl = new QuestionOptionControl({
 					items: question.options.map((option, optionIndex) => ({ id: String(optionIndex), ...option })),
 					multiSelect: question.multiSelect,
+					inlinePreview: question.multiSelect,
 					selectedIds: question.multiSelect
 						? question.options.flatMap((option, optionIndex) => this.state.multiSelections[index]!.includes(option.label) ? [String(optionIndex)] : [])
 						: question.options.flatMap((option, optionIndex) => this.state.optionSelections[index] === option.label ? [String(optionIndex)] : []),
@@ -510,7 +527,16 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 					theme: optionTheme(this.presentationOptions.theme), keybindings: this.presentationOptions.keybindings, localize: this.presentationOptions.localize,
 					onAction: (action) => this.handleOption(action), onCancel: () => this.finish({ type: "cancel" }),
 				});
-				this.addChild(this.optionControl);
+				if (question.multiSelect) {
+					this.addChild(this.optionControl);
+				} else {
+					this.optionLayout = new QuestionOptionPreviewLayout({
+						control: this.optionControl,
+						theme: this.presentationOptions.theme,
+						localize: this.presentationOptions.localize,
+					});
+					this.addChild(this.optionLayout);
+				}
 			}
 			const primary = index === request.questions.length - 1
 				? this.localize("chrome.primary.submit", "Submit") : this.localize("chrome.primary.next", "Next");
@@ -545,6 +571,8 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	}
 
 	private retireOptionControl(): void {
+		this.optionLayout?.dispose();
+		this.optionLayout = undefined;
 		this.optionControl?.dispose();
 		this.optionControl = undefined;
 	}
@@ -577,6 +605,134 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (action.type === "select-option") this.dispatch({ type: "select-option", questionIndex: this.state.activeQuestionIndex, label });
 		if (action.type === "toggle-option") this.dispatch({ type: "toggle-option", questionIndex: this.state.activeQuestionIndex, label });
 	}
+}
+
+const SINGLE_SELECT_SIDE_PANEL_MIN_WIDTH = 64;
+const SINGLE_SELECT_SIDE_PANEL_DIVIDER_WIDTH = 3;
+const SINGLE_SELECT_SIDE_PANEL_MIN_PREVIEW_WIDTH = 24;
+
+interface QuestionOptionPreviewLayoutOptions {
+	readonly control: QuestionOptionControl;
+	readonly theme: QuestionnaireTuiPresentationTheme;
+	readonly localize?: QuestionnaireLocalizer;
+}
+
+/** Keeps focused single-select previews separate from the option rows without changing multi-select output. */
+class QuestionOptionPreviewLayout implements Component {
+	private readonly control: QuestionOptionControl;
+	private readonly theme: QuestionnaireTuiPresentationTheme;
+	private readonly localize: QuestionnaireLocalizer | undefined;
+	private previewValue: string | undefined;
+	private markdown: Markdown | undefined;
+	private renderedWidth: number | undefined;
+	private sidePanel = false;
+	private optionWidth = 0;
+	private optionHeight = 0;
+	private disposed = false;
+
+	constructor(options: QuestionOptionPreviewLayoutOptions) {
+		this.control = options.control;
+		this.theme = options.theme;
+		this.localize = options.localize;
+	}
+
+	render(width: number): string[] {
+		if (this.disposed) return [];
+		const bounded = Math.max(0, Math.floor(width));
+		if (bounded === 0) return [];
+		this.setPreview(this.control.getFocusedOption()?.preview);
+		if (this.previewValue !== undefined && bounded >= SINGLE_SELECT_SIDE_PANEL_MIN_WIDTH) {
+			const { optionWidth, previewWidth } = sidePanelWidths(bounded);
+			const options = this.control.render(optionWidth);
+			this.renderedWidth = bounded;
+			this.sidePanel = true;
+			this.optionWidth = optionWidth;
+			this.optionHeight = options.length;
+			return columns(options, this.previewLines(previewWidth), optionWidth, previewWidth, this.theme);
+		}
+
+		const options = this.control.render(bounded);
+		this.renderedWidth = bounded;
+		this.sidePanel = false;
+		this.optionWidth = bounded;
+		this.optionHeight = options.length;
+		if (this.previewValue === undefined) return options;
+		return [...options, "", ...this.previewLines(bounded)];
+	}
+
+	handleMouse(event: TuiMouseEvent) {
+		if (this.disposed || this.renderedWidth !== event.width) return undefined;
+		if (this.sidePanel && (event.x < 0 || event.x >= this.optionWidth || event.y < 0 || event.y >= this.optionHeight)) return undefined;
+		if ((!this.sidePanel && event.y < 0) || event.y >= this.optionHeight) return undefined;
+		const width = this.sidePanel ? this.optionWidth : event.width;
+		return this.control.handleMouse({ ...event, width, height: this.optionHeight });
+	}
+
+	createMouseObserver(requestRender: () => void): NativePointerMouseObserver {
+		return this.control.createMouseObserver(requestRender);
+	}
+
+	dispose(): void {
+		this.disposed = true;
+		this.markdown = undefined;
+	}
+
+	invalidate(): void {
+		this.renderedWidth = undefined;
+		this.optionWidth = 0;
+		this.optionHeight = 0;
+		this.control.invalidate();
+		if (this.previewValue !== undefined) this.markdown = new Markdown(display(this.previewValue), 0, 0, getMarkdownTheme());
+		this.markdown?.invalidate();
+	}
+
+	private setPreview(preview: string | undefined): void {
+		if (preview === this.previewValue) return;
+		this.previewValue = preview;
+		this.markdown = preview === undefined ? undefined : new Markdown(display(preview), 0, 0, getMarkdownTheme());
+	}
+
+	private previewLines(width: number): string[] {
+		const lines = (this.markdown?.render(width) ?? []).map((line) => truncateToWidth(line, width, ""));
+		const rendered = lines.length === 0 ? [""] : lines;
+		const caption = truncateToWidth(this.localizeText("chrome.preview.caption", "Preview:"), width, "");
+		return [caption, ...rendered];
+	}
+
+	private localizeText(key: string, fallback: string): string {
+		try {
+			const value = this.localize?.(key, fallback);
+			return typeof value === "string" && value.trim().length > 0 ? value : fallback;
+		} catch {
+			return fallback;
+		}
+	}
+}
+
+function sidePanelWidths(width: number): { optionWidth: number; previewWidth: number } {
+	const previewWidth = Math.max(SINGLE_SELECT_SIDE_PANEL_MIN_PREVIEW_WIDTH, Math.floor(width * 0.38));
+	return {
+		optionWidth: Math.max(1, width - SINGLE_SELECT_SIDE_PANEL_DIVIDER_WIDTH - previewWidth),
+		previewWidth,
+	};
+}
+
+function columns(
+	options: readonly string[], preview: readonly string[], optionWidth: number, previewWidth: number,
+	theme: QuestionnaireTuiPresentationTheme,
+): string[] {
+	const divider = theme.fg("dim", " │ ");
+	const height = Math.max(options.length, preview.length);
+	return Array.from({ length: height }, (_, index) => {
+		const left = padToWidth(options[index] ?? "", optionWidth);
+		const right = truncateToWidth(preview[index] ?? "", previewWidth, "");
+		return `${left}${divider}${right}`;
+	});
+}
+
+function padToWidth(value: string, width: number): string {
+	const truncated = truncateToWidth(value, width, "");
+	return truncated + " ".repeat(Math.max(0, width - visibleWidth(truncated)));
 }
 
 const COLLAPSE_MODIFIERS = new Set(["ctrl", "shift", "alt", "super"]);

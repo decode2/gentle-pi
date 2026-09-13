@@ -163,6 +163,19 @@ test("partial submit and cancel retain valid committed answers and notes", () =>
 	assert.equal(cancelled.globalNote, "Global\ncontext");
 });
 
+test("cancellation preserves an uncommitted custom draft without emitting an implicit answer", () => {
+	const state = apply([
+		{ type: "set-custom-draft", questionIndex: 0, value: "draft not yet submitted" },
+		{ type: "set-tab", questionIndex: 0, tab: "custom" },
+	]);
+	const cancelled = reduceQuestionnairePresentation(state, { type: "cancel" });
+	assert.equal(cancelled.cancelled, true);
+	assert.equal(cancelled.customDrafts[0], "draft not yet submitted");
+	assert.deepEqual(toRawQuestionnaireOutcome(cancelled), {
+		correlationId: "presentation-correlation", answers: [], cancelled: true,
+	});
+});
+
 test("updates immutably and rejects invalid indexes, labels, and incompatible toggles as no-ops", () => {
 	const originalInput = structuredClone(input);
 	const initial = createQuestionnairePresentationState(request());

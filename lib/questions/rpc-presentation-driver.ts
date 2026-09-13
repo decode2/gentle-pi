@@ -10,20 +10,23 @@ import {
 
 type RpcAction = "choose-option" | "choose-options" | "custom" | "back" | "skip" | "next" | "submit" | "submit-partial" | "cancel";
 
+const ABORTED = Symbol("rpc-presentation-aborted");
+type AbortResult = typeof ABORTED;
 const english: QuestionnaireLocalizer = (_key, fallback) => fallback;
 
-/**
- * Sequential RPC presentation. The public RPC editor has no AbortSignal or
- * timeout capability, so this driver waits for each host result in turn.
- */
+/** Sequential RPC presentation with cancellation guarded around each native dialog. */
 export function createRpcQuestionPresentationDriver(
 	ui: Pick<ExtensionUIContext, "select" | "editor">,
 	localize: QuestionnaireLocalizer = english,
 ): QuestionPresentationDriver {
-	return { async present(request) {
+	return { async present(request, signal) {
 		let state = createQuestionnairePresentationState(request);
-		while (!state.cancelled && !state.submitted) state = await presentQuestion(ui, state, localize);
-		return toRawQuestionnaireOutcome(state);
+		while (!state.cancelled && !state.submitted) {
+			const next = await presentQuestion(ui, state, localize, signal);
+			if (next === ABORTED || signal?.aborted) return toRawQuestionnaireOutcome(cancel(state));
+			state = next;
+		}
+		return signal?.aborted ? toRawQuestionnaireOutcome(cancel(state)) : toRawQuestionnaireOutcome(state);
 	} };
 }
 
@@ -31,12 +34,16 @@ async function presentQuestion(
 	ui: Pick<ExtensionUIContext, "select" | "editor">,
 	state: QuestionnairePresentationState,
 	localize: QuestionnaireLocalizer,
-): Promise<QuestionnairePresentationState> {
+	signal?: AbortSignal,
+): Promise<QuestionnairePresentationState | AbortResult> {
 	const index = state.activeQuestionIndex;
 	const question = state.request.questions[index]!;
 	const actions = actionLabels(state, question, localize);
 	if (!actions) return cancel(state);
-	const selected = await ui.select(questionTitle(question, index, localize), [...actions.keys()]);
+	const selected = await withAbort(
+		() => ui.select(questionTitle(question, index, localize), [...actions.keys()], signal === undefined ? undefined : { signal }), signal,
+	);
+	if (selected === ABORTED) return ABORTED;
 	const action = selected === undefined ? undefined : actions.get(selected);
 	if (!action) return cancel(state);
 	if (action === "cancel") return cancel(state);
@@ -47,8 +54,8 @@ async function presentQuestion(
 		const committed = reduceQuestionnairePresentation(state, { type: "next" });
 		return action === "submit" ? reduceQuestionnairePresentation(committed, { type: "submit-partial" }) : moveTo(committed, index + 1);
 	}
-	if (action === "custom") return editCustom(ui, state, index, localize);
-	return chooseOption(ui, state, question, index, localize);
+	if (action === "custom") return editCustom(ui, state, index, localize, signal);
+	return chooseOption(ui, state, question, index, localize, signal);
 }
 
 function actionLabels(
@@ -78,9 +85,13 @@ async function chooseOption(
 	question: FrozenQuestion,
 	index: number,
 	localize: QuestionnaireLocalizer,
-): Promise<QuestionnairePresentationState> {
+	signal?: AbortSignal,
+): Promise<QuestionnairePresentationState | AbortResult> {
 	const options = new Map(question.options.map((option, optionIndex) => [option.label, optionIndex]));
-	const selected = await ui.select(questionTitle(question, index, localize), [...options.keys()]);
+	const selected = await withAbort(
+		() => ui.select(questionTitle(question, index, localize), [...options.keys()], signal === undefined ? undefined : { signal }), signal,
+	);
+	if (selected === ABORTED) return ABORTED;
 	const optionIndex = selected === undefined ? undefined : options.get(selected);
 	if (optionIndex === undefined) return cancel(state);
 	const label = question.options[optionIndex]!.label;
@@ -95,11 +106,44 @@ async function editCustom(
 	state: QuestionnairePresentationState,
 	index: number,
 	localize: QuestionnaireLocalizer,
-): Promise<QuestionnairePresentationState> {
-	const value = await ui.editor(localize("rpc.editor.custom", "Custom response"), state.customDrafts[index]);
+	signal?: AbortSignal,
+): Promise<QuestionnairePresentationState | AbortResult> {
+	const value = await withAbort(() => ui.editor(localize("rpc.editor.custom", "Custom response"), state.customDrafts[index]), signal);
+	if (value === ABORTED) return ABORTED;
 	if (value === undefined) return cancel(state);
 	const custom = reduceQuestionnairePresentation(state, { type: "set-custom-draft", questionIndex: index, value });
 	return reduceQuestionnairePresentation(custom, { type: "set-tab", questionIndex: index, tab: "custom" });
+}
+
+function withAbort<T>(operation: () => Promise<T>, signal?: AbortSignal): Promise<T | AbortResult> {
+	if (!signal) return Promise.resolve().then(operation);
+	return new Promise<T | AbortResult>((resolve, reject) => {
+		let settled = false;
+		const cleanup = () => signal.removeEventListener("abort", onAbort);
+		const settle = (callback: () => void) => {
+			if (settled) return;
+			settled = true;
+			cleanup();
+			callback();
+		};
+		const onAbort = () => settle(() => resolve(ABORTED));
+		if (signal.aborted) {
+			onAbort();
+			return;
+		}
+		signal.addEventListener("abort", onAbort, { once: true });
+		let pending: Promise<T>;
+		try {
+			pending = Promise.resolve(operation());
+		} catch (error) {
+			settle(() => reject(error));
+			return;
+		}
+		pending.then(
+			(value) => settle(() => resolve(value)),
+			(error) => settle(() => reject(error)),
+		);
+	});
 }
 
 function moveTo(state: QuestionnairePresentationState, index: number): QuestionnairePresentationState {

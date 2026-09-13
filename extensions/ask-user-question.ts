@@ -17,6 +17,8 @@ import { createFrozenQuestionnaireRequest } from "../lib/questions/validation.ts
 const TOOL_NAME = "ask_user_question";
 const PROMPT_EVENT = "rpiv:ask-user:prompt";
 const BLOCKED_EVENT = "rpiv:ask-user:blocked";
+const OPTIONAL_I18N_PROVIDER: string = "@juicesharp/rpiv-i18n";
+const OPTIONAL_I18N_LOADER: string = "@juicesharp/rpiv-i18n/loader";
 const LEGACY_RESERVED_LABELS = new Set<string>(RESERVED_LABELS);
 const LEGACY_FAILURES = {
 	no_questions: { code: "no_questions", message: "At least one question is required" },
@@ -61,13 +63,17 @@ export interface AskUserQuestionDependencies {
 	createPresentationDriver: (ui: QuestionnaireUi, mode: QuestionnaireMode, localize?: QuestionnaireLocalizer, context?: QuestionnairePresentationContext, collapseKey?: string) => QuestionPresentationDriver;
 }
 
+function importOptionalI18nModule(specifier: string): Promise<unknown> {
+	return import(specifier);
+}
+
 const defaultDependencies: AskUserQuestionDependencies = {
 	resolveAgentHome: resolveGentlePiAgentHome,
 	readOwnerConfig: readQuestionOwnerConfig,
 	readGuidanceConfig: readQuestionnaireGuidanceConfig,
 	createLocalizer: () => createQuestionnaireLocalizer({
-		loadProvider: () => import("@juicesharp/rpiv-i18n"),
-		loadLoader: () => import("@juicesharp/rpiv-i18n/loader"),
+		loadProvider: () => importOptionalI18nModule(OPTIONAL_I18N_PROVIDER),
+		loadLoader: () => importOptionalI18nModule(OPTIONAL_I18N_LOADER),
 		packageUrl: import.meta.url,
 	}),
 	createPresentationDriver: (ui, mode, localize, context, collapseKey) => mode === "rpc"
@@ -139,7 +145,7 @@ function questionnaireTool(
 			if (!supportedMode(ctx)) return errorResult(LEGACY_FAILURES.no_ui);
 			if (isBusy()) throw new Error("ask_user_question is already active");
 			const frozen = createFrozenQuestionnaireRequest(toolCallId, params);
-			if (!frozen.ok) return legacyInputFailure(params, frozen.failure);
+			if (frozen.ok === false) return legacyInputFailure(params, frozen.failure);
 			setBusy(true);
 			try {
 				pi.events.emit(PROMPT_EVENT, {

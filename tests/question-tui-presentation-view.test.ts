@@ -26,6 +26,30 @@ function request() {
 	return result.request;
 }
 
+function markdownRequest() {
+	const result = createFrozenQuestionnaireRequest("markdown-correlation", { questions: [{
+		question: "Choose a Markdown-aware route", header: "Route", options: [
+			{ label: "Direct", description: "Fast", preview: "123456789012345678901234\n\n**Fast path**\n\n- keep the detail" },
+			{ label: "Staged", description: "Careful" },
+		],
+	}] });
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error("valid Markdown fixture");
+	return result.request;
+}
+
+function narrowMarkdownRequest() {
+	const result = createFrozenQuestionnaireRequest("narrow-markdown-correlation", { questions: [{
+		question: "Choose a narrow Markdown route", header: "Route", options: [
+			{ label: "Direct", description: "Fast", preview: "alpha bravo charlie xxxx\n\n**Fast path**\n\n- keep the detail" },
+			{ label: "Staged", description: "Careful" },
+		],
+	}] });
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error("valid narrow Markdown fixture");
+	return result.request;
+}
+
 function view(done: (outcome: unknown) => void = () => {}) {
 	let renders = 0;
 	const component = new QuestionnaireTuiPresentation({ request: request(), tui: { terminal: { rows: 24 }, requestRender: () => { renders++; } } as TUI, theme, onDone: done });
@@ -34,6 +58,10 @@ function view(done: (outcome: unknown) => void = () => {}) {
 
 function mouse(width: number, y = 0, height = 24): TuiMouseEvent {
 	return { type: "click", button: "left", x: 0, y, screenX: 0, screenY: y, width, height, shift: false, alt: false, ctrl: false };
+}
+
+function wheel(width: number, y: number, height: number, wheelDelta: number): TuiMouseEvent {
+	return { type: "wheel", button: "none", x: 0, y, screenX: 0, screenY: y, width, height, shift: false, alt: false, ctrl: false, wheelDelta };
 }
 
 function click(component: QuestionnaireTuiPresentation, label: string) {
@@ -181,6 +209,85 @@ test("a deferred editor completion after disposal cannot resurrect the view", as
 	await settleExternalEditor();
 	assert.deepEqual(component.render(48), []);
 	assert.deepEqual(outcomes, []);
+});
+
+test("single-select preview uses a Markdown side panel while the custom-answer tab stays discoverable", () => {
+	const component = new QuestionnaireTuiPresentation({
+		request: markdownRequest(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {},
+	});
+	const lines = component.render(64).map((line) => stripTerminalSequences(line));
+	const preview = lines.findIndex((line) => line.includes("Preview:"));
+	assert.ok(preview >= 0, "the focused option preview is visible");
+	assert.match(lines[preview]!, /│\s*Preview:\s*$/, "the caption has its own side-panel line");
+	const firstMarkdownLine = lines.findIndex((line) => line.includes("123456789012345678901234"));
+	assert.ok(firstMarkdownLine >= 0, "the full first Markdown line survives the caption row");
+	assert.notEqual(firstMarkdownLine, preview, "the caption does not share the first Markdown line");
+	assert.match(lines.join("\n"), /Fast path/);
+	assert.doesNotMatch(lines.join("\n"), /\*\*Fast path\*\*/,
+		"Pi Markdown renders emphasis instead of exposing authored Markdown markers");
+	assert.match(lines.join("\n"), /Custom answer/, "custom text remains discoverable in preview mode");
+});
+
+test("missing single-select previews clear the panel, while narrow terminals stack Markdown safely", () => {
+	const component = new QuestionnaireTuiPresentation({
+		request: markdownRequest(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {},
+	});
+	component.handleInput("\u001b[B");
+	const missing = stripTerminalSequences(component.render(80).join("\n"));
+	assert.doesNotMatch(missing, /Preview:|Fast path|keep the detail/, "a missing preview cannot retain the previous focused preview");
+	assert.match(missing, /Custom answer/);
+
+	const narrowComponent = new QuestionnaireTuiPresentation({
+		request: markdownRequest(), tui: { terminal: { rows: 60 }, requestRender() {} } as TUI, theme, onDone() {},
+	});
+	const narrow = narrowComponent.render(20);
+	assert.ok(narrow.every((line) => visibleWidth(line) <= 20));
+	const narrowText = stripTerminalSequences(narrow.join("\n"));
+	assert.match(narrowText, /Preview:\n[\s\S]*Fast path/);
+	assert.match(narrowText, /Custom answer/);
+});
+
+test("narrow Markdown fallback keeps every preview row across viewport scroll", () => {
+	const component = new QuestionnaireTuiPresentation({
+		request: narrowMarkdownRequest(), tui: { terminal: { rows: 10 }, requestRender() {} } as TUI, theme, onDone() {},
+	});
+	const seen = new Set<string>();
+	for (let attempt = 0; attempt < 20 && seen.size < 4; attempt++) {
+		const lines = component.render(20);
+		for (const line of lines.map((value) => stripTerminalSequences(value))) {
+			if (line.trim() === "Preview:") seen.add("caption");
+			if (line.includes("alpha bravo charlie")) seen.add("first-line");
+			if (line.trim() === "xxxx") seen.add("wrapped-tail");
+			if (line.includes("keep the detail")) seen.add("last-line");
+		}
+		if (seen.size < 4) component.handleMouse(wheel(20, 1, lines.length, 1));
+	}
+	assert.ok(seen.has("caption"), "the narrow caption occupies its own row");
+	assert.ok(seen.has("first-line"), "the first wrapped Markdown row is visible");
+	assert.ok(seen.has("wrapped-tail"), "the complete first Markdown line survives wrapping");
+	assert.ok(seen.has("last-line"), "the final Markdown row survives scrolling");
+});
+
+test("closing custom editing keeps its draft, returns option controls, and cancellation completes once", () => {
+	const outcomes: unknown[] = [];
+	const component = view((outcome) => outcomes.push(outcome)).component;
+	component.handleInput("\t");
+	component.handleInput("draft kept while browsing options");
+	clickVisible(component, "Options");
+	assert.equal(outcomes.length, 0, "switching back to options does not finish the questionnaire");
+	assert.match(stripTerminalSequences(component.render(20).join("\n")), /Direct/);
+	clickVisible(component, /Custom/);
+	const retainedDraft = component.render(64).map((line) => stripTerminalSequences(line));
+	assert.match(retainedDraft.join("\n"), /draft kept while browsing options/, "the complete draft is retained at a sufficient width");
+	const narrowDraft = component.render(20).map((line) => stripTerminalSequences(line));
+	assert.ok(narrowDraft.every((line) => visibleWidth(line) <= 20));
+	assert.ok(narrowDraft.some((line) => line.includes("draft kept")), "the narrow editor exposes the first wrapped draft segment");
+	assert.ok(narrowDraft.some((line) => line.includes("browsing options")), "the narrow editor exposes the final wrapped draft segment");
+	clickVisible(component, "Cancel");
+	component.handleInput("n");
+	component.handleInput("s");
+	component.cancel();
+	assert.deepEqual(outcomes, [{ correlationId: "view-correlation", cancelled: true, answers: [] }]);
 });
 
 test("selecting is display-only until Next, then Submit emits reducer-owned frozen metadata once", () => {
@@ -422,6 +529,27 @@ test("Options closes an active custom editor without losing its draft, including
 	assert.deepEqual(outcomes[0], { correlationId: "view-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "custom", answer: "",
 	}] });
+});
+
+test("Kitty repeat events cannot collapse or cancel the questionnaire accidentally", () => {
+	const repeatCollapse = "\u001b[93;5:2u";
+	const component = view().component;
+	component.handleInput("\t");
+	component.handleInput("private draft");
+	component.handleInput(repeatCollapse);
+	assert.doesNotMatch(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc to cancel/);
+	component.handleInput("\u001d");
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc to cancel/);
+	component.handleInput(repeatCollapse);
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc to cancel/);
+
+	const outcomes: unknown[] = [];
+	const cancelView = view((outcome) => outcomes.push(outcome)).component;
+	cancelView.handleInput("\u001b[27;1:2u");
+	assert.deepEqual(outcomes, [], "a repeated Escape does not cancel a live questionnaire");
+	cancelView.handleInput("\u001b");
+	cancelView.handleInput("\u001b[27;1:2u");
+	assert.deepEqual(outcomes, [{ correlationId: "view-correlation", cancelled: true, answers: [] }]);
 });
 
 test("Ctrl+] collapses a custom draft to only the privacy hint, restores it, and Escape cancels", () => {

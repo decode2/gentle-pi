@@ -1,0 +1,125 @@
+name: Questionnaire UX validation
+
+on:
+  push:
+    branches:
+      - test/questionnaire-ux-validation-isolated-7453d5d
+
+permissions:
+  contents: read
+
+jobs:
+  focused-tests:
+    if: github.repository == 'decode2/gentle-pi'
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.1.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Verify revision and log runtime
+        shell: bash
+        run: |
+          head_sha="$(git rev-parse HEAD)"
+          printf 'github.sha=%s\nhead=%s\nos=%s\nnode=%s\npnpm=%s\n' "$GITHUB_SHA" "$head_sha" "$RUNNER_OS" "$(node --version)" "$(pnpm --version)"
+          test "$head_sha" = "$GITHUB_SHA"
+
+      - name: Install dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Run focused questionnaire tests
+        run: pnpm exec node --experimental-strip-types --experimental-test-module-mocks --test tests/ask-user-question.test.ts tests/question-option-control.test.ts tests/question-presentation-state.test.ts tests/question-tui-presentation-view.test.ts tests/questions-contract.test.ts tests/question-tui-viewport.test.ts tests/question-external-editor-wiring.test.ts tests/ask-user-choice.test.ts
+
+  scoped-strict-typescript:
+    name: SCOPED strict TypeScript (${{ matrix.target }})
+    if: github.repository == 'decode2/gentle-pi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - target: candidate
+            expected_sha: ${{ github.sha }}
+          - target: baseline
+            expected_sha: 7453d5d694da73e2cadc41c54c7a6fa875cac60e
+    env:
+      TARGET: ${{ matrix.target }}
+      EXPECTED_SHA: ${{ matrix.expected_sha }}
+    steps:
+      - name: Checkout exact ${{ matrix.target }} revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ matrix.expected_sha }}
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.1.1
+
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Verify revision and log runtime
+        shell: bash
+        run: |
+          head_sha="$(git rev-parse HEAD)"
+          printf 'target=%s\ngithub.sha=%s\nexpected_sha=%s\nhead=%s\nos=%s\nnode=%s\npnpm=%s\n' "$TARGET" "$GITHUB_SHA" "$EXPECTED_SHA" "$head_sha" "$RUNNER_OS" "$(node --version)" "$(pnpm --version)"
+          test "$head_sha" = "$EXPECTED_SHA"
+
+      - name: Install dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Install pinned CI-only TypeScript tools
+        shell: bash
+        run: |
+          npm install --prefix "$RUNNER_TEMP/questionnaire-typecheck-tools" --no-save --package-lock=false --ignore-scripts --no-audit --no-fund typescript@5.9.3 @types/node@24.13.3
+          printf 'target=%s compiler=' "$TARGET"
+          node "$RUNNER_TEMP/questionnaire-typecheck-tools/node_modules/typescript/bin/tsc" --version
+
+      - name: Run SCOPED strict TypeScript
+        shell: bash
+        run: |
+          node "$RUNNER_TEMP/questionnaire-typecheck-tools/node_modules/typescript/bin/tsc" \
+            --noEmit \
+            --strict \
+            --skipLibCheck \
+            --target ES2022 \
+            --module NodeNext \
+            --moduleResolution NodeNext \
+            --allowImportingTsExtensions \
+            --typeRoots "$RUNNER_TEMP/questionnaire-typecheck-tools/node_modules/@types" \
+            --types node \
+            extensions/ask-user-question.ts \
+            lib/questions/option-control.ts \
+            lib/questions/rpc-presentation-driver.ts \
+            lib/questions/tui-presentation-driver.ts \
+            lib/questions/tui-presentation-view.ts \
+            tests/ask-user-question.test.ts \
+            tests/question-option-control.test.ts \
+            tests/question-presentation-state.test.ts \
+            tests/question-tui-presentation-view.test.ts \
+            tests/questions-contract.test.ts \
+            tests/question-tui-viewport.test.ts \
+            tests/question-external-editor-wiring.test.ts \
+            tests/ask-user-choice.test.ts

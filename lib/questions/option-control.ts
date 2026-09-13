@@ -43,6 +43,8 @@ export interface QuestionOptionControlOptions {
 	readonly theme: QuestionOptionControlTheme;
 	readonly keybindings?: KeybindingsManager;
 	readonly localize?: QuestionnaireLocalizer;
+	/** Keeps authored previews in the row for legacy/multi-select callers; single-select side panels can disable it. */
+	readonly inlinePreview?: boolean;
 	readonly onAction?: (action: QuestionOptionControlAction) => void;
 	readonly onCancel?: () => void;
 }
@@ -60,6 +62,7 @@ export class QuestionOptionControl extends Container {
 	private readonly theme: QuestionOptionControlTheme;
 	private readonly keybindings: KeybindingsManager | undefined;
 	private readonly localize: QuestionnaireLocalizer | undefined;
+	private readonly inlinePreview: boolean;
 	private readonly onAction: ((action: QuestionOptionControlAction) => void) | undefined;
 	private readonly onCancel: (() => void) | undefined;
 	private readonly rows: Row[] = [];
@@ -79,6 +82,7 @@ export class QuestionOptionControl extends Container {
 		this.theme = options.theme;
 		this.keybindings = options.keybindings;
 		this.localize = options.localize;
+		this.inlinePreview = options.inlinePreview ?? true;
 		this.onAction = options.onAction;
 		this.onCancel = options.onCancel;
 		this.selectedIds = validSelectedIds(options.selectedIds ?? [], this.items, this.multiSelect);
@@ -263,7 +267,7 @@ export class QuestionOptionControl extends Container {
 			const label = display(row.item.label);
 			const lines = [`${pointer}${marker}${focused ? this.theme.selectedText(label) : label}`];
 			lines.push(`   ${this.theme.description(display(row.item.description))}`);
-			if (row.item.preview !== undefined) lines.push(`   ${this.theme.preview(`${this.localizeText("chrome.preview.caption", "Preview:")} ${display(row.item.preview)}`)}`);
+			if (this.inlinePreview && row.item.preview !== undefined) lines.push(`   ${this.theme.preview(`${this.localizeText("chrome.preview.caption", "Preview:")} ${display(row.item.preview)}`)}`);
 			row.text.setText(lines.join("\n"));
 			row.box.invalidate();
 		}

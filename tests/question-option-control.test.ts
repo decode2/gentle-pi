@@ -45,6 +45,15 @@ test("keyboard focus exposes exact authored preview metadata and selects without
 	assert.match(stripTerminalSequences(control.render(48).join("\n")), /A wider path[\s\S]*Preview: Review each step\./);
 });
 
+test("single-select callers can keep previews out of the option rows for a side panel", () => {
+	const control = new QuestionOptionControl({ items, multiSelect: false, theme, inlinePreview: false });
+	const rendered = stripTerminalSequences(control.render(48).join("\n"));
+	assert.match(rendered, /Direct 🧭[\s\S]*One focused path\./);
+	assert.doesNotMatch(rendered, /Preview:/);
+	control.handleInput("\u001b[B");
+	assert.equal(control.getFocusedOption(), items[1]);
+});
+
 test("multi-select toggles independently, honors public configured bindings, and never submits", () => {
 	const actions: QuestionOptionControlAction[] = [];
 	const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.down": "j", "tui.select.confirm": "x" });

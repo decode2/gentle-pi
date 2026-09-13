@@ -10,16 +10,18 @@ import type { QuestionnaireGuidance } from "../lib/questions/guidance-config.ts"
 import type { QuestionPresentationDriver } from "../lib/questions/contract.ts";
 import type { QuestionnaireLocalizer } from "../lib/questions/localization.ts";
 import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
+import { createTuiQuestionPresentationDriver } from "../lib/questions/tui-presentation-driver.ts";
+import { createFrozenQuestionnaireRequest } from "../lib/questions/validation.ts";
 
 type LocalizedRpcDriverFactory = (
 	ui: Parameters<typeof createRpcQuestionPresentationDriver>[0],
 	localize?: QuestionnaireLocalizer,
 ) => QuestionPresentationDriver;
 
-// RED seam: production still has one argument and therefore ignores this localizer.
+// Keep the local test seam aligned with the public driver factory.
 const createLocalizedRpcDriver = createRpcQuestionPresentationDriver as LocalizedRpcDriverFactory;
 
-type TestUi = { custom?: unknown; select?: (title: string, options: string[]) => Promise<string | undefined>; editor?: (title: string, prefill?: string) => Promise<string | undefined> };
+type TestUi = { custom?: unknown; select?: (title: string, options: string[], dialogOptions?: { signal?: AbortSignal }) => Promise<string | undefined>; editor?: (title: string, prefill?: string) => Promise<string | undefined> };
 type SessionHandler = (event: unknown, ctx: { mode: string; hasUI?: boolean; ui: TestUi }) => Promise<void> | void;
 type RegisteredTool = {
 	name: string;
@@ -495,6 +497,67 @@ test("routes an RPC call through native select and formats the correlated answer
 		{ channel: "rpiv:ask-user:blocked", payload: { active: false } },
 	]);
 	assert.equal(eventsAtCompletion, subject.events.length, "the release is observable before RPC execution settles");
+});
+
+test("RPC abort forwards one signal to both selectors, cleans native dialogs, and ignores late answers", async () => {
+	const created = createFrozenQuestionnaireRequest("rpc-abort", { questions: [legacyQuestion()] });
+	assert.equal(created.ok, true);
+	if (!created.ok) throw new Error("valid RPC abort fixture");
+	let resolveSelection!: (value: string | undefined) => void;
+	let secondSelectionStarted!: () => void;
+	const secondSelectionStartedPromise = new Promise<void>((resolve) => { secondSelectionStarted = resolve; });
+	const nativeSignals: Array<AbortSignal | undefined> = [];
+	let nativeAbortEvents = 0;
+	let calls = 0;
+	const ui: TestUi = {
+		select: async (_title, _options, options) => {
+			calls++;
+			nativeSignals.push(options?.signal);
+			options?.signal?.addEventListener("abort", () => { nativeAbortEvents++; }, { once: true });
+			if (calls === 1) return "Choose an option";
+			secondSelectionStarted();
+			return new Promise<string | undefined>((resolve) => { resolveSelection = resolve; });
+		},
+		editor: async () => undefined,
+	};
+	const controller = new AbortController();
+	const pending = createRpcQuestionPresentationDriver(ui as never).present(created.request, controller.signal);
+	await secondSelectionStartedPromise;
+	assert.deepEqual(nativeSignals, [controller.signal, controller.signal], "both native selectors receive the request signal");
+	controller.abort();
+	assert.equal(nativeAbortEvents, 2, "both native dialogs observe abort for request cleanup");
+	assert.deepEqual(await pending, { correlationId: "rpc-abort", answers: [], cancelled: true });
+	resolveSelection("Yes");
+	await Promise.resolve();
+	assert.equal(calls, 2, "a late dialog result cannot start a third selection");
+});
+
+test("TUI abort resolves the pending host interaction once and ignores a late completion", async () => {
+	const created = createFrozenQuestionnaireRequest("tui-abort", { questions: [legacyQuestion()] });
+	assert.equal(created.ok, true);
+	if (!created.ok) throw new Error("valid TUI abort fixture");
+	let lateDone!: (outcome: unknown) => void;
+	let hostCalls = 0;
+	const ui = {
+		custom(factory: unknown) {
+			hostCalls++;
+			return new Promise<unknown>((resolve) => {
+				lateDone = resolve;
+				(factory as (tui: unknown, theme: unknown, keybindings: unknown, done: (outcome: unknown) => void) => unknown)(
+					{ terminal: { rows: 24 }, requestRender() {} },
+					{ fg: (_color: string, text: string) => text, bg: (_color: string, text: string) => text, bold: (text: string) => text },
+					{}, resolve,
+				);
+			});
+		},
+	};
+	const controller = new AbortController();
+	const pending = createTuiQuestionPresentationDriver(ui as never).present(created.request, controller.signal);
+	controller.abort();
+	assert.deepEqual(await pending, { correlationId: "tui-abort", answers: [], cancelled: true });
+	lateDone({ correlationId: "tui-abort", answers: [{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Yes" }], cancelled: false });
+	await Promise.resolve();
+	assert.equal(hostCalls, 1);
 });
 
 test("passes the admitted localizer to the real RPC driver without translating authored events", async () => {
