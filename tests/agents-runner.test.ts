@@ -902,7 +902,7 @@ test("non-steering write callback failures preserve pending correlation for a la
 		for (const [name, progress] of [
 			["assistant text", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "real work" } }],
 			["tool start", { type: "tool_execution_start", toolCallId: "tool", toolName: "read", args: {} }],
-			["tool end", { type: "tool_execution_end", toolCallId: "tool", isError: false, result: { content: [] } }],
+			["tool end", { type: "tool_execution_end", toolCallId: "tool", toolName: "read", isError: false, result: { content: [] } }],
 		] as const) {
 			const withProgress = harness({ automaticCompactionTimeoutMs: 1_000 });
 			const secondTask = withProgress.runner.run(request());
@@ -1247,6 +1247,41 @@ test("an unprobeable process group quarantines at its deadline and still records
 	assert.equal(finishes.length, 1, "the run is recorded exactly once");
 	assert.equal(store.get(second.id)?.status, TASK_STATUS.QUEUED, "an unconfirmed exit retains its capacity");
 	assert.equal(launches, 1, "no further launch happens while the slot is quarantined");
+});
+
+test("malformed tool payloads cannot grant a fresh compaction episode budget", async () => {
+	const h = harness({ automaticCompactionTimeoutMs: 1_000 });
+	const task = h.runner.run(request());
+	await tick();
+	const child = h.children[0];
+	const firstStart = h.time();
+	child.emit({ type: "compaction_start", reason: "threshold" });
+	child.emit({ type: "compaction_end", reason: "threshold", result: { summary: "s", firstKeptEntryId: "e", tokensBefore: 1 }, aborted: false, willRetry: false });
+	h.advance(400);
+	child.emit({ type: "tool_execution_start", toolCallId: 123, toolName: "read", args: {} });
+	child.emit({ type: "tool_execution_end", toolCallId: 123, isError: false, result: { content: [] } });
+	child.emit({ type: "tool_execution_start", toolCallId: "tool", toolName: 123, args: {} });
+	child.emit({ type: "tool_execution_end", toolCallId: "tool", isError: false, result: { content: [] } });
+	child.emit({ type: "tool_execution_end", toolCallId: "tool", toolName: 123, isError: false, result: { content: [] } });
+	child.emit({ type: "compaction_start", reason: "threshold" });
+	const reused = h.timers.filter((timer) => !timer.cancelled && timer.ms !== 10_000).at(-1);
+	assert.ok(reused);
+	assert.equal(reused.ms, firstStart + 1_000 - h.time());
+	h.runner.cancel(task.id);
+});
+
+test("an expired compaction restart times out before an immediate valid end can restore monitoring", async () => {
+	const h = harness({ automaticCompactionTimeoutMs: 1_000 });
+	const task = h.runner.run(request());
+	await tick();
+	const child = h.children[0];
+	child.emit({ type: "compaction_start", reason: "threshold" });
+	child.emit({ type: "compaction_end", reason: "threshold", result: { summary: "s", firstKeptEntryId: "e", tokensBefore: 1 }, aborted: false, willRetry: false });
+	h.advance(1_000);
+	child.emit({ type: "compaction_start", reason: "threshold" });
+	child.emit({ type: "compaction_end", reason: "threshold", result: { summary: "s", firstKeptEntryId: "e", tokensBefore: 1 }, aborted: false, willRetry: false });
+	assert.equal((await h.runner.waitFor(task.id)).status, TASK_STATUS.TIMED_OUT);
+	assert.equal(h.timers.some((timer) => !timer.cancelled && timer.ms === 1_000), false, "terminal cleanup cancels the stale episode timer");
 });
 
 test("abortReasonText renders an Error, a string, and nothing for unknown reasons", () => {

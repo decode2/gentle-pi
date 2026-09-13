@@ -1,5 +1,5 @@
 import type { Duplex, Readable, Writable } from "node:stream";
-import { AGENT_MODE, formatModelRef, type AgentDefinition, type AgentMode, type ModelRef } from "./agents-config.ts";
+import { AGENT_MODE, DEFAULT_AUTOMATIC_COMPACTION_TIMEOUT_MS, formatModelRef, MAX_TIMER_DURATION_MS, type AgentDefinition, type AgentMode, type ModelRef } from "./agents-config.ts";
 import { CHILD_QUERY_MAX_INFLIGHT, CHILD_QUERY_TIMEOUT_MS, parseChildFrame, validChildMessage, validChildQueryId } from "./agents-messaging.ts";
 import { ParentStandingReviewPermissionBroker } from "./review-session-standing-permission-ipc.ts";
 import { isFinished, normalizeRpcEvent, TASK_EVENT, TASK_STATUS, taskLabel, type AskRequest, type ChildResponseObservation, type TaskRecord, type TaskStore } from "./agents-protocol.ts";
@@ -55,6 +55,7 @@ export interface RunnerDeps {
 export interface RunnerLimits {
 	maxConcurrency: number;
 	stallTimeoutMs: number;
+	automaticCompactionTimeoutMs?: number;
 }
 
 export interface AskAnswer {
@@ -175,6 +176,7 @@ interface LiveTask {
 	queries: Map<string, PendingQuery>;
 	replies: Map<string, PendingReply>;
 	cancelStall: () => void;
+	cancelCompaction: () => void;
 	cancelGrace: () => void;
 	processGroup: number | undefined;
 	terminal: { status: TaskRecord["status"]; error: string | null } | undefined;
@@ -188,6 +190,8 @@ interface LiveTask {
 	acknowledgedIpcOrder: string[];
 	mutationStarts: Map<string, { toolName: "write" | "edit"; toolCallId: string; path: string }>;
 	autoCompaction?: "threshold" | "overflow";
+	compactionDeadlineAt: number | undefined;
+	compactionNeedsProgress: boolean;
 }
 
 const CHILD_MARKER = "GENTLE_PI_AGENTS_CHILD";
@@ -197,6 +201,12 @@ const DEFAULT_TOOLS: readonly string[] = [];
 const TERMINATION_GRACE_MS = 250;
 const GROUP_CONFIRM_MS = 25;
 const GROUP_CONFIRM_DEADLINE_MS = 1_000;
+function validToolPayload(raw: Record<string, unknown>): boolean {
+	if (typeof raw.toolCallId !== "string" || raw.toolCallId.length === 0) return false;
+	if (raw.type === "tool_execution_start") return typeof raw.toolName === "string" && raw.toolName.length > 0 && !!raw.args && typeof raw.args === "object" && !Array.isArray(raw.args);
+	return raw.type === "tool_execution_end" && typeof raw.toolName === "string" && raw.toolName.length > 0 && typeof raw.isError === "boolean" && !!raw.result && typeof raw.result === "object" && !Array.isArray(raw.result);
+}
+
 function isCompactionResult(value: unknown): value is Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
 	const result = value as Record<string, unknown>;
@@ -460,7 +470,7 @@ export class AgentRunner {
 			return;
 		}
 		const processGroup = detached && typeof child.pid === "number" && child.pid > 0 ? child.pid : undefined;
-		const live: LiveTask = { child, mutationStarts: new Map(), pending: new Map(), queries: new Map(), replies: new Map(), cancelStall: () => {}, cancelGrace: () => {}, processGroup, terminal: undefined, childExit: undefined, cleanupDeadlineAt: undefined, quarantined: false, nextId: 0, ipcClosed: false, acknowledgedIpcIds: new Set(), acknowledgedIpcOrder: [] };
+		const live: LiveTask = { child, mutationStarts: new Map(), pending: new Map(), queries: new Map(), replies: new Map(), cancelStall: () => {}, cancelCompaction: () => {}, cancelGrace: () => {}, processGroup, terminal: undefined, childExit: undefined, cleanupDeadlineAt: undefined, quarantined: false, nextId: 0, ipcClosed: false, acknowledgedIpcIds: new Set(), acknowledgedIpcOrder: [], compactionDeadlineAt: undefined, compactionNeedsProgress: false };
 		if (request.prepareResponseObservations) {
 			let ready = false;
 			live.observationPreparation = () => ready;
@@ -519,6 +529,20 @@ export class AgentRunner {
 	private armStall(id: string, live: LiveTask): void {
 		live.cancelStall();
 		live.cancelStall = this.deps.schedule(() => this.requestStop(id, TASK_STATUS.TIMED_OUT, `stalled for ${Math.round(this.limits.stallTimeoutMs / 60_000)} min`), this.limits.stallTimeoutMs);
+	}
+
+	private compactionTimeoutMs(): number {
+		const value = this.limits.automaticCompactionTimeoutMs;
+		return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= MAX_TIMER_DURATION_MS ? value : DEFAULT_AUTOMATIC_COMPACTION_TIMEOUT_MS;
+	}
+
+	private armCompaction(id: string, live: LiveTask): void {
+		live.cancelCompaction();
+		const now = this.deps.now();
+		const remaining = Math.max(0, (live.compactionDeadlineAt ?? now) - now);
+		live.cancelCompaction = this.deps.schedule(() => {
+			if (this.live.get(id) === live && live.autoCompaction !== undefined) this.requestStop(id, TASK_STATUS.TIMED_OUT, "automatic compaction budget exceeded");
+		}, remaining);
 	}
 
 	private send(id: string, command: Record<string, unknown>): Promise<Record<string, unknown>> {
@@ -683,9 +707,18 @@ export class AgentRunner {
 		const reason = raw.reason;
 		if (raw.type === "compaction_start") {
 			if ((reason !== "threshold" && reason !== "overflow") || live.autoCompaction !== undefined) return true;
+			const now = this.deps.now();
+			if (live.compactionDeadlineAt !== undefined && live.compactionNeedsProgress && now >= live.compactionDeadlineAt) {
+				this.requestStop(id, TASK_STATUS.TIMED_OUT, "automatic compaction budget exceeded");
+				return true;
+			}
+			if (live.compactionDeadlineAt === undefined || !live.compactionNeedsProgress) live.compactionDeadlineAt = now + this.compactionTimeoutMs();
+			live.compactionNeedsProgress = true;
 			live.autoCompaction = reason;
+			live.cancelStall();
+			this.armCompaction(id, live);
 			const step = `compacting (${reason})`;
-			this.store.apply(id, { type: TASK_EVENT.NOTE, text: `automatic compaction started (${reason})` }, this.deps.now());
+			this.store.apply(id, { type: TASK_EVENT.NOTE, text: `automatic compaction started (${reason})` }, now);
 			this.store.update(id, { lastStep: step });
 			return true;
 		}
@@ -704,7 +737,15 @@ export class AgentRunner {
 					? `resumed after compaction (${reason})`
 					: undefined;
 		if (!step) return true;
+		if (raw.willRetry === true) {
+			this.store.apply(id, { type: TASK_EVENT.NOTE, text: step }, this.deps.now());
+			this.store.update(id, { lastStep: step });
+			return true;
+		}
 		live.autoCompaction = undefined;
+		live.cancelCompaction();
+		live.cancelCompaction = () => {};
+		this.armStall(id, live);
 		this.store.apply(id, { type: TASK_EVENT.NOTE, text: step }, this.deps.now());
 		this.store.update(id, { lastStep: step });
 		return true;
@@ -714,10 +755,13 @@ export class AgentRunner {
 		const live = this.live.get(id);
 		if (!live || live.terminal || !value || typeof value !== "object") return;
 		const raw = value as Record<string, unknown>;
-		// Automatic compaction remains subject to the existing frame-driven watchdog;
-		// this lifecycle projection grants no timeout exemption or reset policy.
-		this.armStall(id, live);
-		if (this.receiveAutomaticCompaction(id, live, raw)) return;
+		// Compaction owns the watchdog while active; ordinary frames retain the
+		// existing reset behavior only when no compaction episode is active.
+		if (raw.type === "compaction_start" || raw.type === "compaction_end") {
+			this.receiveAutomaticCompaction(id, live, raw);
+			return;
+		}
+		if (live.autoCompaction === undefined) this.armStall(id, live);
 		if (raw.type === "response") {
 			if (!live.observationPreparation) this.checkObservationGrant(live);
 			const pending = typeof raw.id === "string" ? live.pending.get(raw.id) : undefined;
@@ -735,6 +779,10 @@ export class AgentRunner {
 				continue; // Separate from store persistence, UI totals and notifications.
 			}
 			this.store.apply(id, event, this.deps.now());
+			if (live.autoCompaction === undefined && live.compactionNeedsProgress && (
+				(event.type === TASK_EVENT.TEXT && event.text.length > 0)
+				|| ((event.type === TASK_EVENT.TOOL_START || event.type === TASK_EVENT.TOOL_END) && event.callId.length > 0 && validToolPayload(raw))
+			)) live.compactionNeedsProgress = false;
 			if (event.type === TASK_EVENT.TOOL_START && event.callId) {
 				live.mutationStarts.delete(event.callId);
 				if ((event.name === "write" || event.name === "edit") && typeof event.args.path === "string" && event.args.path.trim()) {
@@ -805,6 +853,8 @@ export class AgentRunner {
 		live.permissionBroker?.close();
 		this.closeIpc(live);
 		live.cancelStall();
+		live.cancelCompaction();
+		live.cancelCompaction = () => {};
 		if (abort) void this.send(id, { type: "abort" });
 		this.signal(live, "SIGTERM");
 		live.cancelGrace = this.deps.schedule(() => {
@@ -881,6 +931,8 @@ export class AgentRunner {
 		live.permissionBroker?.close();
 		this.closeIpc(live);
 		live.cancelStall();
+		live.cancelCompaction();
+		live.cancelCompaction = () => {};
 		live.cancelGrace();
 		this.live.delete(id);
 		this.finish(id, TASK_STATUS.FAILED, `could not start pi: ${error.message}`, live);
@@ -901,6 +953,8 @@ export class AgentRunner {
 		live.permissionBroker?.close();
 		this.closeIpc(live);
 		live.cancelStall();
+		live.cancelCompaction();
+		live.cancelCompaction = () => {};
 		live.cancelGrace();
 		this.live.delete(id);
 		// Quarantine already notified completion, but its retained slot is now free.

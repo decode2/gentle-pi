@@ -73,6 +73,7 @@ export interface AgentsConfig {
 	defaultMode: AgentMode;
 	modelProfiles: Record<string, ModelProfile>;
 	stallTimeoutMs: number;
+	automaticCompactionTimeoutMs: number;
 	maxConcurrency: number;
 	historyMaxTasks: number;
 }
@@ -107,6 +108,8 @@ export interface Frontmatter {
 }
 
 const DEFAULT_STALL_TIMEOUT_MS = 4 * 60_000;
+export const DEFAULT_AUTOMATIC_COMPACTION_TIMEOUT_MS = 10 * 60_000;
+export const MAX_TIMER_DURATION_MS = 2_147_483_647;
 const DEFAULT_MAX_CONCURRENCY = 5;
 const DEFAULT_HISTORY_MAX_TASKS = 200;
 const THINKING_LEVELS = Object.values(THINKING_LEVEL) as string[];
@@ -240,6 +243,10 @@ function positiveInteger(value: unknown, fallback: number): number {
 	return typeof value === "number" && Number.isInteger(value) && value > 0 ? value : fallback;
 }
 
+function timerDuration(value: unknown, fallback: number): number {
+	return typeof value === "number" && Number.isInteger(value) && value > 0 && value <= MAX_TIMER_DURATION_MS ? value : fallback;
+}
+
 function parseProfiles(value: unknown): Record<string, ModelProfile> {
 	const profiles: Record<string, ModelProfile> = {};
 	if (!value || typeof value !== "object") return profiles;
@@ -274,6 +281,7 @@ export function parseAgentsConfig(global: RawConfig, project: RawConfig): Agents
 		// `timeout_ms` remains accepted as an inert legacy key so existing JSON
 		// files load normally; only silence is bounded by `stall_timeout_ms`.
 		stallTimeoutMs: positiveInteger(merged.stall_timeout_ms, DEFAULT_STALL_TIMEOUT_MS),
+		automaticCompactionTimeoutMs: timerDuration(merged.automatic_compaction_timeout_ms, DEFAULT_AUTOMATIC_COMPACTION_TIMEOUT_MS),
 		maxConcurrency: positiveInteger(merged.max_concurrency, DEFAULT_MAX_CONCURRENCY),
 		historyMaxTasks: positiveInteger(merged.history_max_tasks, DEFAULT_HISTORY_MAX_TASKS),
 	};
