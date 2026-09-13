@@ -7,6 +7,7 @@ import { isAbsolute, join, relative, resolve, sep, win32 } from "node:path";
 import { pendingReviewMutation, REVIEW_REMINDER_RECEIPT } from "../lib/review-reminder-receipt.ts";
 import { SESSION_WORKTREE_ENTRY, SESSION_WORKTREE_CHANGED } from "../lib/session-worktree-registry.ts";
 import test, { after, afterEach, mock } from "node:test";
+import type { TestContext } from "node:test";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { visibleWidth, type TuiMouseEvent } from "@earendil-works/pi-tui";
 import gentleAgents, { agentRuntimePaths, agentsCollapseKey, agentsEnabled, agentsStopKey, agentsViewKey, answerThroughUi, completionText, createDefaultSessionTransport, legacySubagentsInstalled, type AgentsDeps, type SessionTransportFactory } from "../extensions/gentle-agents.ts";
@@ -360,6 +361,211 @@ test("foreground handoff survives settlement before its original await resumes",
 });
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
+type LifecycleOutcome = { status: "fulfilled" } | { status: "rejected"; error: unknown };
+type LifecycleState = { status: "pending" | "fulfilled" | "rejected"; outcome?: LifecycleOutcome };
+const observeLifecycle = <T>(promise: Promise<T>, state: LifecycleState): Promise<LifecycleOutcome> => promise.then(() => { const outcome = { status: "fulfilled" as const }; state.status = outcome.status; state.outcome = outcome; return outcome; }, (error) => { const outcome = { status: "rejected" as const, error }; state.status = outcome.status; state.outcome = outcome; return outcome; });
+
+test("overlapping session transport startups preserve ownership and shutdown waits for every pending operation", async (t: TestContext) => {
+	const h = fakePi();
+	const runtime = deps();
+	let sessionId = "old";
+	const registryGates: Array<() => void> = [];
+	const listenerStarts: string[] = [], listenerCloses: string[] = [], clientCloses: string[] = [], registryCloseCalls: string[] = [], registryCloseEffects: string[] = [];
+	const registries = new Map<string, { closed: boolean; close(): Promise<void> }>();
+	const transport: SessionTransportFactory = {
+		createRegistry: async () => {
+			const id = sessionId;
+			await new Promise<void>((resolve) => registryGates.push(resolve));
+			const registry = { sessionId: id, closed: false, list: async () => [], listActivations: async () => [], close: async () => { registryCloseCalls.push(id); if (!registry.closed) { registry.closed = true; registryCloseEffects.push(id); } } };
+			registries.set(id, registry);
+			return registry;
+		},
+		createListener: (registry, id) => ({ registry, start: async () => { listenerStarts.push(id); }, close: async () => { listenerCloses.push(id); await registry.close?.(); } }),
+		createClient: (_registry, id) => ({ close: () => { clientCloses.push(id); }, sendNotification: async () => ({ id: "unused", accepted: true }) }),
+	};
+	runtime.deps.sessionTransport = transport;
+	gentleAgents(h.pi, {}, runtime.deps);
+	const { ctx } = fakeContext();
+	(ctx.sessionManager as { getSessionId(): string }).getSessionId = () => sessionId;
+	const launched: Array<{ state: LifecycleState; outcome: Promise<LifecycleOutcome> }> = [];
+	const launch = <T>(promise: Promise<T>) => { const state: LifecycleState = { status: "pending" }; const outcome = observeLifecycle(promise, state); launched.push({ state, outcome }); return { state, outcome }; };
+	let shutdownRecord: ReturnType<typeof launch> | undefined;
+	let primary: unknown;
+	try {
+		const first = h.fire("session_start", ctx, { reason: "startup" });
+		launch(first);
+		await tick();
+		sessionId = "new";
+		const second = h.fire("session_start", ctx, { reason: "new" });
+		const secondRecord = launch(second);
+		await tick();
+		assert.equal(registryGates.length, 2, "both starts must own pending registry creation");
+		registryGates[1]!();
+		await eventually(() => listenerStarts.includes("new"), "current startup must publish after its registry is ready");
+		const shutdown = h.fire("session_shutdown", ctx, { reason: "quit" });
+		shutdownRecord = launch(shutdown);
+		await tick();
+		assert.equal(secondRecord.state.status, "fulfilled", "the current startup settles before shutdown begins");
+		assert.equal(shutdownRecord?.state.status, "pending", "shutdown must wait for the older pending startup, not only the current startup");
+		registryGates[0]!();
+		assert.equal(registries.has("old"), false, "the released old registry gate has not yet completed acquisition");
+		assert.equal(registries.get("old")?.closed, undefined, "the retained old registry cannot be closed before acquisition completes");
+		await eventually(() => launched.every(({ state }) => state.status !== "pending"), "all launched lifecycle operations must settle after gate release");
+		const outcomes = await Promise.all(launched.map(({ outcome }) => outcome));
+		assert.ok(outcomes.every((outcome) => outcome.status === "fulfilled"), "all launched lifecycle operations must fulfill");
+		assert.deepEqual(listenerStarts, ["new"], "the stale startup must never publish");
+		assert.deepEqual(clientCloses, ["new"], "the current client closes exactly once");
+		assert.deepEqual(listenerCloses, ["new"], "the current listener closes exactly once");
+		assert.deepEqual(registryCloseCalls.sort(), ["new", "old"], "each owned registry close is invoked exactly once");
+		assert.deepEqual(registryCloseEffects.sort(), ["new", "old"], "each owned registry closes exactly once");
+		assert.equal(registries.get("old")?.closed, true);
+		assert.equal(registries.get("new")?.closed, true);
+	} catch (error) {
+		primary = error;
+	} finally {
+		for (const release of registryGates) release();
+		if (shutdownRecord === undefined) shutdownRecord = launch(h.fire("session_shutdown", ctx, { reason: "cleanup" }));
+		if (launched.length > 0) {
+			try {
+				await eventually(() => launched.every(({ state }) => state.status !== "pending"), "all launched lifecycle operations must settle during cleanup");
+				const outcomes = await Promise.all(launched.map(({ outcome }) => outcome));
+				const cleanupFailure = outcomes.find((outcome) => outcome.status === "rejected");
+				if (cleanupFailure?.status === "rejected") {
+					if (primary === undefined) primary = cleanupFailure.error;
+					else t.diagnostic(`Lifecycle cleanup secondary failure: ${cleanupFailure.error instanceof Error ? cleanupFailure.error.message : String(cleanupFailure.error)}`);
+				}
+			} catch (error) {
+				if (primary === undefined) primary = error;
+				else t.diagnostic(`Lifecycle cleanup secondary failure: ${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	}
+	if (primary !== undefined) throw primary;
+});
+
+test("session_start does not block a subsequently registered handler on registry creation", async (t: TestContext) => {
+	const h = fakePi();
+	const runtime = deps();
+	let registryEntered = false;
+	let listenerCreated = false;
+	let clientCreated = false;
+	let listenerClosed = 0;
+	let clientClosed = 0;
+	let releaseRegistry!: () => void;
+	const registryGate = new Promise<void>((resolve) => { releaseRegistry = resolve; });
+	const transport: SessionTransportFactory = {
+		createRegistry: async () => {
+			registryEntered = true;
+			await registryGate;
+			return { list: async () => [], listActivations: async () => [] };
+		},
+		createListener: (registry) => { listenerCreated = true; return { registry, start: async () => {}, close: async () => { listenerClosed++; } }; },
+		createClient: () => { clientCreated = true; return { close() { clientClosed++; }, sendNotification: async () => ({ id: "unused", accepted: true }) }; },
+	};
+	runtime.deps.sessionTransport = transport;
+	gentleAgents(h.pi, {}, runtime.deps);
+	let laterFinished = false;
+	h.pi.on("session_start", async () => { laterFinished = true; });
+	const { ctx } = fakeContext();
+	let outcome: Promise<LifecycleOutcome> | undefined;
+	let lifecycleState: LifecycleState | undefined;
+	let primary: unknown;
+	try {
+		const started = h.fire("session_start", ctx, { reason: "startup" });
+		lifecycleState = { status: "pending" };
+		outcome = observeLifecycle(started, lifecycleState);
+		await eventually(() => registryEntered, "registry gate must be entered before the bounded handler assertion");
+		await eventually(() => laterFinished, "a subsequently registered session_start handler must finish while registry creation is gated");
+		releaseRegistry();
+		assert.ok(outcome);
+		assert.equal((await outcome).status, "fulfilled");
+	} catch (error) {
+		primary = error;
+	} finally {
+		releaseRegistry();
+		try {
+			if (outcome !== undefined) {
+				await eventually(() => listenerCreated && clientCreated, "registry-gated startup must acquire owned resources before cleanup shutdown");
+				const shutdownState: LifecycleState = { status: "pending" };
+				const shutdownOutcome = observeLifecycle(h.fire("session_shutdown", ctx, { reason: "cleanup" }), shutdownState);
+				await eventually(() => lifecycleState?.status !== "pending" && shutdownState.status !== "pending", "registry-gated startup cleanup must settle all launched operations");
+				const cleanupOutcomes = await Promise.all([outcome, shutdownOutcome]);
+				assert.equal(listenerClosed, 1, "cleanup closes the owned listener");
+				assert.equal(clientClosed, 1, "cleanup closes the owned client");
+				const cleanupFailure = cleanupOutcomes.find((value) => value.status === "rejected");
+				if (cleanupFailure?.status === "rejected") {
+					if (primary === undefined) primary = cleanupFailure.error;
+					else t.diagnostic(`Registry-gate cleanup secondary failure: ${cleanupFailure.error instanceof Error ? cleanupFailure.error.message : String(cleanupFailure.error)}`);
+				}
+			}
+		} catch (error) {
+			if (primary === undefined) primary = error;
+			else t.diagnostic(`Registry-gate cleanup secondary failure: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	if (primary !== undefined) throw primary;
+});
+
+test("session_start does not block a subsequently registered handler on listener publication", async (t: TestContext) => {
+	const h = fakePi();
+	const runtime = deps();
+	let listenerEntered = false;
+	let listenerClosed = 0;
+	let clientClosed = 0;
+	let releaseListener!: () => void;
+	const listenerGate = new Promise<void>((resolve) => { releaseListener = resolve; });
+	const registry = { list: async () => [], listActivations: async () => [] };
+	const transport: SessionTransportFactory = {
+		createRegistry: async () => registry,
+		createListener: (ownedRegistry) => ({
+			registry: ownedRegistry,
+			start: async () => { listenerEntered = true; await listenerGate; },
+			close: async () => { listenerClosed++; },
+		}),
+		createClient: () => ({ close() { clientClosed++; }, sendNotification: async () => ({ id: "unused", accepted: true }) }),
+	};
+	runtime.deps.sessionTransport = transport;
+	gentleAgents(h.pi, {}, runtime.deps);
+	let laterFinished = false;
+	h.pi.on("session_start", async () => { laterFinished = true; });
+	const { ctx } = fakeContext();
+	let outcome: Promise<LifecycleOutcome> | undefined;
+	let lifecycleState: LifecycleState | undefined;
+	let primary: unknown;
+	try {
+		const started = h.fire("session_start", ctx, { reason: "startup" });
+		lifecycleState = { status: "pending" };
+		outcome = observeLifecycle(started, lifecycleState);
+		await eventually(() => listenerEntered, "listener gate must be entered after registry creation");
+		await eventually(() => laterFinished, "a subsequently registered session_start handler must finish while listener publication is gated");
+		releaseListener();
+		assert.ok(outcome);
+		assert.equal((await outcome).status, "fulfilled");
+	} catch (error) {
+		primary = error;
+	} finally {
+		releaseListener();
+		try {
+			if (outcome !== undefined) {
+				const shutdownState: LifecycleState = { status: "pending" };
+				const shutdownOutcome = observeLifecycle(h.fire("session_shutdown", ctx, { reason: "cleanup" }), shutdownState);
+				await eventually(() => lifecycleState?.status !== "pending" && shutdownState.status !== "pending", "listener-gated startup cleanup must settle all launched operations");
+				const cleanupOutcomes = await Promise.all([outcome, shutdownOutcome]);
+				assert.equal(listenerClosed, 1, "cleanup closes the owned listener");
+				assert.equal(clientClosed, 1, "cleanup closes the owned client");
+				const cleanupFailure = cleanupOutcomes.find((value) => value.status === "rejected");
+				if (cleanupFailure?.status === "rejected") {
+					if (primary === undefined) primary = cleanupFailure.error;
+					else t.diagnostic(`Listener-gate cleanup secondary failure: ${cleanupFailure.error instanceof Error ? cleanupFailure.error.message : String(cleanupFailure.error)}`);
+				}
+			}
+		} catch (error) {
+			if (primary === undefined) primary = error;
+			else t.diagnostic(`Listener-gate cleanup secondary failure: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+	if (primary !== undefined) throw primary;
+});
 
 test("child parent-message tooling admits notifications and the active parent preserves raw model text", async () => {
 	const child = fakePi();
