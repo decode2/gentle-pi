@@ -1,0 +1,57 @@
+name: Agents IPC EOF Close
+
+on:
+  push:
+    branches: [fix/agents-ipc-eof-close]
+
+permissions:
+  contents: read
+
+jobs:
+  red:
+    if: github.repository == 'decode2/gentle-pi'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          persist-credentials: false
+      - name: Setup Node.js
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24.20.0
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.1.1
+      - name: Record pinned runtime
+        run: printf 'SHA=%s\n' "$GITHUB_SHA"; node --version
+      - name: Install dependencies without lifecycle scripts
+        shell: bash
+        run: pnpm install --frozen-lockfile --ignore-scripts --store-dir "$RUNNER_TEMP/pnpm-store"
+        env:
+          npm_config_ignore_scripts: "true"
+      - name: Run hosted RED regression in isolated Linux namespace
+        shell: bash
+        run: |
+          set +e
+          node_path="$(command -v node)"
+          timeout_path="$(command -v timeout)"
+          tee_path="$(command -v tee)"
+          sed_path="$(command -v sed)"
+          runner_uid="$(id -u)"
+          runner_gid="$(id -g)"
+          sandbox_tmp="$RUNNER_TEMP/ipc-eof-sandbox"
+          mkdir -p "$sandbox_tmp/home" "$sandbox_tmp/tmp" "$sandbox_tmp/pi" "$sandbox_tmp/xdg"
+          /usr/bin/sudo -n /usr/bin/unshare --net --setgid "$runner_gid" --setuid "$runner_uid" -- \
+            /usr/bin/env -i HOME="$sandbox_tmp/home" TMPDIR="$sandbox_tmp/tmp" PI="$sandbox_tmp/pi" \
+              XDG_CONFIG_HOME="$sandbox_tmp/xdg" PATH=/usr/bin:/bin CI=true NODE_OPTIONS= \
+              HTTP_PROXY= HTTPS_PROXY= ALL_PROXY= http_proxy= https_proxy= all_proxy= NO_PROXY='*' no_proxy='*' \
+              npm_config_offline=true GIT_CONFIG_NOSYSTEM=1 \
+              "$timeout_path" --kill-after=5s 90s "$node_path" --experimental-strip-types --test --test-concurrency=1 \
+                tests/agents-runner.test.ts tests/agents-queries.test.ts tests/agents-runner-process.test.ts \
+            2>&1 | "$tee_path" "$RUNNER_TEMP/agents-ipc-eof-close-red.log"
+          status=${PIPESTATUS[0]}
+          "$sed_path" -n '1,240p' "$RUNNER_TEMP/agents-ipc-eof-close-red.log"
+          exit "$status"

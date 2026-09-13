@@ -7,14 +7,25 @@ import { AgentRunner, type ChildLike, type RunnerDeps, type TaskRequest } from "
 import { TASK_STATUS, TaskStore } from "../lib/agents-protocol.ts";
 
 const fixture = fileURLToPath(new URL("./fixtures/agents-process-child.mjs", import.meta.url));
+const ipcFixture = fileURLToPath(new URL("./fixtures/agents-ipc-close-child.mjs", import.meta.url));
 const agent: AgentDefinition = { name: "process", description: "test", filePath: "/test.md", scope: "global", instructions: "", model: undefined, thinking: undefined, mode: undefined, tools: [] };
 const request = (prompt: string): TaskRequest => ({ agent, prompt, label: undefined, context: undefined, mode: AGENT_MODE.BACKGROUND, cwd: process.cwd(), parentSessionId: "test", model: undefined, thinking: undefined, sessionDir: "/tmp", resumeSessionPath: undefined, env: {} });
 
-const waitFor = async (predicate: () => boolean, timeoutMs = 10_000): Promise<void> => {
-	const deadline = Date.now() + timeoutMs;
-	while (!predicate()) {
-		if (Date.now() >= deadline) throw new Error(`condition was not met within ${timeoutMs}ms`);
-		await new Promise((resolve) => setTimeout(resolve, 10));
+const waitFor = async (predicate: () => boolean, timeoutMs = 10_000, label = "condition"): Promise<void> => {
+	let interval: ReturnType<typeof setInterval> | undefined;
+	let timeout: ReturnType<typeof setTimeout> | undefined;
+	try {
+		await new Promise<void>((resolve, reject) => {
+			const check = () => {
+				if (predicate()) { resolve(); return; }
+				interval ??= setInterval(check, 10);
+			};
+			timeout = setTimeout(() => reject(new Error(`${label} timeout after ${timeoutMs}ms`)), timeoutMs);
+			check();
+		});
+	} finally {
+		if (interval) clearInterval(interval);
+		if (timeout) clearTimeout(timeout);
 	}
 };
 
@@ -34,7 +45,7 @@ test("POSIX cleanup retains queue slots when a leader exits but its TERM-resisti
 		spawn: (_command, _args, options): ChildLike => {
 			launches += 1;
 			const env = launches === 1 ? { ...options.env, AGENTS_PROCESS_CHILD_EXIT_ON_TERM: "1" } : launches === 3 ? { ...options.env, AGENTS_PROCESS_CHILD_EXIT_AFTER_READY: "1" } : options.env;
-			const child = nodeSpawn(process.execPath, [fixture], { cwd: options.cwd, env, detached: options.detached, stdio: ["pipe", "pipe", "pipe"] });
+			const child = nodeSpawn(process.execPath, [fixture], { cwd: options.cwd, env, detached: options.detached, stdio: options.stdio });
 			const launchIndex = launches - 1;
 			ownedPids.push(child.pid!);
 			if (launches === 1) {
@@ -50,6 +61,10 @@ test("POSIX cleanup retains queue slots when a leader exits but its TERM-resisti
 					armRuntimeTimeout(launchIndex);
 				}
 			});
+			child.on("exit", () => {});
+			child.on("close", () => {});
+			child.stdout.on("close", () => {});
+			child.stderr?.on("close", () => {});
 			return child;
 		},
 		now: Date.now,
@@ -108,4 +123,67 @@ test("POSIX cleanup retains queue slots when a leader exits but its TERM-resisti
 		runner.cancel(third.id);
 		runner.cancel(fourth.id);
 	}
+});
+
+test("POSIX runner preserves real IPC and reports close after exit and stdio close", { skip: process.platform === "win32", timeout: 15_000 }, async () => {
+	const events: string[] = [];
+	const cleanupErrors: string[] = [];
+	let child: ReturnType<typeof nodeSpawn> | undefined;
+	let readyObserved = false;
+	const ready = () => { readyObserved = true; };
+	const store = new TaskStore();
+	const runner = new AgentRunner(store, { maxConcurrency: 1, stallTimeoutMs: 5_000 }, {
+		spawn: (_command, _args, options) => {
+			child = nodeSpawn(process.execPath, [ipcFixture], { cwd: options.cwd, env: options.env, detached: options.detached, stdio: options.stdio });
+			child.on("message", (message) => { if (message && typeof message === "object" && (message as { type?: unknown }).type === "ready") ready(); });
+			child.on("exit", () => events.push("exit"));
+			child.on("close", () => events.push("close"));
+			child.stdout.on("close", () => events.push("stdout-close"));
+			child.stderr?.on("close", () => events.push("stderr-close"));
+			return child;
+		},
+		now: Date.now,
+		schedule: (fn, ms) => { const timer = setTimeout(fn, ms); return () => clearTimeout(timer); },
+		pi: { command: process.execPath, args: [] },
+	}, { askUser: async () => ({ cancelled: true }) });
+	const task = runner.run(request("ipc eof"));
+	let failure: unknown;
+	try {
+		await waitFor(() => readyObserved, 3_000, "framed IPC readiness");
+		assert.ok(child?.pid, "ready child has a PID");
+		assert.equal(runner.cancel(task.id), true, "cancellation targets the live task");
+		await waitFor(() => events.includes("exit") && events.includes("stdout-close") && events.includes("stderr-close"), 5_000, "exit and stdio closure");
+		await waitFor(() => {
+			try { process.kill(child!.pid!, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+		}, 2_000, "child PID disappearance");
+		await waitFor(() => {
+			try { process.kill(-child!.pid!, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+		}, 2_000, "owned process-group disappearance");
+		const closeDeadline = Date.now() + 1_000;
+		while (!events.includes("close") && Date.now() < closeDeadline) await new Promise((resolve) => setTimeout(resolve, 10));
+		assert.equal(events.filter((event) => event === "close").length, 1, "RED diagnosis: missing real child close or duplicate close after proven exit, stdio close, and PID/PGID disappearance");
+		assert.ok(events.indexOf("exit") < events.indexOf("close"), "child close follows child exit");
+		await waitFor(() => store.get(task.id)?.status === TASK_STATUS.CANCELLED, 2_000, "runner cancellation cleanup");
+	} catch (error) {
+		failure = error;
+	} finally {
+		if (child?.pid) {
+			for (const target of [-child.pid, child.pid]) {
+				try { process.kill(target, "SIGKILL"); } catch (error) {
+					if ((error as NodeJS.ErrnoException).code !== "ESRCH") cleanupErrors.push(`SIGKILL ${target}: ${String(error)}`);
+				}
+			}
+			try { await waitFor(() => events.includes("exit"), 1_000, "cleanup child exit"); } catch (error) { cleanupErrors.push(String(error)); }
+			try { await waitFor(() => {
+				try { process.kill(child!.pid!, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+			}, 1_000, "cleanup PID disappearance"); } catch (error) { cleanupErrors.push(String(error)); }
+			try { await waitFor(() => {
+				try { process.kill(-child!.pid!, 0); return false; } catch (error) { return (error as NodeJS.ErrnoException).code === "ESRCH"; }
+			}, 1_000, "cleanup process-group disappearance"); } catch (error) { cleanupErrors.push(String(error)); }
+		}
+		runner.cancel(task.id);
+		try { await waitFor(() => store.get(task.id)?.status === TASK_STATUS.CANCELLED, 1_000, "cleanup runner cancellation"); } catch (error) { cleanupErrors.push(String(error)); }
+	}
+	if (failure) throw new AggregateError([failure, ...cleanupErrors.map((error) => new Error(error))], "RED regression or cleanup failure");
+	assert.deepEqual(cleanupErrors, [], `cleanup failure: ${cleanupErrors.join("; ")}`);
 });
