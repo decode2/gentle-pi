@@ -145,6 +145,29 @@ function request() {
 	return result.request;
 }
 
+function isFocusedControlLine(line: string, label: string): boolean {
+	if (line === `→ ${label}` || line === `→ [${label}]`) return true;
+	for (const prefix of ["→ ( ) ", "→ (●) ", "→ [ ] ", "→ [x] "]) {
+		if (line === `${prefix}${label}` || line.startsWith(`${prefix}${label} │`)) return true;
+	}
+	return false;
+}
+
+function focusCustomForKeyboard(component: QuestionnaireTuiPresentation, width = 48): void {
+	const initial = component.render(width).map((line) => stripTerminalSequences(line).trim());
+	const optionCount = Math.max(2, initial.filter((line) => /^(?:→ )?(?:\([● ]\)|\[[x ]\])\s/.test(line)).length);
+	const maxSteps = optionCount + 3;
+	for (let step = 0; step < maxSteps; step++) {
+		const lines = component.render(width).map((line) => stripTerminalSequences(line).trim());
+		if (lines.some((line) => isFocusedControlLine(line, "Custom answer"))) {
+			component.handleInput("\r");
+			return;
+		}
+		component.handleInput("\t");
+	}
+	assert.fail("bounded keyboard traversal could not focus Custom answer");
+}
+
 function owned(outcome: unknown) {
 	const formatted = validateAndFormat(request(), outcome);
 	assert.equal(formatted.ok, true, "the owner validates the driver's raw outcome");
@@ -401,7 +424,7 @@ test("invokes custom once with host arguments and returns a reducer-owned partia
 test("future external editing stops the TUI before invocation and restores a forced render after success", async () => {
 	const calls: string[] = [];
 	const host = new FakeCustomHost((component) => {
-		component.handleInput("\t");
+		focusCustomForKeyboard(component);
 		component.handleInput("driver draft");
 		component.handleInput("\u0007");
 	});
@@ -425,7 +448,7 @@ test("future external editing restores the TUI and reports localized rejection t
 	const calls: string[] = [];
 	const notices: string[] = [];
 	const host = new FakeCustomHost((component) => {
-		component.handleInput("\t");
+		focusCustomForKeyboard(component);
 		component.handleInput("failure draft");
 		component.handleInput("\u0007");
 	});
@@ -452,7 +475,7 @@ test("future external editing restores the TUI and reports localized rejection t
 test("an undefined start failure preserves the external draft and reports the view error", async () => {
 	const notices: string[] = [];
 	const host = new FakeCustomHost((component) => {
-		component.handleInput("\t");
+		focusCustomForKeyboard(component);
 		component.handleInput("original draft");
 		component.handleInput("\u0007");
 	});
@@ -902,7 +925,7 @@ test("raw routing declines Ctrl+] during an active bracketed paste so the focuse
 	const { cleanup } = await startRawOverlay(host);
 	try {
 		assert.equal(host.onTerminalInputCalls, 1);
-		host.component!.handleInput("\t");
+		focusCustomForKeyboard(host.component!);
 		assert.equal(host.raw("\u001b[200~before"), undefined, "paste framing is not a collapse shortcut");
 		host.component!.handleInput("\u001b[200~before");
 		assert.equal(host.raw("\u001d"), undefined, "the raw listener yields configured input while the view owns a paste");

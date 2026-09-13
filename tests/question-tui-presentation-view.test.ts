@@ -92,9 +92,30 @@ function renderedText(component: QuestionnaireTuiPresentation, width = 80): stri
 	return component.render(width).map((line) => stripTerminalSequences(line).trim());
 }
 
+function isFocusedControlLine(line: string, label: string): boolean {
+	if (line === `→ ${label}` || line === `→ [${label}]`) return true;
+	for (const prefix of ["→ ( ) ", "→ (●) ", "→ [ ] ", "→ [x] "]) {
+		if (line === `${prefix}${label}` || line.startsWith(`${prefix}${label} │`)) return true;
+	}
+	return false;
+}
+
 function focusedControl(lines: readonly string[], label: string): number {
-	const row = lines.findIndex((line) => line.startsWith("→ ") && line.includes(label));
+	const row = lines.findIndex((line) => isFocusedControlLine(line, label));
 	assert.ok(row >= 0, `keyboard focus is visible on ${label}`);
+	return row;
+}
+
+function isOptionControlLine(line: string, label: string): boolean {
+	for (const prefix of ["( ) ", "(●) ", "[ ] ", "[x] ", "→ ( ) ", "→ (●) ", "→ [ ] ", "→ [x] "]) {
+		if (line === `${prefix}${label}` || line.startsWith(`${prefix}${label} │`)) return true;
+	}
+	return false;
+}
+
+function optionControlRow(lines: readonly string[], label: string): number {
+	const row = lines.findIndex((line) => isOptionControlLine(line, label));
+	assert.ok(row >= 0, `the option control row is visible for ${label}`);
 	return row;
 }
 
@@ -109,8 +130,27 @@ function assertFocusPath(component: QuestionnaireTuiPresentation, key: string, l
 	}
 }
 
+function focusCustomForKeyboard(component: QuestionnaireTuiPresentation, width = 48, label = "Custom answer"): void {
+	const initial = renderedText(component, width);
+	const optionCount = Math.max(2, initial.filter((line) => /^(?:→ )?(?:\([● ]\)|\[[x ]\])\s/.test(line)).length);
+	const maxSteps = optionCount + 3;
+	for (let step = 0; step < maxSteps; step++) {
+		const lines = renderedText(component, width);
+		if (lines.some((line) => isFocusedControlLine(line, label))) {
+			component.handleInput(ENTER);
+			return;
+		}
+		component.handleInput("\t");
+	}
+	assert.fail(`bounded keyboard traversal could not focus ${label}`);
+}
+
 function mouse(width: number, y = 0, height = 24): TuiMouseEvent {
 	return { type: "click", button: "left", x: 0, y, screenX: 0, screenY: y, width, height, shift: false, alt: false, ctrl: false };
+}
+
+function pointer(type: "press" | "click", width: number, y: number, height: number): TuiMouseEvent {
+	return { ...mouse(width, y, height), type };
 }
 
 function wheel(width: number, y: number, height: number, wheelDelta: number): TuiMouseEvent {
@@ -167,6 +207,31 @@ test("arrow navigation traverses options, Custom answer, primary, and Cancel wit
 		"Enter on the independently focused Cancel action cancels without fabricating an answer");
 });
 
+test("pointer press synchronizes global focus before click activation", () => {
+	const outcomes: unknown[] = [];
+	const component = keyboardView((outcome) => outcomes.push(outcome));
+	assertFocusPath(component, ARROW_DOWN, ["Direct", "Staged", "Custom answer", "Submit", "Cancel"]);
+	let lines = renderedText(component);
+	const direct = optionControlRow(lines, "Direct");
+	assert.match(lines[direct]!, /^\( \) Direct(?: │|$)/, "the pointer target starts unselected");
+	assert.equal(outcomes.length, 0);
+
+	assert.equal(component.handleMouse(pointer("press", 80, direct, lines.length))?.handled, true);
+	lines = renderedText(component);
+	const focusMarkers = lines.filter((line) => line.startsWith("→ "));
+	assert.equal(focusMarkers.length, 1, "pointer press leaves exactly one global focus marker");
+	assert.ok(isFocusedControlLine(focusMarkers[0]!, "Direct"), "pointer press moves global focus to the pressed option");
+	assert.equal(outcomes.length, 0, "pointer press does not commit or cancel");
+	assert.match(lines[optionControlRow(lines, "Direct")]!, /^→ \( \) Direct(?: │|$)/,
+		"pointer press changes focus without selecting the option");
+
+	component.handleInput(ENTER);
+	lines = renderedText(component);
+	assert.match(lines[optionControlRow(lines, "Direct")]!, /^→ \(●\) Direct(?: │|$)/,
+		"Enter activates the option after pointer focus synchronization");
+	assert.equal(outcomes.length, 0, "option activation remains separate from questionnaire commit");
+});
+
 test("Tab and Shift+Tab traverse the same bounded focus order without opening Custom answer", () => {
 	const outcomes: unknown[] = [];
 	const component = keyboardView((outcome) => outcomes.push(outcome));
@@ -195,11 +260,12 @@ test("Tab and Shift+Tab traverse the same bounded focus order without opening Cu
 	assert.match(renderedText(component).join("\n"), /Custom response \(Esc/);
 	component.handleInput(SHIFT_TAB);
 	focusedControl(renderedText(component), "Staged");
-	assert.match(renderedText(component).join("\n"), /draft/, "Shift+Tab closes the editor while retaining its draft");
+	assert.doesNotMatch(renderedText(component).join("\n"), /Custom response \(Esc/, "Shift+Tab closes the editor while retaining focus outside it");
 	component.handleInput("\t");
 	focusedControl(renderedText(component), "Custom answer");
 	component.handleInput(ENTER);
 	assert.match(renderedText(component).join("\n"), /Custom response \(Esc/);
+	assert.match(renderedText(component).join("\n"), /draft/, "Shift+Tab preserves the draft for a later editor reopen");
 	component.handleInput(ESCAPE);
 	focusedControl(renderedText(component), "Custom answer");
 	assert.match(renderedText(component).join("\n"), /draft/, "Escape closes the editor without discarding its draft");
@@ -260,7 +326,7 @@ test("Ctrl+G launches the external editor only from a custom-answer draft", asyn
 		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {}, externalEditor,
 	} as ConstructorParameters<typeof QuestionnaireTuiPresentation>[0] & { externalEditor: QuestionnaireExternalEditor });
 
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("draft before external edit");
 	component.handleInput("\u0007");
 	await Promise.resolve();
@@ -293,7 +359,7 @@ test("Ctrl+G updates the visible custom draft without completing, then Next and 
 		calls.push(draft);
 		return "edited externally\nsecond line";
 	});
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("draft before external edit");
 	component.handleInput("\u0007");
 	await settleExternalEditor();
@@ -326,7 +392,7 @@ test("Ctrl+G coalesces a pending launch and permits a later launch after settlem
 		calls.push(draft);
 		return new Promise((resolve) => resolvers.push(resolve));
 	});
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("stable draft");
 	component.handleInput("\u0007");
 	component.handleInput("\u0007");
@@ -349,7 +415,7 @@ test("a rejected editor preserves the draft, reports localized failure, and clea
 		if (calls.length === 1) throw new Error("editor failed");
 		return "recovered draft";
 	}, (message) => notices.push(message), (key, fallback) => key === "editor.failed" ? "Editor fehlgeschlagen" : fallback);
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("preserve me");
 	component.handleInput("\u0007");
 	await settleExternalEditor();
@@ -369,7 +435,7 @@ test("a deferred editor completion after disposal cannot resurrect the view", as
 		calls.push(draft);
 		return new Promise((resolve) => { resolveEditor = resolve; });
 	});
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("late draft");
 	component.handleInput("\u0007");
 	await settleExternalEditor();
@@ -445,7 +511,7 @@ test("narrow Markdown fallback keeps every preview row across viewport scroll", 
 test("closing custom editing keeps its draft, returns option controls, and cancellation completes once", () => {
 	const outcomes: unknown[] = [];
 	const component = view((outcome) => outcomes.push(outcome)).component;
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("draft kept while browsing options");
 	clickVisible(component, "Options");
 	assert.equal(outcomes.length, 0, "switching back to options does not finish the questionnaire");
@@ -485,7 +551,7 @@ test("custom drafts preserve Editor normalization while note controls are absent
 	component.handleInput("\r");
 	component.handleInput("n");
 	component.handleInput("]");
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("  custom\tline");
 	component.handleInput("\r");
 	component.handleInput("next  qg");
@@ -508,7 +574,7 @@ test("Escape leaves an editor draft, then cancels committed partials; width and 
 	assert.doesNotMatch(stripTerminalSequences(lines.join("\n")), /\u001b\[31m/);
 	component.handleInput("\r");
 	component.handleInput("n");
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("draft");
 	component.handleInput("\u001b");
 	component.handleInput("\u001b");
@@ -524,7 +590,7 @@ test("preserves a split large bracketed paste except Editor line-ending and tab 
 	const { component } = view((outcome) => outcomes.push(outcome));
 	const raw = `word/~/.path\u000b\u000c\t${"x".repeat(1001)}\r\n${Array.from({ length: 10 }, (_, index) => `line-${index}`).join("\n")}`;
 	const expected = raw.replace(/\r\n/g, "\n").replace(/\r/g, "\n").replace(/\t/g, "    ");
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput(`\u001b[200~${raw.slice(0, 537)}`);
 	component.handleInput(`${raw.slice(537)}\u001b[201~`);
 	component.handleInput("\u001b");
@@ -538,21 +604,19 @@ test("preserves a split large bracketed paste except Editor line-ending and tab 
 test("mouse question navigation closes and persists the current editor before rebinding", () => {
 	const outcomes: unknown[] = [];
 	const { component } = view((outcome) => outcomes.push(outcome));
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("first");
 	const navigationFrame = component.render(48);
 	component.handleMouse(mouse(48, 1, navigationFrame.length));
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("second");
 	component.handleInput("\u001b");
 	component.handleInput("[");
-	component.handleInput("\t");
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("\u001b");
 	component.handleInput("n");
 	component.handleInput("]");
-	component.handleInput("\t");
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("\u001b");
 	component.handleInput("n");
 	component.handleInput("s");
@@ -577,11 +641,9 @@ test("rebuild invalidates same-width pointer geometry, retains focus, and hides 
 		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "option", answer: "Staged",
 	}] });
 	const hidden = view((outcome) => outcomes.push(outcome)).component;
-	hidden.handleInput("\t");
+	focusCustomForKeyboard(hidden);
 	hidden.handleInput("\u001b");
-	hidden.handleInput("\r");
-	hidden.handleInput("\t");
-	hidden.handleInput("n");
+	hidden.handleInput(SHIFT_TAB);
 	hidden.handleInput("s");
 	assert.deepEqual(outcomes[1], { correlationId: "view-correlation", cancelled: false, answers: [] });
 });
@@ -602,7 +664,7 @@ test("public input buffering delivers a complete bracketed paste across every op
 test("active paste owns command-shaped fragments, including split end markers", () => {
 	const outcomes: unknown[] = [];
 	const { component } = view((outcome) => outcomes.push(outcome));
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("\u001b[200~a");
 	component.handleInput("\r");
 	component.handleInput("bs\u001b");
@@ -618,13 +680,12 @@ test("active paste owns command-shaped fragments, including split end markers", 
 test("unfinished paste persists before mouse header navigation", () => {
 	const outcomes: unknown[] = [];
 	const navigated = view((outcome) => outcomes.push(outcome)).component;
-	navigated.handleInput("\t");
+	focusCustomForKeyboard(navigated);
 	navigated.handleInput("\u001b[200~nav");
 	navigated.handleInput("\u001b");
 	click(navigated, "2. Checks");
 	navigated.handleInput("[");
-	navigated.handleInput("\t");
-	navigated.handleInput("\t");
+	focusCustomForKeyboard(navigated);
 	navigated.handleInput("\u001b");
 	navigated.handleInput("n");
 	navigated.handleInput("s");
@@ -636,7 +697,7 @@ test("unfinished paste persists before mouse header navigation", () => {
 test("unfinished paste persists before mouse finalization", () => {
 	const outcomes: unknown[] = [];
 	const finished = view((outcome) => outcomes.push(outcome)).component;
-	finished.handleInput("\t");
+	focusCustomForKeyboard(finished);
 	finished.handleInput("\u001b[200~finish");
 	click(finished, "Next");
 	click(finished, "Submit");
@@ -648,7 +709,7 @@ test("unfinished paste persists before mouse finalization", () => {
 test("ordinary Escape remains immediate when no complete public paste has started", () => {
 	const outcomes: unknown[] = [];
 	const { component } = view((outcome) => outcomes.push(outcome));
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("draft");
 	component.handleInput("\u001b");
 	component.handleInput("\u001b");
@@ -708,7 +769,7 @@ test("Options closes an active custom editor without losing its draft, including
 test("Kitty repeat events cannot collapse or cancel the questionnaire accidentally", () => {
 	const repeatCollapse = "\u001b[93;5:2u";
 	const component = view().component;
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("private draft");
 	component.handleInput(repeatCollapse);
 	assert.doesNotMatch(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc to cancel/);
@@ -729,7 +790,7 @@ test("Kitty repeat events cannot collapse or cancel the questionnaire accidental
 test("Ctrl+] collapses a custom draft to only the privacy hint, restores it, and Escape cancels", () => {
 	const outcomes: unknown[] = [];
 	const { component } = view((outcome) => outcomes.push(outcome));
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("private draft");
 	component.handleInput("\u001d");
 
@@ -754,7 +815,7 @@ test("collapsed input and stale mouse controls cannot modify or complete a custo
 	const expanded = component.render(48);
 	const nextY = expanded.findIndex((line) => stripTerminalSequences(line).includes("Next"));
 	assert.ok(nextY >= 0, "the expanded frame has a Next hit target before collapse");
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("private draft");
 	component.handleInput("\u001d");
 	assert.equal(component.handleMouse(mouse(48, nextY, expanded.length)), undefined, "retired Next geometry is inert while collapsed");
@@ -773,7 +834,7 @@ test("collapsed input and stale mouse controls cannot modify or complete a custo
 
 test("active bracketed paste owns Ctrl+] until the paste closes", () => {
 	const { component } = view();
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("\u001b[200~paste\u001d");
 	assert.doesNotMatch(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc to cancel/, "a configured key inside an active paste is editor data");
 	component.handleInput("tail\u001b[201~");
@@ -796,7 +857,7 @@ test("collapsed hint is localized and remains one width-safe line", () => {
 test("complete bracketed paste while collapsed cannot change a custom draft", () => {
 	const outcomes: unknown[] = [];
 	const { component } = view((outcome) => outcomes.push(outcome));
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("original");
 	component.handleInput("\u001d");
 	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
@@ -810,7 +871,7 @@ test("complete bracketed paste while collapsed cannot change a custom draft", ()
 
 test("Ctrl+] expands immediately instead of buffering unfinished collapsed paste", () => {
 	const { component } = view();
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("original");
 	component.handleInput("\u001d");
 	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
@@ -825,7 +886,7 @@ test("Ctrl+] expands immediately instead of buffering unfinished collapsed paste
 test("Escape cancels once instead of buffering unfinished collapsed paste", () => {
 	const outcomes: unknown[] = [];
 	const { component } = view((outcome) => outcomes.push(outcome));
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("original");
 	component.handleInput("\u001d");
 	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
@@ -856,11 +917,12 @@ test("renders only static questionnaire chrome through an injected localizer", (
 	assert.match(translated, /Frage 1:[\s\S]*Optionen[\s\S]*Eigene Antwort[\s\S]*Vorschau:\nexact preview[\s\S]*Weiter[\s\S]*Abbrechen/);
 	assert.match(translated, /Route[\s\S]*Choose a route[\s\S]*Direct[\s\S]*Fast[\s\S]*exact preview/, "request content remains byte-preserved");
 
-	component.handleInput("\t");
+	focusCustomForKeyboard(component, 48, "Eigene Antwort");
 	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Eigene Eingabe \(Esc behält Entwurf\)/, "the editor label is static chrome");
 	component.handleInput("\u001b");
 	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Eigene Eingabe:/, "the persisted custom label is static chrome");
-	component.handleInput("\t");
+	component.handleInput(SHIFT_TAB);
+	component.handleInput(SHIFT_TAB);
 	component.handleInput("\r");
 	component.handleInput("n");
 	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Frage 2:[\s\S]*Absenden[\s\S]*Abbrechen/, "the last-question primary label is static chrome");
@@ -876,7 +938,7 @@ test("a configured collapse key replaces Ctrl+] and displays its normalized key"
 	const component = new QuestionnaireTuiPresentation({
 		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {}, collapseKey: "ctrl+k",
 	} as FutureCollapseOptions);
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("private draft");
 	component.handleInput("\u001d");
 	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Custom response/, "the old default shortcut stays with the editor when overridden");
@@ -889,7 +951,7 @@ test("an off collapse key leaves Ctrl+] and Ctrl+K to the current editor", () =>
 	const component = new QuestionnaireTuiPresentation({
 		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {}, collapseKey: "off",
 	} as FutureCollapseOptions);
-	component.handleInput("\t");
+	focusCustomForKeyboard(component);
 	component.handleInput("private draft");
 	component.handleInput("\u001d");
 	component.handleInput("\u000b");

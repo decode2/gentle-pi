@@ -134,8 +134,16 @@ function keyboardActionRow(lines: readonly string[], label: "Next" | "Submit" | 
 	return row;
 }
 
+function isFocusedControlLine(line: string, label: string): boolean {
+	if (line === `→ ${label}` || line === `→ [${label}]`) return true;
+	for (const prefix of ["→ ( ) ", "→ (●) ", "→ [ ] ", "→ [x] "]) {
+		if (line === `${prefix}${label}` || line.startsWith(`${prefix}${label} │`)) return true;
+	}
+	return false;
+}
+
 function focusedKeyboardRow(lines: readonly string[], label: string): number {
-	const row = text(lines).findIndex((line) => line.startsWith("→ ") && line.includes(label));
+	const row = text(lines).findIndex((line) => isFocusedControlLine(line, label));
 	assert.ok(row >= 0, `${label} has a visible keyboard focus marker`);
 	return row;
 }
@@ -308,6 +316,41 @@ test("keyboard focus scrolls Custom answer into the visible body while the stick
 		assert.equal(keyboardActionRow(lines, "Submit"), secondFooter, `${width}x${rows} Cancel focus does not move the sticky footer`);
 		assert.equal(outcomes.length, 0, `${width}x${rows} reaching footer actions does not auto-submit or cancel`);
 	}
+});
+
+test("body wheel scrolling preserves its manual position until keyboard focus moves", () => {
+	const width = 20;
+	const rows = 10;
+	const component = view(rows, () => {}, matrixRequest());
+	let lines = frame(component, width, rows);
+	const initialFooter = keyboardActionRow(lines, "Submit");
+
+	for (let index = 0; index < 4; index++) component.handleInput("\u001b[B");
+	lines = frame(component, width, rows);
+	const custom = focusedKeyboardRow(lines, "Custom answer");
+	assert.ok(custom < initialFooter, "the focused Custom answer control is in the scrollable body");
+
+	let scrolledAway = false;
+	for (let index = 0; index < 120; index++) {
+		lines = frame(component, width, rows);
+		const currentCustom = text(lines).findIndex((line) => isFocusedControlLine(line, "Custom answer"));
+		const wheelRow = currentCustom >= 0 ? currentCustom : 0;
+		if (currentCustom < 0) scrolledAway = true;
+		assert.equal(component.handleMouse(event("wheel", wheelRow, width, lines.length, "none", 1))?.handled, true,
+			"a wheel at the body stays body-owned instead of being treated as preview input");
+	}
+	lines = frame(component, width, rows);
+	assert.equal(scrolledAway, true, "manual body scrolling may move the focused control out of view");
+	assert.match(text(lines).join("\n"), /many narrow terminal rows\./, "manual body scrolling reaches the long inline tail");
+	assert.equal(keyboardActionRow(lines, "Submit"), initialFooter, "manual body scrolling leaves the sticky footer fixed");
+	const manuallyScrolled = lines;
+	assert.deepEqual(frame(component, width, rows), manuallyScrolled, "an ordinary rerender preserves manual body scrolling");
+
+	component.handleInput("\u001b[A");
+	lines = frame(component, width, rows);
+	assert.ok(focusedKeyboardRow(lines, "Row 4") < keyboardActionRow(lines, "Submit"),
+		"keyboard navigation restores a body focus marker after manual scrolling");
+	assert.equal(keyboardActionRow(lines, "Submit"), initialFooter, "keyboard focus restoration leaves the sticky footer fixed");
 });
 
 for (const rows of [1, 2, 3]) {
@@ -558,7 +601,7 @@ test("keyboard preview paging reaches and returns from the tail without question
 	const outcomes: unknown[] = [];
 	const component = view(rows, (outcome) => outcomes.push(outcome), longPreviewRequest());
 	let lines = frame(component, width, rows);
-	const focusedOption = text(lines).find((line) => line.startsWith("→") && line.includes("Long route"));
+	const focusedOption = text(lines).find((line) => isFocusedControlLine(line, "Long route"));
 	const focusedOptionPrefix = focusedOption?.split(" │ ")[0]?.trim();
 	assert.equal(focusedOptionPrefix, "→ ( ) Long route", "the long-preview option starts focused and unselected");
 	assert.match(text(lines).join("\n"), /Ctrl\+PgUp\/PgDn/, "overflow exposes a keyboard scrolling hint");
@@ -572,7 +615,7 @@ test("keyboard preview paging reaches and returns from the tail without question
 	}
 	assert.equal(reachedTail, true, "Ctrl+PgDn reaches the preview tail");
 	assert.equal(outcomes.length, 0, "preview paging does not submit or cancel the questionnaire");
-	assert.equal(text(lines).find((line) => line.startsWith("→") && line.includes("Long route"))?.split(" │ ")[0]?.trim(), focusedOptionPrefix, "preview paging does not change option focus or selection");
+	assert.equal(text(lines).find((line) => isFocusedControlLine(line, "Long route"))?.split(" │ ")[0]?.trim(), focusedOptionPrefix, "preview paging does not change option focus or selection");
 
 	let returnedToTop = false;
 	for (let index = 0; index < 20 && !returnedToTop; index++) {
@@ -582,5 +625,5 @@ test("keyboard preview paging reaches and returns from the tail without question
 	}
 	assert.equal(returnedToTop, true, "Ctrl+PgUp returns to the preview top");
 	assert.equal(outcomes.length, 0, "returning through the preview does not submit or cancel the questionnaire");
-	assert.equal(text(lines).find((line) => line.startsWith("→") && line.includes("Long route"))?.split(" │ ")[0]?.trim(), focusedOptionPrefix, "returning through the preview preserves option focus or selection");
+	assert.equal(text(lines).find((line) => isFocusedControlLine(line, "Long route"))?.split(" │ ")[0]?.trim(), focusedOptionPrefix, "returning through the preview preserves option focus or selection");
 });
