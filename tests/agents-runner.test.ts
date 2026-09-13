@@ -23,9 +23,11 @@ interface Harness {
 	asks: Array<{ taskId: string; method: string }>;
 	finishes: string[];
 	spawnOptions: Array<{ env: NodeJS.ProcessEnv; stdio?: string[] }>;
+	advance(ms: number): void;
+	time(): number;
 }
 
-function harness(options: { maxConcurrency?: number; answer?: Record<string, unknown>; exitOnKill?: boolean; state?: Record<string, unknown>; stateSuccess?: boolean; steerSuccess?: boolean; getStateWriteFailure?: boolean; onNotification?: RunnerHooks["onNotification"]; onQuery?: RunnerHooks["onQuery"]; onSuccessfulMutation?: RunnerHooks["onSuccessfulMutation"]; onFinish?: RunnerHooks["onFinish"] } = {}): Harness {
+function harness(options: { maxConcurrency?: number; automaticCompactionTimeoutMs?: number; answer?: Record<string, unknown>; exitOnKill?: boolean; state?: Record<string, unknown>; stateSuccess?: boolean; steerSuccess?: boolean; getStateWriteFailure?: boolean; onNotification?: RunnerHooks["onNotification"]; onQuery?: RunnerHooks["onQuery"]; onSuccessfulMutation?: RunnerHooks["onSuccessfulMutation"]; onFinish?: RunnerHooks["onFinish"] } = {}): Harness {
 	const children: FakeChild[] = [];
 	const timers: Harness["timers"] = [];
 	const asks: Harness["asks"] = [];
@@ -58,7 +60,7 @@ function harness(options: { maxConcurrency?: number; answer?: Record<string, unk
 			children.push(fake);
 			return fake.child;
 		},
-		now: () => (clock += 1),
+		now: () => clock,
 		schedule: (fn, ms) => {
 			const timer = { fn, ms, cancelled: false };
 			timers.push(timer);
@@ -69,7 +71,8 @@ function harness(options: { maxConcurrency?: number; answer?: Record<string, unk
 		pi: { command: "pi", args: [] },
 	};
 	const store = new TaskStore();
-	const runner = new AgentRunner(store, { maxConcurrency: options.maxConcurrency ?? 2, stallTimeoutMs: 10_000 }, deps, {
+	const limits = { maxConcurrency: options.maxConcurrency ?? 2, stallTimeoutMs: 10_000, ...(options.automaticCompactionTimeoutMs === undefined ? {} : { automaticCompactionTimeoutMs: options.automaticCompactionTimeoutMs }) };
+	const runner = new AgentRunner(store, limits, deps, {
 		askUser: async (taskId, ask) => {
 			asks.push({ taskId, method: ask.method });
 			return options.answer ?? { value: "yes" };
@@ -79,7 +82,7 @@ function harness(options: { maxConcurrency?: number; answer?: Record<string, unk
 		onQuery: options.onQuery,
 		onSuccessfulMutation: options.onSuccessfulMutation,
 	});
-	return { store, runner, children, timers, asks, finishes, spawnOptions };
+	return { store, runner, children, timers, asks, finishes, spawnOptions, advance: (ms) => { clock += ms; }, time: () => clock };
 }
 
 const tick = () => new Promise((resolve) => setImmediate(resolve));
@@ -825,6 +828,136 @@ test("non-steering write callback failures preserve pending correlation for a la
 		child.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
 		await tick();
 		assert.equal(store.get(task.id)?.status, TASK_STATUS.CANCELLED, "late frames cannot revive a terminal task");
+	});
+
+	test("automatic compaction suspends the ordinary watchdog and active progress cannot renew the longer budget", async () => {
+		const h = harness({ automaticCompactionTimeoutMs: 20_000 });
+		const task = h.runner.run(request());
+		await tick();
+		const child = h.children[0];
+		const ordinary = h.timers.find((timer) => timer.ms === 10_000 && !timer.cancelled);
+		assert.ok(ordinary);
+		child.emit({ type: "compaction_start", reason: "threshold" });
+		const budget = h.timers.find((timer) => timer.ms === 20_000 && !timer.cancelled);
+		assert.ok(budget);
+		assert.equal(ordinary.cancelled, true, "compaction suspends the ordinary watchdog");
+		h.advance(10_001);
+		assert.equal(h.store.get(task.id)?.status, TASK_STATUS.RUNNING, "past the ordinary cutoff remains alive during compaction");
+		h.advance(9_999);
+		assert.ok(budget, "validated compaction starts an episode timer");
+		child.emit({ type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "progress" } });
+		child.emit({ type: "tool_execution_start", toolCallId: "tool", toolName: "read", args: {} });
+		assert.equal(budget.cancelled, false, "assistant and tool progress do not extend an active episode");
+		budget.fn();
+		await tick();
+		assert.equal((await h.runner.waitFor(task.id)).status, TASK_STATUS.TIMED_OUT);
+
+		const restored = harness({ automaticCompactionTimeoutMs: 20_000 });
+		const restoredTask = restored.runner.run(request());
+		await tick();
+		restored.children[0].emit({ type: "compaction_start", reason: "threshold" });
+		restored.children[0].emit({ type: "compaction_end", reason: "threshold", result: { summary: "s", firstKeptEntryId: "e", tokensBefore: 1 }, aborted: false, willRetry: false });
+		const restoredWatchdog = restored.timers.filter((timer) => timer.ms === 10_000 && !timer.cancelled).at(-1);
+		assert.ok(restoredWatchdog, "valid end restores the ordinary watchdog");
+		restored.advance(10_000);
+		restoredWatchdog.fn();
+		await tick();
+		assert.equal((await restored.runner.waitFor(restoredTask.id)).status, TASK_STATUS.TIMED_OUT);
+	});
+
+	test("automatic compaction ignores control, retry, malformed, and duplicate frames and restores the ordinary monitor", async () => {
+		const h = harness({ automaticCompactionTimeoutMs: 1_000 });
+		const task = h.runner.run(request());
+		await tick();
+		const child = h.children[0];
+		child.emit({ type: "compaction_start", reason: "overflow" });
+		const first = h.timers.find((timer) => timer.ms === 1_000 && !timer.cancelled);
+		assert.ok(first);
+		child.emit({ type: "compaction_start", reason: "overflow" });
+		child.emit({ type: "response", id: "control", success: true });
+		child.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+		child.emit({ type: "compaction_end", reason: "overflow", result: { summary: "s", firstKeptEntryId: "e", tokensBefore: 1 }, aborted: false, willRetry: true });
+		assert.equal(first.cancelled, false, "retry and malformed/mismatched ends do not renew or clear the active episode");
+		child.emit({ type: "compaction_end", reason: "overflow", result: { summary: "s", firstKeptEntryId: "e", tokensBefore: 1 }, aborted: false, willRetry: false });
+		assert.equal(first.cancelled, true, "a valid end cancels the episode timer");
+		assert.ok(h.timers.some((timer) => timer.ms === 10_000 && !timer.cancelled), "a valid end restores ordinary inactivity monitoring");
+		h.runner.cancel(task.id);
+	});
+
+	test("automatic compaction reuses an unspent episode budget until real progress, then grants the next episode a fresh budget", async () => {
+		const withoutProgress = harness({ automaticCompactionTimeoutMs: 1_000 });
+		const firstTask = withoutProgress.runner.run(request());
+		await tick();
+		const firstChild = withoutProgress.children[0];
+		const firstStart = withoutProgress.time();
+		firstChild.emit({ type: "compaction_start", reason: "threshold" });
+		firstChild.emit({ type: "compaction_end", reason: "threshold", result: { summary: "s", firstKeptEntryId: "e", tokensBefore: 1 }, aborted: false, willRetry: false });
+		withoutProgress.advance(400);
+		firstChild.emit({ type: "compaction_start", reason: "threshold" });
+		const reused = withoutProgress.timers.filter((timer) => !timer.cancelled && timer.ms !== 10_000).at(-1);
+		assert.ok(reused);
+		assert.equal(reused.ms, firstStart + 1_000 - withoutProgress.time(), "a repeated episode reuses the exact remaining original deadline");
+		withoutProgress.runner.cancel(firstTask.id);
+
+		for (const [name, progress] of [
+			["assistant text", { type: "message_update", assistantMessageEvent: { type: "text_delta", delta: "real work" } }],
+			["tool start", { type: "tool_execution_start", toolCallId: "tool", toolName: "read", args: {} }],
+			["tool end", { type: "tool_execution_end", toolCallId: "tool", isError: false, result: { content: [] } }],
+		] as const) {
+			const withProgress = harness({ automaticCompactionTimeoutMs: 1_000 });
+			const secondTask = withProgress.runner.run(request());
+			await tick();
+			const secondChild = withProgress.children[0];
+			secondChild.emit({ type: "compaction_start", reason: "threshold" });
+			secondChild.emit({ type: "compaction_end", reason: "threshold", result: { summary: "s", firstKeptEntryId: "e", tokensBefore: 1 }, aborted: false, willRetry: false });
+			withProgress.advance(400);
+			secondChild.emit(progress);
+			secondChild.emit({ type: "compaction_start", reason: "threshold" });
+			assert.ok(withProgress.timers.some((timer) => timer.ms === 1_000 && !timer.cancelled), `${name} grants the next episode a fresh budget`);
+			withProgress.runner.cancel(secondTask.id);
+		}
+	});
+
+	test("control, empty, malformed, retry, and compaction-only frames do not grant fresh progress", async () => {
+		const h = harness({ automaticCompactionTimeoutMs: 1_000 });
+		const task = h.runner.run(request());
+		await tick();
+		const child = h.children[0];
+		child.emit({ type: "compaction_start", reason: "threshold" });
+		child.emit({ type: "compaction_end", reason: "threshold", result: { summary: "s", firstKeptEntryId: "e", tokensBefore: 1 }, aborted: false, willRetry: false });
+		h.advance(1);
+		child.emit({ type: "response", id: "control", success: true });
+		child.emit({ type: "message_end", message: { role: "assistant", content: [] } });
+		child.emit({ type: "message_update", assistantMessageEvent: {} });
+		child.emit({ type: "auto_retry_start", attempt: 1, maxAttempts: 2 });
+		child.emit({ type: "compaction_start", reason: "threshold" });
+		child.emit({ type: "compaction_end", reason: "threshold", result: {}, aborted: false, willRetry: false });
+		child.emit({ type: "compaction_start", reason: "threshold" });
+		const active = h.timers.filter((timer) => !timer.cancelled && timer.ms < 10_000);
+		assert.equal(active.length, 1, "non-progress frames do not create a fresh budget");
+		assert.equal(active[0]?.ms, 999, "non-progress frames preserve the remaining original budget");
+		h.runner.cancel(task.id);
+	});
+
+	test("automatic compaction deadline cleanup follows cancellation and child exit", async () => {
+		const cancelled = harness({ automaticCompactionTimeoutMs: 1_000 });
+		const cancelledTask = cancelled.runner.run(request());
+		await tick();
+		cancelled.children[0].emit({ type: "compaction_start", reason: "threshold" });
+		const cancelledTimer = cancelled.timers.find((timer) => timer.ms === 1_000 && !timer.cancelled);
+		assert.ok(cancelledTimer);
+		cancelled.runner.cancel(cancelledTask.id);
+		assert.equal(cancelledTimer.cancelled, true);
+
+		const exited = harness({ automaticCompactionTimeoutMs: 1_000 });
+		const exitedTask = exited.runner.run(request());
+		await tick();
+		exited.children[0].emit({ type: "compaction_start", reason: "threshold" });
+		const exitedTimer = exited.timers.find((timer) => timer.ms === 1_000 && !timer.cancelled);
+		assert.ok(exitedTimer);
+		exited.children[0].exit(0);
+		await exited.runner.waitFor(exitedTask.id);
+		assert.equal(exitedTimer.cancelled, true);
 	});
 
 	test("steering reports requested state before child receipt and records RPC rejection", async () => {

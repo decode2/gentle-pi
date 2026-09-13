@@ -131,6 +131,16 @@ test("parseAgentsConfig applies defaults, validates values, and silently ignores
 	assert.equal(parseAgentsConfig({ default_mode: "background" }, undefined).defaultMode, AGENT_MODE.BACKGROUND);
 });
 
+test("automatic compaction timeout defaults to ten minutes and accepts only safe positive timer integers", () => {
+	const defaults = parseAgentsConfig(undefined, undefined) as unknown as Record<string, unknown>;
+	assert.equal(defaults.automaticCompactionTimeoutMs, 600_000);
+	assert.equal((parseAgentsConfig({ automatic_compaction_timeout_ms: 1 }, undefined) as unknown as Record<string, unknown>).automaticCompactionTimeoutMs, 1);
+	assert.equal((parseAgentsConfig({ automatic_compaction_timeout_ms: 2_147_483_647 }, undefined) as unknown as Record<string, unknown>).automaticCompactionTimeoutMs, 2_147_483_647);
+	for (const value of [0, -1, 1.5, Infinity, 2_147_483_648, "600000"]) {
+		assert.equal((parseAgentsConfig({ automatic_compaction_timeout_ms: value }, undefined) as unknown as Record<string, unknown>).automaticCompactionTimeoutMs, 600_000, String(value));
+	}
+});
+
 test("resolveAgentProfile prefers the profile, then the definition, then the defaults", () => {
 	const config = parseAgentsConfig({ default_model: "openai-codex/gpt-6-astra", default_effort: "medium", model_profiles: { "gentle-ai-explore": { effort: "high" } } }, undefined);
 	const explore = parseAgentDefinition(EXPLORER, "/x/explore.md", "global");
