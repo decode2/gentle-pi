@@ -31,6 +31,7 @@ export interface QuestionOptionControlTheme {
 	description(text: string): string;
 	preview(text: string): string;
 	hoverBackground(text: string): string;
+	focusBackground?: (text: string) => string;
 }
 
 type ContainerMouseResult = ReturnType<Container["handleMouse"]>;
@@ -191,7 +192,10 @@ export class QuestionOptionControl extends Container {
 
 	private addRow(item: QuestionOptionControlItem): void {
 		const text = new Text("", 1, 0);
-		const box = new Box(0, 0, (value) => this.hoveredId === item.id ? this.theme.hoverBackground(value) : value);
+		const box = new Box(0, 0, (value) => this.hoveredId === item.id
+			? this.theme.hoverBackground(value)
+			: this.focusedIndex === this.indexOf(item.id)
+				? (this.theme.focusBackground?.(value) ?? this.theme.hoverBackground(value)) : value);
 		box.addChild(text);
 		this.rows.push({ item, text, box });
 		this.addChild(this.pointerScope.wrap(box, {
@@ -220,7 +224,11 @@ export class QuestionOptionControl extends Container {
 
 	private focus(index: number, emit: boolean): boolean {
 		const next = Math.max(0, Math.min(this.items.length - 1, index));
-		if (this.items.length === 0 || next === this.focusedIndex) return false;
+		if (this.items.length === 0) return false;
+		if (next === this.focusedIndex) {
+			this.refreshRows();
+			return false;
+		}
 		this.focusedIndex = next;
 		this.refreshRows();
 		if (emit) this.onAction?.({ type: "focus-option", index: next, option: this.items[next]! });

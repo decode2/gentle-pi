@@ -137,7 +137,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (this.disposed || this.collapsed || this.renderedWidth === undefined || this.renderedTerminalRows === undefined || this.renderedHeight === undefined ||
 			Math.max(0, Math.floor(this.presentationOptions.tui.terminal.rows)) !== this.renderedTerminalRows ||
 			event.width !== this.renderedWidth || event.height !== this.renderedHeight) return undefined;
-		const controls = Math.min(this.renderedHeight, 2);
+		const controls = Math.min(this.renderedHeight, 1);
 		const footerGap = this.renderedHeight > controls ? 1 : 0;
 		if (event.type === "wheel") {
 			if (event.y >= this.bodyVisibleHeight || !event.wheelDelta) return undefined;
@@ -208,10 +208,10 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (bounded === 0 || terminalRows === 0) return [];
 		const document = super.render(bounded).map((line) => truncateToWidth(line, bounded, ""));
 		this.documentHeight = document.length;
-		this.footerStart = Math.max(0, document.length - 2);
+		this.footerStart = Math.max(0, document.length - 1);
 		this.bodyVirtualHeight = this.footerStart;
-		const height = Math.min(terminalRows, this.bodyVirtualHeight + 3);
-		const controls = Math.min(height, 2);
+		const height = Math.min(terminalRows, this.bodyVirtualHeight + 2);
+		const controls = Math.min(height, 1);
 		const footerGap = height > controls ? 1 : 0;
 		this.bodyVisibleHeight = height - controls - footerGap;
 		const maximum = Math.max(0, this.bodyVirtualHeight - this.bodyVisibleHeight);
@@ -719,45 +719,42 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 			}
 			const prefix = this.localize("chrome.question.prefix", "Question {index}:").replaceAll("{index}", String(index + 1));
 			this.addChild(new Text(this.presentationOptions.theme.bold(`${prefix} ${display(question.question)}`), 1, 0));
-			const options = this.localize("chrome.tab.options", "Options");
 			const custom = this.localize("chrome.tab.custom", "Custom answer");
-			const optionTab = this.state.tabs[index] === "options" ? `[${options}]` : options;
-			const customTab = this.state.tabs[index] === "custom" ? `[${custom}]` : custom;
-			this.addChild(this.clickable(optionTab, () => this.setTab("options")));
-			this.addChild(this.clickable(customTab, () => this.setTab("custom"), undefined, { type: "custom" }));
+			this.optionControl = new QuestionOptionControl({
+				items: question.options.map((option, optionIndex) => ({ id: String(optionIndex), ...option })),
+				multiSelect: question.multiSelect,
+				inlinePreview: question.multiSelect,
+				selectedIds: question.multiSelect
+					? question.options.flatMap((option, optionIndex) => this.state.multiSelections[index]!.includes(option.label) ? [String(optionIndex)] : [])
+					: question.options.flatMap((option, optionIndex) => this.state.optionSelections[index] === option.label ? [String(optionIndex)] : []),
+				focusedId: this.optionFocus?.questionIndex === index ? this.optionFocus.id : undefined,
+				theme: optionTheme(this.presentationOptions.theme, () => this.keyboardFocus.type === "option"), keybindings: this.presentationOptions.keybindings, localize: this.presentationOptions.localize,
+				onAction: (action) => this.handleOption(action), onCancel: () => this.finish({ type: "cancel" }),
+			});
+			if (question.multiSelect) this.addChild(this.optionControl);
+			else {
+				this.optionLayout = new QuestionOptionPreviewLayout({
+					control: this.optionControl,
+					hasPreview: question.options.some((option) => option.preview !== undefined),
+					theme: this.presentationOptions.theme, localize: this.presentationOptions.localize,
+				});
+				this.addChild(this.optionLayout);
+			}
+			this.addChild(this.clickable(custom, () => this.setTab("custom"), undefined, { type: "custom" }));
 			if (this.editing) {
 				this.addChild(new Text(this.presentationOptions.theme.fg("muted", editorLabel(this.editing, this.localize.bind(this))), 1, 0));
 				this.addChild(this.editor!);
-			} else if (this.state.tabs[index] === "custom") {
-				this.addChild(new Text(this.presentationOptions.theme.fg("muted", `${this.localize("chrome.custom.response", "Custom response:")} ${display(this.state.customDrafts[index] ?? "")}`), 1, 0));
 			} else {
-				this.optionControl = new QuestionOptionControl({
-					items: question.options.map((option, optionIndex) => ({ id: String(optionIndex), ...option })),
-					multiSelect: question.multiSelect,
-					inlinePreview: question.multiSelect,
-					selectedIds: question.multiSelect
-						? question.options.flatMap((option, optionIndex) => this.state.multiSelections[index]!.includes(option.label) ? [String(optionIndex)] : [])
-						: question.options.flatMap((option, optionIndex) => this.state.optionSelections[index] === option.label ? [String(optionIndex)] : []),
-					focusedId: this.optionFocus?.questionIndex === index ? this.optionFocus.id : undefined,
-					theme: optionTheme(this.presentationOptions.theme, () => this.keyboardFocus.type === "option"), keybindings: this.presentationOptions.keybindings, localize: this.presentationOptions.localize,
-					onAction: (action) => this.handleOption(action), onCancel: () => this.finish({ type: "cancel" }),
-				});
-				if (question.multiSelect) {
-					this.addChild(this.optionControl);
-				} else {
-					this.optionLayout = new QuestionOptionPreviewLayout({
-						control: this.optionControl,
-						hasPreview: question.options.some((option) => option.preview !== undefined),
-						theme: this.presentationOptions.theme,
-						localize: this.presentationOptions.localize,
-					});
-					this.addChild(this.optionLayout);
-				}
+				const draft = this.state.customDrafts[index];
+				if (draft !== undefined) this.addChild(new Text(this.presentationOptions.localize ? `${this.localize("chrome.custom.response", "Custom response:")} ${display(draft)}` : display(draft), 1, 0));
+				this.addChild(new Text(this.presentationOptions.theme.fg("dim", this.localize("chrome.navigation.escape", "Esc to cancel")), 1, 0));
 			}
 			const primary = index === request.questions.length - 1
 				? this.localize("chrome.primary.submit", "Submit") : this.localize("chrome.primary.next", "Next");
-			this.addChild(this.clickable(primary, () => this.activatePrimary(), "primary", { type: "primary" }));
-			this.addChild(this.clickable(this.localize("chrome.cancel", "Cancel"), () => this.finish({ type: "cancel" }), "cancel", { type: "cancel" }));
+			const cancel = this.localize("chrome.cancel", "Cancel");
+			const primaryButton = this.clickable(`[${primary}]`, () => this.activatePrimary(), "primary", { type: "primary" });
+			const cancelButton = this.clickable(cancel, () => this.finish({ type: "cancel" }), "cancel", { type: "cancel" });
+			this.addChild(new QuestionnaireFooterRow(primaryButton, cancelButton, visibleWidth(`[${primary}]`) + 2, visibleWidth(cancel) + 2));
 		} finally {
 			this.rebuilding = false;
 		}
@@ -796,12 +793,21 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	private clickable(
 		text: string, action: () => void, footer?: "primary" | "cancel", keyboardTarget?: KeyboardFocusTarget,
 	): Component {
-		const box = new Box(0, 0, (value) => footer !== undefined && this.hoveredFooter === footer
-			? this.presentationOptions.theme.bg("selectedBg", value) : value);
-		const prefix = keyboardTarget !== undefined && this.sameKeyboardFocus(this.keyboardFocus, keyboardTarget)
-			? this.presentationOptions.theme.fg("accent", "→ ") : "";
-		box.addChild(new Text(`${prefix}${this.presentationOptions.theme.fg("dim", text)}`, 1, 0));
+		const focused = keyboardTarget !== undefined && this.sameKeyboardFocus(this.keyboardFocus, keyboardTarget);
+		const box = new Box(0, 0, (value) => focused
+			? this.presentationOptions.theme.bg("selectedBg", value)
+			: footer !== undefined && this.hoveredFooter === footer
+				? this.presentationOptions.theme.bg("selectedBg", value) : value);
+		const prefix = focused ? this.presentationOptions.theme.fg("accent", "→ ") : "";
+		box.addChild(new Text(`${prefix}${this.presentationOptions.theme.fg(focused ? "accent" : "dim", text)}`, 0, 0));
 		return this.pointerScope.wrap(box, {
+			onPress: (event) => {
+				if (keyboardTarget === undefined || event.button !== "left") return undefined;
+				this.keyboardFocus = keyboardTarget;
+				this.pointerFocusRefreshPending = true;
+				this.presentationOptions.tui.requestRender();
+				return { handled: true, focus: true };
+			},
 			onHover: () => {
 				if (footer === undefined || this.hoveredFooter === footer) return undefined;
 				this.hoveredFooter = footer;
@@ -823,17 +829,23 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 
 	private handleOption(action: QuestionOptionControlAction): void {
 		if (this.disposed || this.rebuilding || this.finishing) return;
+		const index = this.state.activeQuestionIndex;
 		if (action.type === "focus-option") this.followKeyboardFocus = false;
 		this.keyboardFocus = { type: "option", id: action.option.id };
-		this.optionFocus = { questionIndex: this.state.activeQuestionIndex, id: action.option.id };
+		this.optionFocus = { questionIndex: index, id: action.option.id };
+		if (this.state.tabs[index] !== "options") {
+			if (this.editing) this.closeEditor(false);
+			this.state = reduceQuestionnairePresentation(this.state, { type: "set-tab", questionIndex: index, tab: "options" });
+		}
 		if (action.type === "focus-option") {
 			// Refresh on the next render, after the pointer callback unwinds, so old regions remain valid.
 			this.pointerFocusRefreshPending = true;
 			return;
 		}
 		const label = action.option.label;
-		if (action.type === "select-option") this.dispatch({ type: "select-option", questionIndex: this.state.activeQuestionIndex, label });
-		if (action.type === "toggle-option") this.dispatch({ type: "toggle-option", questionIndex: this.state.activeQuestionIndex, label });
+		if (this.state.tabs[index] !== "options") return;
+		if (action.type === "select-option") this.dispatch({ type: "select-option", questionIndex: index, label });
+		if (action.type === "toggle-option") this.dispatch({ type: "toggle-option", questionIndex: index, label });
 	}
 }
 
@@ -1100,8 +1112,64 @@ function optionTheme(theme: QuestionnaireTuiPresentationTheme, keyboardActive: (
 	return {
 		selectedPrefix: (text: string) => keyboardActive() ? theme.fg("accent", text) : "  ",
 		selectedText: (text: string) => keyboardActive() ? theme.fg("accent", text) : text,
-		description: (text: string) => theme.fg("muted", text), preview: (text: string) => theme.fg("dim", text), hoverBackground: (text: string) => theme.bg("selectedBg", text),
+		description: (text: string) => theme.fg("muted", text), preview: (text: string) => theme.fg("dim", text),
+		hoverBackground: (text: string) => theme.bg("selectedBg", text),
+		focusBackground: (text: string) => keyboardActive() ? theme.bg("selectedBg", text) : text,
 	};
+}
+
+class QuestionnaireFooterRow implements Component {
+	private readonly primary: Component;
+	private readonly cancel: Component;
+	private readonly primaryPreferred: number;
+	private readonly cancelPreferred: number;
+	private lastWidth: number | undefined;
+	private primaryWidth = 0;
+	private cancelWidth = 0;
+	private gap = 0;
+
+	constructor(primary: Component, cancel: Component, primaryPreferred: number, cancelPreferred: number) {
+		this.primary = primary;
+		this.cancel = cancel;
+		this.primaryPreferred = primaryPreferred;
+		this.cancelPreferred = cancelPreferred;
+	}
+
+	render(width: number): string[] {
+		const bounded = Math.max(0, Math.floor(width));
+		this.lastWidth = bounded;
+		if (bounded === 0) return [];
+		this.gap = Math.min(3, Math.max(1, bounded - this.primaryPreferred - this.cancelPreferred));
+		const available = Math.max(0, bounded - this.gap);
+		this.primaryWidth = Math.min(this.primaryPreferred, available);
+		this.cancelWidth = Math.min(this.cancelPreferred, Math.max(0, available - this.primaryWidth));
+		if (this.cancelWidth === 0 && available > 0) {
+			this.cancelWidth = 1;
+			this.primaryWidth = Math.max(0, available - 1);
+		}
+		const primary = this.primaryWidth > 0 ? this.primary.render(this.primaryWidth)[0] ?? "" : "";
+		const cancel = this.cancelWidth > 0 ? this.cancel.render(this.cancelWidth)[0] ?? "" : "";
+		return [primary + " ".repeat(this.gap) + cancel];
+	}
+
+	handleMouse(event: TuiMouseEvent) {
+		const width = Math.max(0, Math.floor(event.width));
+		if (this.lastWidth !== width || event.y !== 0 || event.x < 0 || event.x >= width) return undefined;
+		if (event.x < this.primaryWidth && this.primaryWidth > 0) {
+			return this.primary.handleMouse?.({ ...event, width: this.primaryWidth });
+		}
+		const cancelStart = this.primaryWidth + this.gap;
+		if (event.x >= cancelStart && event.x < cancelStart + this.cancelWidth && this.cancelWidth > 0) {
+			return this.cancel.handleMouse?.({ ...event, x: event.x - cancelStart, width: this.cancelWidth });
+		}
+		return { handled: true };
+	}
+
+	invalidate(): void {
+		this.lastWidth = undefined;
+		this.primary.invalidate();
+		this.cancel.invalidate();
+	}
 }
 
 function editorLabel(editing: Exclude<Editing, undefined>, localize: QuestionnaireLocalizer): string {
