@@ -34,6 +34,12 @@ function row(control: QuestionOptionControl, width: number, label: string) {
 	return { lines, y };
 }
 
+function rowHasHover(lines: readonly string[], label: string): boolean {
+	const line = lines.find((value) => stripTerminalSequences(value).includes(label));
+	assert.ok(line !== undefined, `layout contains ${label}`);
+	return line!.includes(hover);
+}
+
 test("keyboard focus exposes exact authored preview metadata and selects without committing", () => {
 	const actions: QuestionOptionControlAction[] = [];
 	const control = new QuestionOptionControl({ items, multiSelect: false, theme, onAction: (action) => actions.push(action) });
@@ -95,7 +101,9 @@ test("hover is visual only while mouse press focuses, click activates, and wheel
 	const staged = row(control, 42, "Staged");
 	assert.equal(control.handleMouse(mouse("move", "none", staged.y, 42, staged.lines.length))?.render, true);
 	assert.equal(control.getFocusedOption(), items[0], "hover must not move keyboard focus");
-	assert.match(control.render(42).join("\n"), new RegExp(hover.replace(/[\[\]]/g, "\\$&")));
+	const hovered = control.render(42);
+	assert.equal(rowHasHover(hovered, "Staged"), true, "the independently hovered row uses the hover background");
+	assert.equal(rowHasHover(hovered, "Direct"), rowHasHover(staged.lines, "Direct"), "the focused row keeps its baseline background");
 	assert.equal(control.handleMouse(mouse("press", "left", staged.y, 42, staged.lines.length))?.focus, true);
 	assert.deepEqual(actions.at(-1), { type: "focus-option", index: 1, option: items[1] });
 	control.handleMouse(mouse("click", "left", staged.y, 42, staged.lines.length));
@@ -110,7 +118,9 @@ test("display sanitizes terminal controls without mutating exact callback data o
 	const control = new QuestionOptionControl({ items: [raw, items[1]], multiSelect: false, theme, onAction: (action) => actions.push(action) });
 	const narrow = row(control, 18, "Raw");
 	control.handleMouse(mouse("move", "none", narrow.y, 18, narrow.lines.length));
-	assert.doesNotMatch(control.render(28).join("\n"), new RegExp(hover.replace(/[\[\]]/g, "\\$&")));
+	const resized = control.render(28);
+	assert.equal(rowHasHover(resized, "Staged"), rowHasHover(narrow.lines, "Staged"), "a width change clears hover from the non-focused row");
+	assert.equal(rowHasHover(resized, "Raw"), rowHasHover(narrow.lines, "Raw"), "a width change preserves the focused row baseline");
 	control.handleInput("\r");
 	assert.deepEqual(actions.at(-1), { type: "select-option", index: 0, option: raw });
 	assert.equal(raw.label, "\u001b[31mRaw\u001b[0m\nLine");
@@ -147,7 +157,9 @@ test("requires a fresh frame for pointer actions and disposes permanently", () =
 	control.handleMouse(mouse("move", "none", staged.y, 42, staged.lines.length));
 	control.invalidate();
 	assert.equal(control.handleMouse(stale), undefined, "invalidated geometry cannot route clicks");
-	assert.doesNotMatch(control.render(42).join("\n"), new RegExp(hover.replace(/[\[\]]/g, "\\$&")));
+	const afterInvalidate = control.render(42);
+	assert.equal(rowHasHover(afterInvalidate, "Staged"), rowHasHover(staged.lines, "Staged"), "invalidating geometry resets the non-focused hover to baseline");
+	assert.equal(rowHasHover(afterInvalidate, "Direct"), rowHasHover(staged.lines, "Direct"), "invalidating geometry preserves the focused row baseline");
 	const fresh = row(control, 42, "Staged");
 	control.handleMouse(mouse("click", "left", fresh.y, 42, fresh.lines.length));
 	control.setItems([{ id: "new", label: "New", description: "Fresh." }, items[1]]);
@@ -183,7 +195,9 @@ test("rejects pointer events whose width differs from the rendered frame", () =>
 	assert.equal(control.handleMouse(mouse("move", "none", staged.y, 41, staged.lines.length)), undefined);
 	assert.equal(control.handleMouse(mouse("click", "left", staged.y, 41, staged.lines.length)), undefined);
 	assert.deepEqual([...actions], []);
-	assert.doesNotMatch(control.render(42).join("\n"), new RegExp(hover.replace(/[\[\]]/g, "\\$&")));
+	const afterWidthMismatch = control.render(42);
+	assert.equal(rowHasHover(afterWidthMismatch, "Staged"), rowHasHover(staged.lines, "Staged"), "a mismatched width cannot hover the non-focused row");
+	assert.equal(rowHasHover(afterWidthMismatch, "Direct"), rowHasHover(staged.lines, "Direct"), "a mismatched width preserves the focused row baseline");
 	control.render(0);
 	assert.equal(control.handleMouse(mouse("click", "left", staged.y, 42, staged.lines.length)), undefined);
 	const fresh = row(control, 42, "Staged");
@@ -200,16 +214,20 @@ test("mouse observers follow item replacement and become inert after disposal", 
 	const observer = control.createMouseObserver(() => { renders++; });
 	control.setItems([{ id: "new", label: "New", description: "Fresh." }, items[1]]);
 	const fresh = row(control, 42, "New");
+	control.setFocusedId(items[1].id);
+	const baseline = control.render(42);
 	const inside = mouse("move", "none", fresh.y, 42, fresh.lines.length);
 	observer.beforeMouse(inside);
 	control.handleMouse(inside);
 	observer.afterMouse(inside);
-	assert.match(control.render(42).join("\n"), new RegExp(hover.replace(/[\[\]]/g, "\\$&")));
+	const hovered = control.render(42);
+	assert.equal(rowHasHover(hovered, "New"), true, "the replaced non-focused row responds to observer hover");
 	const outside = mouse("move", "none", fresh.lines.length, 42, fresh.lines.length + 1);
 	observer.beforeMouse(outside);
 	control.handleMouse(outside);
 	observer.afterMouse(outside);
-	assert.doesNotMatch(control.render(42).join("\n"), new RegExp(hover.replace(/[\[\]]/g, "\\$&")));
+	const reset = control.render(42);
+	assert.equal(rowHasHover(reset, "New"), rowHasHover(baseline, "New"), "leaving the row restores its baseline background");
 	control.dispose();
 	observer.beforeMouse(inside);
 	observer.afterMouse(inside);

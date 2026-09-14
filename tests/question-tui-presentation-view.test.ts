@@ -614,7 +614,9 @@ test("closing custom editing keeps its draft, returns option controls, and cance
 	const narrowDraft = component.render(20).map((line) => stripTerminalSequences(line));
 	assert.ok(narrowDraft.every((line) => visibleWidth(line) <= 20));
 	assert.ok(narrowDraft.some((line) => line.includes("draft kept")), "the narrow editor exposes the first wrapped draft segment");
-	assert.ok(narrowDraft.some((line) => line.includes("browsing options")), "the narrow editor exposes the final wrapped draft segment");
+	const normalizedNarrowDraft = narrowDraft.join("\n").replace(/\s+/g, " ").trim();
+	assert.ok(normalizedNarrowDraft.includes("draft kept while browsing options"),
+		`the narrow editor preserves the complete draft across wrapped rows; rendered frame:\n${narrowDraft.map((line, index) => `${index}: ${line}`).join("\n")}`);
 	clickVisible(component, "Cancel");
 	component.handleInput("n");
 	component.handleInput("s");

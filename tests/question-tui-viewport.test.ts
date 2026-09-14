@@ -8,9 +8,10 @@ import { createFrozenQuestionnaireRequest } from "../lib/questions/validation.ts
 // Markdown delegates styling to the SDK's process-wide theme callbacks.
 initTheme("dark");
 
+const SELECTED_BACKGROUND = "\u001b[48;5;24m";
 const theme = {
 	fg: (_color: string, text: string) => text,
-	bg: (_color: string, text: string) => `\u001b[48;5;24m${text}\u001b[49m`,
+	bg: (_color: string, text: string) => `${SELECTED_BACKGROUND}${text}\u001b[49m`,
 	bold: (text: string) => text,
 };
 
@@ -120,6 +121,25 @@ function frame(component: QuestionnaireTuiPresentation, width: number, rows: num
 
 function text(lines: readonly string[]): string[] {
 	return lines.map((line) => stripTerminalSequences(line).trim());
+}
+
+function rowHasSelectedBackground(lines: readonly string[], label: string): boolean {
+	const line = lines.find((value) => stripTerminalSequences(value).includes(label));
+	assert.ok(line !== undefined, `layout contains ${label}`);
+	return line!.includes(SELECTED_BACKGROUND);
+}
+
+function scrollBodyUntil(
+	component: QuestionnaireTuiPresentation, width: number, rows: number, label: string, wheelDelta = 1, maxSteps = 320,
+): string[] {
+	let lines = frame(component, width, rows);
+	for (let step = 0; step < maxSteps; step++) {
+		if (text(lines).some((line) => line.includes(label))) return lines;
+		assert.equal(component.handleMouse(event("wheel", 0, width, lines.length, "none", wheelDelta))?.handled, true,
+			`bounded body scrolling remains handled while revealing ${label}`);
+		lines = frame(component, width, rows);
+	}
+	return lines;
 }
 
 type ActionLabel = "Next" | "Submit" | "Cancel";
@@ -254,7 +274,7 @@ test("fresh pointer press/click advances an explicit first answer, then Submit f
 	const rows = 24;
 	const component = view(rows, (outcome) => outcomes.push(outcome));
 
-	let lines = frame(component, width, rows);
+	let lines = scrollBodyUntil(component, width, rows, "Custom answer");
 	const custom = text(lines).findIndex((line) => line === "Custom answer");
 	assert.ok(custom >= 0, "the free-answer control is pointer-reachable in the visible body");
 	component.handleMouse(event("press", custom, width, lines.length));
@@ -281,25 +301,46 @@ test("fresh pointer press/click advances an explicit first answer, then Submit f
 	assert.equal(outcomes.length, 1, "Submit finalizes only after the explicit last-question answer");
 });
 
+test("cross-question rebuild keeps focus owned by the new question", () => {
+	const component = view(24, () => {}, request());
+	component.handleInput("\u001b[B");
+	component.handleInput("\r");
+	component.handleInput("n");
+	const lines = frame(component, 32, 24);
+	assert.match(text(lines).join("\n"), /every check that/);
+	assert.ok(focusedKeyboardRow(lines, "Unit") < keyboardActionRow(lines, "Submit"),
+		"advancing after focusing the prior question's second option starts the new question at Unit");
+	assert.equal(text(lines).some((line) => isFocusedControlLine(line, "Integration")), false,
+		"the prior question's focused option is not reused by the new question");
+});
+
 test("option and footer hover use the host theme background and reset on the inert footer gap", () => {
 	const width = 32;
 	const rows = 24;
 	const component = view(rows);
 	const before = frame(component, width, rows);
-	const option = text(before).findIndex((line) => line.includes("Direct"));
-	assert.ok(option >= 0 && option < before.length, "an option is visible in the capped body frame");
+	const option = text(before).findIndex((line) => line.includes("Staged"));
+	assert.ok(option >= 0 && option < before.length, "a non-focused option is visible in the capped body frame");
 	component.handleMouse(event("move", option, width, before.length, "none"));
-	assert.match(component.render(width).join("\n"), /\u001b\[48;5;24m/, "option hover applies the selected background token");
+	const hovered = frame(component, width, rows);
+	assert.equal(rowHasSelectedBackground(hovered, "Staged"), true, "the independently hovered row uses the selected background token");
+	assert.equal(rowHasSelectedBackground(hovered, "Direct"), rowHasSelectedBackground(before, "Direct"),
+		"hovering a non-focused row preserves the focused row baseline");
 	const gap = actionRow(before, "Next") - 1;
 	assert.equal(text(before)[gap], "", "the footer is preceded by one inert gap");
 	component.handleMouse(event("move", gap, width, before.length, "none"));
-	assert.doesNotMatch(component.render(width).join("\n"), /\u001b\[48;5;24m/, "moving onto the gap restores the unhovered option background");
+	const reset = frame(component, width, rows);
+	assert.equal(rowHasSelectedBackground(reset, "Staged"), rowHasSelectedBackground(before, "Staged"),
+		"moving onto the gap restores the non-focused option baseline");
+	assert.equal(rowHasSelectedBackground(reset, "Direct"), rowHasSelectedBackground(before, "Direct"),
+		"moving onto the gap preserves the focused option baseline");
 
 	const current = frame(component, width, rows);
 	const next = actionRow(current, "Next");
 	assert.ok(next < current.length, "the footer action is inside the capped frame before hover");
 	component.handleMouse(event("move", next, width, current.length, "none"));
-	assert.match(component.render(width).join("\n"), /\u001b\[48;5;24m/, "action hover applies the same theme background");
+	const footerHovered = frame(component, width, rows);
+	assert.equal(footerHovered[next]!.includes(SELECTED_BACKGROUND), true, "action hover applies the same theme background to its own row");
 });
 
 test("wheel scrolls the long body while the sticky footer remains inside the terminal frame", () => {
@@ -374,13 +415,14 @@ test("body wheel scrolling preserves its manual position until keyboard focus mo
 	let scrolledAway = false;
 	let reachedTail = hasVisibleMatrixTail(lines);
 	const maxBodyWheelSteps = 320;
-	for (let index = 0; index < maxBodyWheelSteps && !reachedTail; index++) {
+	for (let index = 0; index < maxBodyWheelSteps && (!scrolledAway || !reachedTail); index++) {
 		const currentCustom = text(lines).findIndex((line) => isFocusedControlLine(line, "Custom answer"));
 		const wheelRow = currentCustom >= 0 ? currentCustom : 0;
 		if (currentCustom < 0) scrolledAway = true;
-		assert.equal(component.handleMouse(event("wheel", wheelRow, width, lines.length, "none", 1))?.handled, true,
+		assert.equal(component.handleMouse(event("wheel", wheelRow, width, lines.length, "none", -1))?.handled, true,
 			"a wheel at the body stays body-owned instead of being treated as preview input");
 		lines = frame(component, width, rows);
+		scrolledAway = scrolledAway || !text(lines).some((line) => isFocusedControlLine(line, "Custom answer"));
 		reachedTail = hasVisibleMatrixTail(lines);
 	}
 	assert.equal(scrolledAway, true, "manual body scrolling may move the focused control out of view");
@@ -502,8 +544,9 @@ test("manual body scroll can browse out of a focused Editor and typing reveals i
 	lines = frame(component, width, host.terminal.rows);
 	const direct = text(lines).findIndex((line) => line.includes("Direct"));
 	assert.ok(direct >= 0, "Escape closes editing and restores authored options after manual body scrolling");
+	lines = scrollBodyUntil(component, width, host.terminal.rows, "Custom answer");
 	const reopen = text(lines).findIndex((line) => line === "Custom answer");
-	assert.ok(reopen >= 0, "closing the editor keeps its custom draft available to reopen");
+	assert.ok(reopen >= 0, "bounded body scrolling reveals the custom draft control to reopen");
 	component.handleMouse(event("press", reopen, width, lines.length));
 	component.handleMouse(event("click", reopen, width, lines.length));
 	component.handleInput("typing again");

@@ -69,6 +69,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	private state: QuestionnairePresentationState;
 	private pointerScope = new NativePointerScope();
 	private optionControl: QuestionOptionControl | undefined;
+	private optionControlQuestionIndex: number | undefined;
 	private optionLayout: QuestionOptionPreviewLayout | undefined;
 	private optionFocus: { readonly questionIndex: number; readonly id: string } | undefined;
 	private editor: Editor | undefined;
@@ -705,7 +706,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 			this.renderedHeight = undefined;
 			this.hoveredFooter = undefined;
 			const focused = this.optionControl?.getFocusedOption();
-			if (focused) this.optionFocus = { questionIndex: this.state.activeQuestionIndex, id: focused.id };
+			if (focused) this.optionFocus = { questionIndex: this.optionControlQuestionIndex ?? this.state.activeQuestionIndex, id: focused.id };
 			this.pointerScope.invalidate();
 			this.pointerScope.dispose();
 			this.pointerScope = new NativePointerScope();
@@ -731,6 +732,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 				theme: optionTheme(this.presentationOptions.theme, () => this.keyboardFocus.type === "option"), keybindings: this.presentationOptions.keybindings, localize: this.presentationOptions.localize,
 				onAction: (action) => this.handleOption(action), onCancel: () => this.finish({ type: "cancel" }),
 			});
+			this.optionControlQuestionIndex = index;
 			if (question.multiSelect) this.addChild(this.optionControl);
 			else {
 				this.optionLayout = new QuestionOptionPreviewLayout({
@@ -788,6 +790,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		this.optionLayout = undefined;
 		this.optionControl?.dispose();
 		this.optionControl = undefined;
+		this.optionControlQuestionIndex = undefined;
 	}
 
 	private clickable(
