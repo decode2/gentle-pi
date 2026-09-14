@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { FIXED_WINDOWS_POWERSHELL, WindowsActiveSessionClient, WindowsActiveSessionListener, WindowsSessionPresenceRegistry, WindowsSessionRegistryPhaseSequence, type WindowsSessionRegistryPhaseEvent, parseWindowsHostFrame } from "../lib/windows-session-transport.ts";
 import { createDefaultSessionTransport } from "../extensions/gentle-agents.ts";
 import { ActiveSessionClientError, FrameDecoder, encodeNotificationFrame, type AckFrame } from "../lib/agents-session-transport.ts";
-import { decidePackedRunnerEntrypoint, deriveWindowsStartupTimingPathDelta, validateWindowsStartupTimingMachinePaths, WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS } from "../scripts/test-packed-runner.mjs";
+import { decidePackedRunnerEntrypoint, deriveWindowsStartupTimingPathDelta, newWindowsStartupTimingReceipt, reportWindowsStartupTimingEnvironmentReceipt, reportWindowsStartupTimingReceipt, runWindowsStartupTimingProbe, validateWindowsStartupTimingMachinePaths, WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS } from "../scripts/test-packed-runner.mjs";
 
 const runtime = fileURLToPath(new URL("../runtime/windows-session-transport.ps1", import.meta.url));
 const fixture = fileURLToPath(new URL("fixtures/windows-session-bootstrap.ps1", import.meta.url));
@@ -523,6 +523,96 @@ class FakeHelperChild extends EventEmitter {
 const fakeCleanupDeadlines = Object.freeze({ initialDeadlineMs: 40, responseDeadlineMs: 20, terminateMs: 10, killMs: 10 });
 const unexpectedBootstrapDiagnostic: BootstrapDiagnosticContext = Object.freeze({ diagnostic: () => assert.fail("unexpected Windows bootstrap rejection diagnostic") });
 
+function probeWithNeutralSeams(outputChunks = ['{"event":"startup-marker","marker":"script-entered"}\n']) {
+	const child = new FakeHelperChild();
+	const timers = new Map<number, { dueAt: bigint; order: number; callback: () => void }>();
+	const microtasks: (() => void)[] = [];
+	let nextTimer = 0;
+	let clock = 0n;
+	child.kill = () => { child.killCalls++; microtasks.push(() => child.emit("close", 0)); return true; };
+	child.onEnd = () => {
+		outputChunks.forEach((chunk, index) => {
+			clock = BigInt((index + 1) * 1_000) * 1_000_000n;
+			child.stdout.emit("data", Buffer.from(chunk));
+		});
+		clock = 0n;
+	};
+	const promise = runWindowsStartupTimingProbe("runtime.ps1", {}, "C:\\work", {
+		spawnProcess: () => child as unknown as CleanupChild,
+		now: () => clock,
+		setTimeout: (callback: () => void, delay: number) => { const id = ++nextTimer; timers.set(id, { dueAt: clock + BigInt(delay) * 1_000_000n, order: id, callback }); return id; },
+		clearTimeout: (id: number) => { timers.delete(id); },
+	});
+	const drainMicrotasks = () => { while (microtasks.length > 0) microtasks.shift()?.(); };
+	const advance = (at: number, output?: string) => {
+		const target = BigInt(at) * 1_000_000n;
+		if (output !== undefined) { clock = target; child.stdout.emit("data", Buffer.from(output)); }
+		for (;;) {
+			const next = [...timers.entries()].sort(([, left], [, right]) => left.dueAt < right.dueAt || (left.dueAt === right.dueAt && left.order < right.order) ? -1 : 1)[0];
+			if (next === undefined || next[1].dueAt > target) break;
+			timers.delete(next[0]); clock = next[1].dueAt; next[1].callback(); drainMicrotasks();
+		}
+		clock = target;
+		drainMicrotasks();
+	};
+	return { child, timers, promise, advance, drain: () => { advance(30_000); drainMicrotasks(); } };
+}
+
+test("Windows startup timing diagnostics records monotonic marker and deadline observations", async () => {
+	const probe = probeWithNeutralSeams();
+	probe.advance(25_000);
+	probe.advance(25_001, '{"event":"startup-marker","marker":"native-ready"}\n');
+	probe.drain();
+	const result = await probe.promise;
+	assert.deepEqual(result.failure, { stage: "helper-start", code: "timed-out" });
+	assert.equal(result.scriptEnteredElapsedMs, 1_000);
+	assert.equal(result.nativeReadyElapsedMs, 25_001);
+	assert.deepEqual(result.deadlineSnapshot, Object.freeze({ elapsedMs: 25_000, lastStartupMarker: "script-entered", failure: { stage: "helper-start", code: "timed-out" } }));
+	assert.equal(result.lastStartupMarker, "native-ready");
+	assert.equal(probe.timers.size, 0);
+});
+
+test("Windows startup timing diagnostics preserves timeout while classifying a late valid reply", async () => {
+	const probe = probeWithNeutralSeams();
+	probe.advance(25_000);
+	probe.advance(25_002, '{"event":"startup-marker","marker":"native-ready"}\n{"requestId":"start-1","ok":true,"result":{"state":"partial"}}\n');
+	probe.drain();
+	const result = await probe.promise;
+	assert.deepEqual(result.failure, { stage: "helper-start", code: "timed-out" });
+	assert.equal(result.lateValidResponseElapsedMs, 25_002);
+	assert.equal(result.lateValidResponseClassification, "after-deadline");
+	assert.equal(probe.timers.size, 0);
+});
+
+test("Windows startup timing diagnostics treats coalesced and separate late frames equivalently", async () => {
+	const coalesced = probeWithNeutralSeams();
+	const separate = probeWithNeutralSeams();
+	try {
+		coalesced.advance(25_000);
+		coalesced.advance(25_002, '{"event":"startup-marker","marker":"native-ready"}\n{"requestId":"start-1","ok":true,"result":{"state":"partial"}}\n');
+		separate.advance(25_000);
+		separate.advance(25_002, '{"event":"startup-marker","marker":"native-ready"}\n');
+		separate.advance(25_002, '{"requestId":"start-1","ok":true,"result":{"state":"partial"}}\n');
+	} finally {
+		for (const probe of [coalesced, separate]) probe.drain();
+	}
+	const coalescedResult = await coalesced.promise;
+	const separateResult = await separate.promise;
+	for (const result of [coalescedResult, separateResult]) {
+		assert.equal(typeof result.scriptEnteredElapsedMs, "number");
+		assert.equal(typeof result.nativeReadyElapsedMs, "number");
+		assert.deepEqual(result.markerOrder, ["script-entered", "native-ready"]);
+		assert.equal(result.scriptEnteredElapsedMs, 1_000);
+		assert.equal(result.nativeReadyElapsedMs, 25_002);
+		assert.equal(result.lateValidResponseElapsedMs, 25_002);
+		assert.equal(result.lateValidResponseClassification, "after-deadline");
+	}
+	assert.deepEqual(coalescedResult.deadlineSnapshot, separateResult.deadlineSnapshot);
+	assert.deepEqual(coalescedResult.failure, separateResult.failure);
+	assert.equal(coalesced.timers.size, 0);
+	assert.equal(separate.timers.size, 0);
+});
+
 test("owned helper cleanup settles a spawn error without an exit event", async () => {
 	const child = new FakeHelperChild();
 	child.pid = undefined;
@@ -786,18 +876,53 @@ test("packed Windows startup timing source guard uses the installed helper direc
 	const source = await readFile(packedRunner, "utf8");
 	assert.match(source, /const WINDOWS_STARTUP_TIMING_BUDGET_MS = 25_000;/);
 	assert.ok(source.includes('const WINDOWS_STARTUP_TIMING_POWERSHELL = "C:\\\\Windows\\\\System32\\\\WindowsPowerShell\\\\v1.0\\\\powershell.exe";'));
-	assert.match(source, /spawn\(WINDOWS_STARTUP_TIMING_POWERSHELL, \["-NoLogo", "-NoProfile", "-NonInteractive", "-File", runtimeScript\], \{ cwd, env, shell: false, windowsHide: true, stdio: \["pipe", "pipe", "pipe"\] \}\)/);
+	assert.match(source, /spawnProcess\(WINDOWS_STARTUP_TIMING_POWERSHELL, \["-NoLogo", "-NoProfile", "-NonInteractive", "-File", runtimeScript\], \{ cwd, env, shell: false, windowsHide: true, stdio: \["pipe", "pipe", "pipe"\] \}\)/);
+	assert.match(source, /const spawnProcess = options\.spawnProcess \?\? spawn/);
 	assert.match(source, /child\.stdin\.end\(WINDOWS_STARTUP_TIMING_START_REQUEST/);
 	assert.match(source, /WINDOWS_STARTUP_TIMING_VALID_START_REPLIES\.has\(line\) \|\| markerOrdinal !== 2/);
 	assert.match(source, /WINDOWS_STARTUP_TIMING_REJECTED_START_REPLY\.test\(line\)/);
 	assert.match(source, /line\.length >= 3 && line\[0\] === 0xef && line\[1\] === 0xbb && line\[2\] === 0xbf/);
-	assert.match(source, /const elapsedMs = Number\(process\.hrtime\.bigint\(\) - startedAt\) \/ 1e6;/);
+	assert.match(source, /const elapsedMs = Number\(now\(\) - startedAt\) \/ 1e6;/);
+	assert.match(source, /const spawnProcess = options\.spawnProcess \?\? spawn/);
+	assert.match(source, /const now = options\.now \?\? \(\(\) => process\.hrtime\.bigint\(\)\)/);
+	assert.match(source, /const schedule = options\.setTimeout \?\? setTimeout/);
+	assert.match(source, /const cancel = options\.clearTimeout \?\? clearTimeout/);
 	assert.match(source, /mode: "windows-startup-timing"/);
 	assert.doesNotMatch(source, /new WindowsSessionTransportHost\(\{[^}]*rpcDeadlineMs: WINDOWS_STARTUP_TIMING_BUDGET_MS/);
 	const helper = await readFile(runtime, "utf8");
 	assert.match(helper, /function Write-Reply\([\s\S]*?@\{ requestId = \$requestId; ok = \$true; result = \$result \} \| ConvertTo-Json -Compress -Depth 4/);
-	const timingDriver = source.slice(source.indexOf("function runWindowsStartupTimingProbe"), source.indexOf("async function testHookedPackedRunner"));
+	const timingDriver = source.slice(source.indexOf("export function runWindowsStartupTimingProbe"), source.indexOf("async function testHookedPackedRunner"));
 	assert.doesNotMatch(timingDriver, /JSON\.parse/);
+});
+
+test("Windows startup timing diagnostics propagates bounded private observations", () => {
+	const receipt = newWindowsStartupTimingReceipt();
+	Object.assign(receipt, { helperStartOutcome: "timed-out", startElapsedMs: null, lastStartupMarker: "native-ready", cleanup: "close-observed", physicalCloseObserved: true, scriptEnteredElapsedMs: 1_000, nativeReadyElapsedMs: 25_001, markerOrder: ["script-entered", "native-ready"], deadlineSnapshot: { elapsedMs: 25_000, lastStartupMarker: "script-entered" }, lateValidResponseElapsedMs: 25_002, lateValidResponseClassification: "after-deadline", rawPayload: "s".repeat(256) });
+	const stdout: string[] = [];
+	reportWindowsStartupTimingReceipt(receipt, undefined, { stdout: { write: (value: string) => { stdout.push(value); return true; } }, stderr: { write: () => true } });
+	const report = JSON.parse(stdout[0]);
+	const reportedFields = ["scriptEnteredElapsedMs", "nativeReadyElapsedMs", "markerOrder", "deadlineSnapshot", "lateValidResponseElapsedMs", "lateValidResponseClassification"] as const;
+	assert.equal(report.helperStartOutcome, "timed-out");
+	assert.equal(report.startElapsedMs, null);
+	assert.equal(report.lastStartupMarker, "native-ready");
+	assert.equal(typeof report.scriptEnteredElapsedMs, "number");
+	assert.equal(typeof report.nativeReadyElapsedMs, "number");
+	assert.deepEqual(report.markerOrder, ["script-entered", "native-ready"]);
+	for (const field of reportedFields) assert.deepEqual(report[field], (receipt as Record<string, unknown>)[field]);
+	assert.ok(stdout[0].length <= 1025);
+	assert.doesNotMatch(stdout[0], /s{256}/);
+	const environmentOutput: string[] = [];
+	const diagnosticFields = { budgetMs: 25_000, helperStartOutcome: "timed-out", startElapsedMs: null, lastStartupMarker: "native-ready", cleanup: "close-observed", physicalCloseObserved: true, failureStage: "helper-start", failureCode: "timed-out", scriptEnteredElapsedMs: 1_000, nativeReadyElapsedMs: 25_001, deadlineSnapshot: { elapsedMs: 25_000, lastStartupMarker: "script-entered" }, lateValidResponseElapsedMs: 25_002, lateValidResponseClassification: "after-deadline" };
+	const recognizedCases = [
+		{ name: "baseline", pathAdditionKeys: [], ...diagnosticFields },
+		{ name: "windows-paths", pathAdditionKeys: [...WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS], ...diagnosticFields },
+	];
+	reportWindowsStartupTimingEnvironmentReceipt({ checkId: "helper-result", packVerified: false, installCompleted: false, cleanupCompleted: false, cases: recognizedCases }, undefined, { stdout: { write: (value: string) => { environmentOutput.push(value); return true; } }, stderr: { write: () => true } });
+	assert.ok(environmentOutput[0].length <= 2049);
+	const environmentReport = JSON.parse(environmentOutput[0]);
+	assert.deepEqual(environmentReport.cases, recognizedCases);
+	assert.equal(environmentReport.cases.length, 2);
+	assert.deepEqual(environmentReport.cases.map((entry: { name: string; pathAdditionKeys: readonly string[] }) => [entry.name, entry.pathAdditionKeys]), [["baseline", []], ["windows-paths", WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS]]);
 });
 
 test("Windows startup environment delta admits only the fixed machine path allowlist", () => {

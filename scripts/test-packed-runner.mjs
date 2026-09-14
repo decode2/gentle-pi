@@ -104,7 +104,7 @@ function newSdkLifecycleReceipt() {
 	};
 }
 
-function newWindowsStartupTimingReceipt() {
+export function newWindowsStartupTimingReceipt() {
 	return {
 		checkId: "not-attempted", packVerified: false, installCompleted: false, budgetMs: WINDOWS_STARTUP_TIMING_BUDGET_MS,
 		helperStartOutcome: "not-attempted", startElapsedMs: null, lastStartupMarker: null,
@@ -243,7 +243,15 @@ function reportUnhookedReceipt(receipt, error) {
 	if (failure !== undefined) process.exitCode = failure.exitStatus ?? 1;
 }
 
-function reportWindowsStartupTimingReceipt(receipt, error) {
+/** @typedef {{ write(value: string): boolean }} ReportWriter */
+/** @typedef {{ stdout: ReportWriter, stderr: ReportWriter }} ReportWriters */
+
+/**
+ * @param {object} receipt
+ * @param {unknown} error
+ * @param {ReportWriters} [writers]
+ */
+export function reportWindowsStartupTimingReceipt(receipt, error, writers = { stdout: process.stdout, stderr: process.stderr }) {
 	const failure = error instanceof WindowsStartupTimingFailure ? error : undefined;
 	const report = {
 		mode: "windows-startup-timing",
@@ -264,11 +272,16 @@ function reportWindowsStartupTimingReceipt(receipt, error) {
 	const boundedLine = Buffer.byteLength(line, "utf8") <= MAX_WINDOWS_STARTUP_TIMING_REPORT_BYTES
 		? line
 		: '{"mode":"windows-startup-timing","status":"failed","checkId":"not-attempted","packVerified":false,"installCompleted":false,"budgetMs":25000,"helperStartOutcome":"not-attempted","startElapsedMs":null,"lastStartupMarker":null,"cleanup":"not-attempted","physicalCloseObserved":false,"cleanupCompleted":false,"stage":"cleanup","code":"unknown"}';
-	try { (failure === undefined ? process.stdout : process.stderr).write(`${boundedLine}\n`); } catch { /* Reporting cannot expose a raw secondary error. */ }
+	try { (failure === undefined ? writers.stdout : writers.stderr).write(`${boundedLine}\n`); } catch { /* Reporting cannot expose a raw secondary error. */ }
 	if (failure !== undefined) process.exitCode = 1;
 }
 
-function reportWindowsStartupTimingEnvironmentReceipt(receipt, error) {
+/**
+ * @param {object} receipt
+ * @param {unknown} error
+ * @param {ReportWriters} [writers]
+ */
+export function reportWindowsStartupTimingEnvironmentReceipt(receipt, error, writers = { stdout: process.stdout, stderr: process.stderr }) {
 	const failure = error instanceof WindowsStartupTimingFailure ? error : undefined;
 	const report = {
 		mode: "windows-startup-timing-environment",
@@ -293,7 +306,7 @@ function reportWindowsStartupTimingEnvironmentReceipt(receipt, error) {
 		cleanupCompleted: receipt.cleanupCompleted, stage: failure?.stage ?? "unknown", code: failure?.code ?? "unknown",
 	});
 	const boundedLine = Buffer.byteLength(line, "utf8") <= MAX_WINDOWS_STARTUP_TIMING_ENVIRONMENT_REPORT_BYTES ? line : fallback;
-	try { (failure === undefined ? process.stdout : process.stderr).write(`${boundedLine}\n`); } catch { /* Reporting cannot expose a raw secondary error. */ }
+	try { (failure === undefined ? writers.stdout : writers.stderr).write(`${boundedLine}\n`); } catch { /* Reporting cannot expose a raw secondary error. */ }
 	if (failure !== undefined) process.exitCode = 1;
 }
 
@@ -473,7 +486,11 @@ function runBoundedSdkLifecycleProbe(arguments_, env, cwd) {
 	});
 }
 
-function runWindowsStartupTimingProbe(runtimeScript, env, cwd) {
+export function runWindowsStartupTimingProbe(runtimeScript, env, cwd, options = {}) {
+	const spawnProcess = options.spawnProcess ?? spawn;
+	const now = options.now ?? (() => process.hrtime.bigint());
+	const schedule = options.setTimeout ?? setTimeout;
+	const cancel = options.clearTimeout ?? clearTimeout;
 	return new Promise((resolveProbe) => {
 		const observation = { helperStartOutcome: "not-attempted", startElapsedMs: null, lastStartupMarker: null, cleanup: "not-attempted", physicalCloseObserved: false };
 		let child;
@@ -488,9 +505,9 @@ function runWindowsStartupTimingProbe(runtimeScript, env, cwd) {
 		let outputBytes = 0;
 		let failure;
 		const clearTimers = () => {
-			if (startTimer) clearTimeout(startTimer);
-			if (cleanupTimer) clearTimeout(cleanupTimer);
-			if (forceCloseTimer) clearTimeout(forceCloseTimer);
+			if (startTimer) cancel(startTimer);
+			if (cleanupTimer) cancel(cleanupTimer);
+			if (forceCloseTimer) cancel(forceCloseTimer);
 		};
 		const finish = () => {
 			if (settled) return;
@@ -513,9 +530,9 @@ function runWindowsStartupTimingProbe(runtimeScript, env, cwd) {
 		};
 		const beginBoundedCleanup = () => {
 			if (!child || observation.physicalCloseObserved || cleanupTimer || settled) return;
-			cleanupTimer = setTimeout(() => {
+			cleanupTimer = schedule(() => {
 				try { child.kill(); } catch { /* The final bounded grace records unconfirmed physical closure. */ }
-				forceCloseTimer = setTimeout(() => {
+				forceCloseTimer = schedule(() => {
 					if (observation.physicalCloseObserved) return;
 					observation.cleanup = "close-unconfirmed";
 					setFailure("cleanup", "cleanup-unconfirmed", "unknown");
@@ -541,12 +558,12 @@ function runWindowsStartupTimingProbe(runtimeScript, env, cwd) {
 			if (startReplyObserved) return rejectOutput();
 			if (WINDOWS_STARTUP_TIMING_REJECTED_START_REPLY.test(line)) return failAndCleanup("helper-start", "rejected", "rejected");
 			if (!WINDOWS_STARTUP_TIMING_VALID_START_REPLIES.has(line) || markerOrdinal !== 2) return rejectOutput();
-			const elapsedMs = Number(process.hrtime.bigint() - startedAt) / 1e6;
+			const elapsedMs = Number(now() - startedAt) / 1e6;
 			if (!Number.isFinite(elapsedMs) || elapsedMs > WINDOWS_STARTUP_TIMING_BUDGET_MS) return failAndCleanup("helper-start", "timed-out", "timed-out");
 			startReplyObserved = true;
 			observation.helperStartOutcome = "valid-reply";
 			observation.startElapsedMs = elapsedMs;
-			if (startTimer) clearTimeout(startTimer);
+			if (startTimer) cancel(startTimer);
 			// Markers are protocol progress only. This succeeds because the exact start reply is valid.
 			beginBoundedCleanup();
 		};
@@ -578,9 +595,9 @@ function runWindowsStartupTimingProbe(runtimeScript, env, cwd) {
 			else if (status !== 0) setFailure("helper-result", "nonzero-exit", "unknown");
 			finish();
 		};
-		startedAt = process.hrtime.bigint(); // The measurement begins immediately before the exact spawn invocation.
+		startedAt = now(); // The measurement begins immediately before the exact spawn invocation.
 		try {
-			child = spawn(WINDOWS_STARTUP_TIMING_POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", runtimeScript], { cwd, env, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
+			child = spawnProcess(WINDOWS_STARTUP_TIMING_POWERSHELL, ["-NoLogo", "-NoProfile", "-NonInteractive", "-File", runtimeScript], { cwd, env, shell: false, windowsHide: true, stdio: ["pipe", "pipe", "pipe"] });
 		} catch {
 			setFailure("helper-start", "spawn-failed", "spawn-failed");
 			finish();
@@ -593,7 +610,7 @@ function runWindowsStartupTimingProbe(runtimeScript, env, cwd) {
 		child.stderr.resume();
 		child.once("error", () => failAndCleanup(startReplyObserved ? "helper-result" : "helper-start", "stream-failed", "stream-failed"));
 		child.once("close", onClose);
-		startTimer = setTimeout(() => failAndCleanup("helper-start", "timed-out", "timed-out"), WINDOWS_STARTUP_TIMING_BUDGET_MS);
+		startTimer = schedule(() => failAndCleanup("helper-start", "timed-out", "timed-out"), WINDOWS_STARTUP_TIMING_BUDGET_MS);
 		try { child.stdin.end(WINDOWS_STARTUP_TIMING_START_REQUEST, (error) => { if (error) failAndCleanup(startReplyObserved ? "helper-result" : "helper-start", "write-failed", "write-failed"); }); }
 		catch { failAndCleanup("helper-start", "write-failed", "write-failed"); }
 	});
