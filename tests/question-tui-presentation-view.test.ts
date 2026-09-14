@@ -611,12 +611,24 @@ test("closing custom editing keeps its draft, returns option controls, and cance
 	clickVisible(component, /Custom/);
 	const retainedDraft = component.render(64).map((line) => stripTerminalSequences(line));
 	assert.match(retainedDraft.join("\n"), /draft kept while browsing options/, "the complete draft is retained at a sufficient width");
-	const narrowDraft = component.render(20).map((line) => stripTerminalSequences(line));
+	let narrowDraft = component.render(20).map((line) => stripTerminalSequences(line));
 	assert.ok(narrowDraft.every((line) => visibleWidth(line) <= 20));
 	assert.ok(narrowDraft.some((line) => line.includes("draft kept")), "the narrow editor exposes the first wrapped draft segment");
-	const normalizedNarrowDraft = narrowDraft.join("\n").replace(/\s+/g, " ").trim();
-	assert.ok(normalizedNarrowDraft.includes("draft kept while browsing options"),
-		`the narrow editor preserves the complete draft across wrapped rows; rendered frame:\n${narrowDraft.map((line, index) => `${index}: ${line}`).join("\n")}`);
+	const expectedNarrowSegments = ["draft kept while", "browsing options"];
+	const seenNarrowSegments: string[] = [];
+	for (let step = 0; step < 64 && seenNarrowSegments.length < expectedNarrowSegments.length; step++) {
+		assert.ok(narrowDraft.every((line) => visibleWidth(line) <= 20));
+		const visible = narrowDraft.join("\n");
+		for (const segment of expectedNarrowSegments) {
+			if (!seenNarrowSegments.includes(segment) && visible.includes(segment)) seenNarrowSegments.push(segment);
+		}
+		if (seenNarrowSegments.length === expectedNarrowSegments.length) break;
+		assert.equal(component.handleMouse(wheel(20, 0, narrowDraft.length, 1))?.handled, true,
+			"bounded body scrolling remains handled while revealing the complete narrow draft");
+		narrowDraft = component.render(20).map((line) => stripTerminalSequences(line));
+	}
+	assert.deepEqual(seenNarrowSegments, expectedNarrowSegments,
+		`the narrow editor exposes the complete ordered draft across bounded visible frames; observed ${seenNarrowSegments.join(" -> ")}; final frame:\n${narrowDraft.map((line, index) => `${index}: ${line}`).join("\n")}`);
 	clickVisible(component, "Cancel");
 	component.handleInput("n");
 	component.handleInput("s");

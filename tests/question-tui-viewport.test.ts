@@ -129,12 +129,17 @@ function rowHasSelectedBackground(lines: readonly string[], label: string): bool
 	return line!.includes(SELECTED_BACKGROUND);
 }
 
+function isExactSemanticControlLine(line: string, label: string): boolean {
+	const value = line.trim();
+	return value === label || value === `→ ${label}` || value === `[${label}]` || value === `→ [${label}]`;
+}
+
 function scrollBodyUntil(
 	component: QuestionnaireTuiPresentation, width: number, rows: number, label: string, wheelDelta = 1, maxSteps = 320,
 ): string[] {
 	let lines = frame(component, width, rows);
 	for (let step = 0; step < maxSteps; step++) {
-		if (text(lines).some((line) => line.includes(label))) return lines;
+		if (text(lines).some((line) => isExactSemanticControlLine(line, label))) return lines;
 		assert.equal(component.handleMouse(event("wheel", 0, width, lines.length, "none", wheelDelta))?.handled, true,
 			`bounded body scrolling remains handled while revealing ${label}`);
 		lines = frame(component, width, rows);
@@ -275,7 +280,7 @@ test("fresh pointer press/click advances an explicit first answer, then Submit f
 	const component = view(rows, (outcome) => outcomes.push(outcome));
 
 	let lines = scrollBodyUntil(component, width, rows, "Custom answer");
-	const custom = text(lines).findIndex((line) => line === "Custom answer");
+	const custom = text(lines).findIndex((line) => isExactSemanticControlLine(line, "Custom answer"));
 	assert.ok(custom >= 0, "the free-answer control is pointer-reachable in the visible body");
 	component.handleMouse(event("press", custom, width, lines.length));
 	component.handleMouse(event("click", custom, width, lines.length));
@@ -307,7 +312,7 @@ test("cross-question rebuild keeps focus owned by the new question", () => {
 	component.handleInput("\r");
 	component.handleInput("n");
 	const lines = frame(component, 32, 24);
-	assert.match(text(lines).join("\n"), /every check that/);
+	assert.match(text(lines).join("\n"), /Choose\s+every\s+check\s+that\s+applies\s+after\s+reviewing\s+the\s+long\s+preview\s+body\./);
 	assert.ok(focusedKeyboardRow(lines, "Unit") < keyboardActionRow(lines, "Submit"),
 		"advancing after focusing the prior question's second option starts the new question at Unit");
 	assert.equal(text(lines).some((line) => isFocusedControlLine(line, "Integration")), false,
@@ -545,7 +550,7 @@ test("manual body scroll can browse out of a focused Editor and typing reveals i
 	const direct = text(lines).findIndex((line) => line.includes("Direct"));
 	assert.ok(direct >= 0, "Escape closes editing and restores authored options after manual body scrolling");
 	lines = scrollBodyUntil(component, width, host.terminal.rows, "Custom answer");
-	const reopen = text(lines).findIndex((line) => line === "Custom answer");
+	const reopen = text(lines).findIndex((line) => isExactSemanticControlLine(line, "Custom answer"));
 	assert.ok(reopen >= 0, "bounded body scrolling reveals the custom draft control to reopen");
 	component.handleMouse(event("press", reopen, width, lines.length));
 	component.handleMouse(event("click", reopen, width, lines.length));
