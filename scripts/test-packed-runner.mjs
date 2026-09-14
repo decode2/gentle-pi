@@ -1581,6 +1581,68 @@ async function testWindowsStartupTimingPackedHelper() {
 	return { receipt, failure };
 }
 
+/**
+ * Executes the existing two-case environment loop. Defaults intentionally preserve
+ * the original baseline-first shared-root experiment until counterbalancing is enabled.
+ * @param {{ receipt: object, isolatedEnv: object, treatmentPathDelta?: { pathAdditionKeys: readonly string[], values: object }, installedHelper: string, consumerDirectory: string, caseNames?: readonly string[], allocateCaseRoot?: (name: string) => string | undefined, createIsolatedEnvironment?: (root: string | undefined, name: string) => object, probe?: (helper: string, environment: object, cwd: string, name: string) => Promise<object>, cleanupCase?: (name: string, caseReceipt: object) => boolean }} options
+ */
+export async function runWindowsStartupTimingEnvironmentCases(options) {
+	const { receipt, isolatedEnv, treatmentPathDelta, installedHelper, consumerDirectory } = options;
+	const caseNames = options.caseNames ?? WINDOWS_STARTUP_TIMING_ENVIRONMENT_CASE_NAMES;
+	const allocateCaseRoot = options.allocateCaseRoot ?? (() => undefined);
+	const createIsolatedEnvironment = options.createIsolatedEnvironment ?? (() => isolatedEnv);
+	const probe = options.probe ?? runWindowsStartupTimingProbe;
+	const cleanupCase = options.cleanupCase ?? (() => true);
+	let failure;
+	for (const name of caseNames) {
+		const isTreatment = name === "windows-paths";
+		const caseReceipt = newWindowsStartupTimingEnvironmentCase(name, isTreatment && treatmentPathDelta !== undefined ? treatmentPathDelta.pathAdditionKeys : []);
+		receipt.cases.push(caseReceipt);
+		if (isTreatment && receipt.cases[0].physicalCloseObserved !== true) {
+			caseReceipt.cleanup = "blocked";
+			caseReceipt.failureStage = "cleanup";
+			caseReceipt.failureCode = "cleanup-unconfirmed";
+			break;
+		}
+		if (isTreatment && treatmentPathDelta === undefined) {
+			caseReceipt.failureStage = "helper-start";
+			caseReceipt.failureCode = "environment-invalid";
+			if (failure === undefined) failure = new WindowsStartupTimingFailure("helper-start", "environment-invalid");
+			continue;
+		}
+		selectWindowsStartupTimingCheck(receipt, "helper-start");
+		const root = allocateCaseRoot(name);
+		const baseEnvironment = createIsolatedEnvironment(root, name);
+		const environment = isTreatment && treatmentPathDelta !== undefined ? Object.assign({}, baseEnvironment, treatmentPathDelta.values) : baseEnvironment;
+		const measured = await probe(installedHelper, environment, consumerDirectory, name);
+		Object.assign(caseReceipt, {
+			helperStartOutcome: measured.helperStartOutcome, startElapsedMs: measured.startElapsedMs, lastStartupMarker: measured.lastStartupMarker,
+			scriptEnteredElapsedMs: measured.scriptEnteredElapsedMs, nativeReadyElapsedMs: measured.nativeReadyElapsedMs, markerOrder: measured.markerOrder,
+			deadlineSnapshot: measured.deadlineSnapshot, lateValidResponseElapsedMs: measured.lateValidResponseElapsedMs,
+			lateValidResponseClassification: measured.lateValidResponseClassification, cleanup: measured.cleanup, physicalCloseObserved: measured.physicalCloseObserved,
+		});
+		selectWindowsStartupTimingCheck(receipt, "helper-result");
+		if (!WINDOWS_STARTUP_TIMING_CLEANUP_OUTCOMES.has(caseReceipt.cleanup)) throw new WindowsStartupTimingFailure("helper-result", "assertion-failed");
+		if (measured.failure !== undefined) {
+			caseReceipt.failureStage = measured.failure.stage;
+			caseReceipt.failureCode = measured.failure.code;
+			if (failure === undefined) failure = new WindowsStartupTimingFailure(measured.failure.stage, measured.failure.code);
+		} else if (caseReceipt.cleanup !== "close-observed" || measured.helperStartOutcome !== "valid-reply" || measured.startElapsedMs === null || measured.lastStartupMarker !== "native-ready" || !measured.physicalCloseObserved) {
+			caseReceipt.failureStage = "helper-result";
+			caseReceipt.failureCode = "assertion-failed";
+			if (failure === undefined) failure = new WindowsStartupTimingFailure("helper-result", "assertion-failed");
+		}
+		if (!cleanupCase(name, caseReceipt)) {
+			caseReceipt.cleanup = "blocked";
+			caseReceipt.failureStage = "cleanup";
+			caseReceipt.failureCode = "cleanup-unconfirmed";
+			if (failure === undefined) failure = new WindowsStartupTimingFailure("cleanup", "cleanup-unconfirmed");
+		}
+	}
+	if (receipt.cases.length !== caseNames.length) throw new WindowsStartupTimingFailure("helper-result", "assertion-failed");
+	return { receipt, failure };
+}
+
 async function testWindowsStartupTimingEnvironmentExperiment() {
 	const receipt = { checkId: "not-attempted", packVerified: false, installCompleted: false, cases: [], cleanupCompleted: false };
 	let temporary;
@@ -1628,50 +1690,9 @@ async function testWindowsStartupTimingEnvironmentExperiment() {
 		assertNoNativeInstallerArtifacts(packageRoot, consumerDirectory, { checkId: "native-package-cache-absent" });
 		selectWindowsStartupTimingCheck(receipt, "installed-helper");
 		const installedHelper = assertOwnedRegularFile(packageRoot, "runtime/windows-session-transport.ps1");
-		for (const name of WINDOWS_STARTUP_TIMING_ENVIRONMENT_CASE_NAMES) {
-			const isTreatment = name === "windows-paths";
-			const caseReceipt = newWindowsStartupTimingEnvironmentCase(name, isTreatment && treatmentPathDelta !== undefined ? treatmentPathDelta.pathAdditionKeys : []);
-			receipt.cases.push(caseReceipt);
-			if (isTreatment && receipt.cases[0].physicalCloseObserved !== true) {
-				caseReceipt.cleanup = "blocked";
-				caseReceipt.failureStage = "cleanup";
-				caseReceipt.failureCode = "cleanup-unconfirmed";
-				break;
-			}
-			if (isTreatment && treatmentPathDelta === undefined) {
-				caseReceipt.failureStage = "helper-start";
-				caseReceipt.failureCode = "environment-invalid";
-				if (failure === undefined) failure = new WindowsStartupTimingFailure("helper-start", "environment-invalid");
-				continue;
-			}
-			stage = "helper-start";
-			selectWindowsStartupTimingCheck(receipt, "helper-start");
-			const measured = await runWindowsStartupTimingProbe(installedHelper, isTreatment ? Object.assign({}, isolatedEnv, treatmentPathDelta.values) : isolatedEnv, consumerDirectory);
-			caseReceipt.helperStartOutcome = measured.helperStartOutcome;
-			caseReceipt.startElapsedMs = measured.startElapsedMs;
-			caseReceipt.lastStartupMarker = measured.lastStartupMarker;
-			caseReceipt.scriptEnteredElapsedMs = measured.scriptEnteredElapsedMs;
-			caseReceipt.nativeReadyElapsedMs = measured.nativeReadyElapsedMs;
-			caseReceipt.markerOrder = measured.markerOrder;
-			caseReceipt.deadlineSnapshot = measured.deadlineSnapshot;
-			caseReceipt.lateValidResponseElapsedMs = measured.lateValidResponseElapsedMs;
-			caseReceipt.lateValidResponseClassification = measured.lateValidResponseClassification;
-			caseReceipt.cleanup = measured.cleanup;
-			caseReceipt.physicalCloseObserved = measured.physicalCloseObserved;
-			stage = "helper-result";
-			selectWindowsStartupTimingCheck(receipt, "helper-result");
-			if (!WINDOWS_STARTUP_TIMING_CLEANUP_OUTCOMES.has(caseReceipt.cleanup)) throw new WindowsStartupTimingFailure("helper-result", "assertion-failed");
-			if (measured.failure !== undefined) {
-				caseReceipt.failureStage = measured.failure.stage;
-				caseReceipt.failureCode = measured.failure.code;
-				if (failure === undefined) failure = new WindowsStartupTimingFailure(measured.failure.stage, measured.failure.code);
-			} else if (measured.helperStartOutcome !== "valid-reply" || measured.startElapsedMs === null || measured.lastStartupMarker !== "native-ready" || measured.cleanup !== "close-observed" || !measured.physicalCloseObserved) {
-				caseReceipt.failureStage = "helper-result";
-				caseReceipt.failureCode = "assertion-failed";
-				if (failure === undefined) failure = new WindowsStartupTimingFailure("helper-result", "assertion-failed");
-			}
-		}
-		if (receipt.cases.length !== 2) throw new WindowsStartupTimingFailure("helper-result", "assertion-failed");
+		stage = "helper-start";
+		const caseResult = await runWindowsStartupTimingEnvironmentCases({ receipt, isolatedEnv, treatmentPathDelta, installedHelper, consumerDirectory });
+		if (caseResult.failure !== undefined) failure = caseResult.failure;
 		if (failure === undefined) selectWindowsStartupTimingCheck(receipt, "windows-helper-startup-environment-measured");
 	} catch (error) {
 		if (failure === undefined) {

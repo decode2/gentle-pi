@@ -10,7 +10,7 @@ import { fileURLToPath } from "node:url";
 import { FIXED_WINDOWS_POWERSHELL, WindowsActiveSessionClient, WindowsActiveSessionListener, WindowsSessionPresenceRegistry, WindowsSessionRegistryPhaseSequence, type WindowsSessionRegistryPhaseEvent, parseWindowsHostFrame } from "../lib/windows-session-transport.ts";
 import { createDefaultSessionTransport } from "../extensions/gentle-agents.ts";
 import { ActiveSessionClientError, FrameDecoder, encodeNotificationFrame, type AckFrame } from "../lib/agents-session-transport.ts";
-import { decidePackedRunnerEntrypoint, deriveWindowsStartupTimingPathDelta, newWindowsStartupTimingReceipt, reportWindowsStartupTimingEnvironmentReceipt, reportWindowsStartupTimingReceipt, runWindowsStartupTimingProbe, validateWindowsStartupTimingMachinePaths, WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS } from "../scripts/test-packed-runner.mjs";
+import { decidePackedRunnerEntrypoint, deriveWindowsStartupTimingPathDelta, newWindowsStartupTimingReceipt, reportWindowsStartupTimingEnvironmentReceipt, reportWindowsStartupTimingReceipt, runWindowsStartupTimingEnvironmentCases, runWindowsStartupTimingProbe, validateWindowsStartupTimingMachinePaths, WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS } from "../scripts/test-packed-runner.mjs";
 
 const runtime = fileURLToPath(new URL("../runtime/windows-session-transport.ps1", import.meta.url));
 const fixture = fileURLToPath(new URL("fixtures/windows-session-bootstrap.ps1", import.meta.url));
@@ -985,6 +985,67 @@ test("Windows startup timing diagnostics propagates bounded private observations
 	assert.deepEqual(environmentReport.cases.map((entry: { name: string; pathAdditionKeys: readonly string[] }) => [entry.name, entry.pathAdditionKeys]), [["baseline", []], ["windows-paths", WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS]]);
 });
 
+function counterbalancedCaseDependencies(order: readonly string[], cleanupFirst = true) {
+	const receipt: { checkId: string; packVerified: boolean; installCompleted: boolean; cases: Array<{ cleanup?: string; physicalCloseObserved?: boolean }>; cleanupCompleted: boolean; [key: string]: unknown } = { checkId: "helper-result", packVerified: true, installCompleted: true, cases: [], cleanupCompleted: true };
+	const seen: { name: string; environment: Record<string, string> }[] = [];
+	const allocatedRoots: string[] = [];
+	const measured = { helperStartOutcome: "valid-reply", startElapsedMs: 1_000, lastStartupMarker: "native-ready", scriptEnteredElapsedMs: 500, nativeReadyElapsedMs: 1_000, markerOrder: ["script-entered", "native-ready"], deadlineSnapshot: null, lateValidResponseElapsedMs: null, lateValidResponseClassification: null, cleanup: "close-observed", physicalCloseObserved: true, failure: undefined };
+	const pathSource = { ProgramFiles: "C:\\Program Files", "ProgramFiles(x86)": "C:\\Program Files (x86)", ProgramW6432: "C:\\Program Files", SystemRoot: "C:\\Windows" };
+	const treatmentPathDelta = deriveWindowsStartupTimingPathDelta(pathSource);
+	return { receipt, seen, allocatedRoots, options: {
+		receipt, isolatedEnv: { HOME: "shared-home", NPM_CONFIG_CACHE: "shared-cache" }, treatmentPathDelta, installedHelper: "helper.ps1", consumerDirectory: "consumer", caseNames: order,
+		allocateCaseRoot: (name: string) => { const root = `case-root-${name}-${seen.length}`; allocatedRoots.push(root); return root; },
+		probe: async (_helper: string, environment: Record<string, string>, _cwd: string, name: string) => { seen.push({ name, environment }); return measured; },
+		cleanupCase: (_name: string, _caseReceipt: { physicalCloseObserved: boolean }) => !(cleanupFirst && seen.length === 1),
+	} };
+}
+
+test("Windows startup environment counterbalanced execution runs the actual seam in requested AB and BA order", async () => {
+	for (const order of [["baseline", "windows-paths"], ["windows-paths", "baseline"]]) {
+		const experiment = counterbalancedCaseDependencies(order, false);
+		const result = await runWindowsStartupTimingEnvironmentCases(experiment.options);
+		assert.deepEqual(experiment.seen.map(({ name }) => name), order);
+		assert.equal(experiment.allocatedRoots.length, 2);
+		assert.notEqual(experiment.allocatedRoots[0], experiment.allocatedRoots[1]);
+		assert.notEqual(experiment.seen[0].environment.HOME, experiment.seen[1].environment.HOME);
+		assert.equal(experiment.seen[0].environment.ProgramFiles, order[0] === "windows-paths" ? "C:\\Program Files" : undefined);
+		assert.equal(experiment.seen[0].environment.UnknownPath, undefined);
+		assert.equal(result.receipt?.experimentOrder, order[0] === "baseline" ? "AB" : "BA");
+	}
+	const invalid = counterbalancedCaseDependencies(["baseline", "invalid"]);
+	await assert.rejects(runWindowsStartupTimingEnvironmentCases(invalid.options), /invalid Windows startup environment case/);
+});
+
+test("Windows startup environment counterbalanced cleanup blocks the second case in either order", async () => {
+	for (const order of [["baseline", "windows-paths"], ["windows-paths", "baseline"]]) {
+		const experiment = counterbalancedCaseDependencies(order);
+		const result = await runWindowsStartupTimingEnvironmentCases(experiment.options);
+		assert.equal(experiment.seen.length, 1);
+		assert.equal(experiment.receipt.cases.length, 2);
+		assert.equal(experiment.receipt.cases[1].cleanup, "blocked");
+		assert.equal(result.failure?.code, "cleanup-unconfirmed");
+	}
+});
+
+test("Windows startup environment counterbalanced receipt reports bounded metadata for legal cases", () => {
+	const cases = [
+		{ name: "windows-paths", pathAdditionKeys: [...WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS], casePosition: 1, caseIsolationVerified: true },
+		{ name: "baseline", pathAdditionKeys: [], casePosition: 2, caseIsolationVerified: true },
+	];
+	const output: string[] = [];
+	reportWindowsStartupTimingEnvironmentReceipt({ checkId: "helper-result", packVerified: true, installCompleted: true, experimentOrder: "BA", caseIsolationVerified: true, cases, cleanupCompleted: true }, undefined, { stdout: { write: (value: string) => { output.push(value); return true; } }, stderr: { write: () => true } });
+	const report = JSON.parse(output[0]);
+	assert.equal(report.experimentOrder, "BA");
+	assert.equal(report.caseIsolationVerified, true);
+	assert.deepEqual(report.cases, cases);
+	assert.equal(report.cases.length, 2);
+	assert.equal(report.cases[0].name, "windows-paths");
+	assert.equal(report.cases[0].casePosition, 1);
+	assert.equal(report.cases[1].name, "baseline");
+	assert.equal(report.cases[1].casePosition, 2);
+	assert.ok(output[0].length <= 2_049);
+});
+
 test("Windows startup environment delta admits only the fixed machine path allowlist", () => {
 	const source = {
 		ProgramFiles: "C:\\Program Files",
@@ -1042,13 +1103,14 @@ test("Windows packed startup environment experiment source guard selects the pai
 	assert.match(source, /export function deriveWindowsStartupTimingPathDelta\(source\)/);
 	assert.match(source, /const pathDelta = deriveWindowsStartupTimingPathDelta\(process\.env\)/);
 	assert.match(source, /const treatmentPathDelta = validateWindowsStartupTimingMachinePaths\(pathDelta\) \? pathDelta : undefined/);
-	assert.match(source, /isTreatment \? Object\.assign\(\{\}, isolatedEnv, treatmentPathDelta\.values\) : isolatedEnv/);
+	assert.match(source, /isTreatment && treatmentPathDelta !== undefined \? Object\.assign\(\{\}, baseEnvironment, treatmentPathDelta\.values\) : baseEnvironment/);
 	assert.match(source, /caseOrder: "baseline-first-fixed"/);
 	assert.match(source, /sharedState: "shared-owned-home-and-cache"/);
 	assert.match(source, /confounders: "baseline-first-order-and-cache-effects"/);
 	assert.match(source, /conclusion: "no-causal-attribution-not-product-ready"/);
 	assert.match(source, /mode: "windows-startup-timing-environment"/);
-	assert.match(source, /receipt\.cases\[0\]\.physicalCloseObserved !== true/);
+	const environmentCases = source.slice(source.indexOf("export async function runWindowsStartupTimingEnvironmentCases"), source.indexOf("async function testWindowsStartupTimingEnvironmentExperiment"));
+	assert.match(environmentCases, /receipt\.cases\[0\]\.physicalCloseObserved !== true/);
 	const environmentFactory = source.slice(source.indexOf("function isValidatedWindowsMachineRoot"), source.indexOf("function assertPackResult"));
 	const environmentExperiment = source.slice(source.indexOf("async function testWindowsStartupTimingEnvironmentExperiment"), source.indexOf("async function testUnhookedPackedImports"));
 	assert.doesNotMatch(environmentFactory, /\.\.\.process\.env/);
