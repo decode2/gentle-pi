@@ -497,6 +497,20 @@ test("client delivers one exact notification from its fixed active sender", asyn
 	await clientRejected(client.sendNotification("sender", "self"), "self");
 });
 
+test("routes default and configured client connections through the transport seam", async (t) => {
+	const transport = await registry(t), defaultReply = encodeAckFrame({ version: 1, kind: "ack", id: "default", accepted: true });
+	await raw(t, transport, "default-target", defaultReply);
+	let delegated = 0;
+	const native = transport.connectEndpoint.bind(transport);
+	(transport as unknown as { connectEndpoint: (endpoint: string) => Socket }).connectEndpoint = (endpoint) => { delegated++; return native(endpoint); };
+	assert.deepEqual(await wait("default transport connection", new ActiveSessionClient(transport, "sender").sendNotification("default-target", "x", { id: "default" })), { id: "default", accepted: true });
+	assert.equal(delegated, 1);
+	const explicitReply = encodeAckFrame({ version: 1, kind: "ack", id: "explicit", accepted: true });
+	await raw(t, transport, "explicit-target", explicitReply);
+	assert.deepEqual(await wait("configured transport connection", new ActiveSessionClient(transport, "sender", { connect: native }).sendNotification("explicit-target", "x", { id: "explicit" })), { id: "explicit", accepted: true });
+	assert.equal(delegated, 1);
+});
+
 test("client pins a selected activation and never connects to its replacement", async (t) => {
 	const transport = await registry(t);
 	const old = await raw(t, transport, "recipient", undefined, 1);
@@ -756,6 +770,25 @@ test("waits for an invalidated delayed startup before closing", async (t) => {
 	assert.equal(instance.record, undefined);
 	await assert.rejects(lstat(candidate.endpoint));
 	await rejected(transport.resolve("recipient"), "not_found");
+});
+
+test("guards endpoint ownership before POSIX chmod", async (t) => {
+	const transport = await registry(t), record = await transport.record("validation");
+	const server = createServer();
+	try {
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(record.endpoint, () => { server.off("error", reject); resolve(); });
+		});
+		await chmod(record.endpoint, 0o700);
+		const before = await mode(record.endpoint), expected = new SessionPresenceError("io_error", "listener is closed");
+		let callbacks = 0;
+		await assert.rejects(transport.validateEndpoint(record, () => { callbacks++; throw expected; }), (error: unknown) => error === expected);
+		assert.equal(callbacks, 1);
+		assert.equal(await mode(record.endpoint), before, "ownership cancellation precedes chmod");
+	} finally {
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	}
 });
 
 test("rolls back a delayed publish after a runtime server failure", async (t) => {

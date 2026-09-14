@@ -13,6 +13,23 @@ export type PresenceRecord = Readonly<{ version: 1; sessionId: string; endpoint:
 export type SessionPresenceCandidate = Readonly<{ sessionId: string; reachability: "unknown" }>;
 export type TransportPaths = Readonly<{ root: string; presence: string; sockets: string }>;
 
+// The registry owns activation storage and endpoint lifecycle. Implementations
+// may replace the POSIX endpoint with a platform transport without changing
+// listener/client protocol or lifecycle behavior.
+export interface SessionTransportRegistry {
+	record(id: string, createdAt?: number): Promise<PresenceRecord>;
+	publish(record: PresenceRecord): Promise<void>;
+	resolve(id: string): Promise<PresenceRecord>;
+	removeOwn(record: PresenceRecord): Promise<void>;
+	list(excludeSessionId?: string): Promise<readonly SessionPresenceCandidate[]>;
+	listActivations(excludeSessionId?: string): Promise<readonly PresenceRecord[]>;
+	prepareEndpoint(record: PresenceRecord): Promise<void>;
+	createEndpointServer(record: PresenceRecord, onConnection: (socket: Socket) => void): Server;
+	validateEndpoint(record: PresenceRecord, assertReady?: () => void): Promise<void>;
+	cleanupEndpoint(record: PresenceRecord): Promise<void>;
+	connectEndpoint(endpoint: string): Socket;
+}
+
 export class SessionPresenceError extends Error {
 	readonly code: Code;
 	constructor(code: Code, message: string) { super(message); this.code = code; this.name = "SessionPresenceError"; }
@@ -77,7 +94,7 @@ async function runtimeSocketDirectory(agentHome: string) {
 	} catch (error) { boundary(error); }
 }
 
-export class SessionPresenceRegistry {
+export class SessionPresenceRegistry implements SessionTransportRegistry {
 	readonly paths: TransportPaths;
 
 	private readonly beforeCandidateOpen?: () => Promise<void>;
@@ -109,6 +126,31 @@ export class SessionPresenceRegistry {
 	}
 
 	presencePath(record: PresenceRecord) { return join(this.paths.presence, `${sessionId(record.sessionId)}.${this.token(record.endpoint)}.json`); }
+
+	async prepareEndpoint(record: PresenceRecord) {
+		this.validate(record);
+		try {
+			await lstat(record.endpoint).then(() => fail("unsafe_path", "unsafe transport path")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+		} catch (error) { boundary(error); }
+	}
+
+	createEndpointServer(_record: PresenceRecord, onConnection: (socket: Socket) => void) {
+		return createServer(onConnection);
+	}
+
+	async validateEndpoint(record: PresenceRecord, assertReady?: () => void) {
+		try {
+			const stat = await lstat(record.endpoint);
+			if (stat.isSymbolicLink() || !stat.isSocket() || !sameUser(stat)) fail("unsafe_path", "unsafe transport path");
+			assertReady?.();
+			await chmod(record.endpoint, FILE_MODE);
+			assertReady?.();
+		} catch (error) { boundary(error); }
+	}
+
+	async cleanupEndpoint(_record: PresenceRecord) {}
+
+	connectEndpoint(endpoint: string) { return createConnection(endpoint); }
 
 	async publish(record: PresenceRecord) {
 		this.validate(record);
@@ -340,7 +382,7 @@ export type ActiveSessionListenerOptions = Readonly<{ callbackDeadlineMs?: numbe
 const CALLBACK_DEADLINE_MS = 2000, MAX_CALLBACKS = 8, MAX_SEEN_NOTIFICATIONS = 64;
 
 export class ActiveSessionListener {
-	readonly registry: SessionPresenceRegistry;
+	readonly registry: SessionTransportRegistry;
 	readonly sessionID: string;
 	readonly onNotification: (notification: ReceivedNotification) => Promise<void>;
 	readonly sockets = new Set<Socket>();
@@ -360,7 +402,7 @@ export class ActiveSessionListener {
 	private readonly beforeEndpointCleanup?: () => Promise<void>;
 	private resolveClosed!: () => void;
 
-	constructor(registry: SessionPresenceRegistry, sessionID: string, onNotification: (notification: ReceivedNotification) => Promise<void>, options: ActiveSessionListenerOptions = {}) {
+	constructor(registry: SessionTransportRegistry, sessionID: string, onNotification: (notification: ReceivedNotification) => Promise<void>, options: ActiveSessionListenerOptions = {}) {
 		const deadline = options.callbackDeadlineMs ?? CALLBACK_DEADLINE_MS;
 		if (!Number.isInteger(deadline) || deadline < 1 || deadline > CALLBACK_DEADLINE_MS) throw new RangeError("invalid callback deadline");
 		this.registry = registry;
@@ -428,17 +470,14 @@ export class ActiveSessionListener {
 		try {
 			record = await this.registry.record(this.sessionID);
 			this.assertStartup(generation);
-			await lstat(record.endpoint).then(() => fail("unsafe_path", "unsafe transport path")).catch((error: NodeJS.ErrnoException) => { if (error.code !== "ENOENT") throw error; });
+			await this.registry.prepareEndpoint(record);
 			this.assertStartup(generation);
-			const server = createServer((socket) => this.accept(socket));
+			const server = this.registry.createEndpointServer(record, (socket) => this.accept(socket));
 			this.server = server;
 			server.on("error", () => this.fail(record!));
 			await new Promise<void>((resolveListen, rejectListen) => { server.once("error", rejectListen); server.listen(record.endpoint, () => { server.off("error", rejectListen); resolveListen(); }); });
 			this.assertStartup(generation);
-			const stat = await lstat(record.endpoint);
-			this.assertStartup(generation);
-			if (stat.isSymbolicLink() || !stat.isSocket() || !sameUser(stat)) fail("unsafe_path", "unsafe transport path");
-			await chmod(record.endpoint, FILE_MODE);
+			await this.registry.validateEndpoint(record, () => this.assertStartup(generation));
 			this.assertStartup(generation);
 			this.state = "accepting";
 			await this.registry.publish(record);
@@ -543,6 +582,7 @@ export class ActiveSessionListener {
 			for (const socket of sockets) socket.destroy();
 			if (server) await new Promise<void>((resolveClose) => server.close(() => resolveClose()));
 			if (record) {
+				await this.registry.cleanupEndpoint(record).catch(() => {});
 				await this.registry.removeOwn(record).catch(() => {});
 				try { await this.beforeEndpointCleanup?.(); } catch { /* a test seam cannot leak through cleanup */ }
 			}
@@ -574,7 +614,7 @@ const clientDeadline = (value: number | undefined, fallback: number, maximum: nu
 type PendingOutbound = { settled: boolean; socket?: Socket; connectTimer?: unknown; ackTimer?: unknown; abort?: () => void; settle: (error?: ActiveSessionClientError, result?: SentNotification) => void };
 
 export class ActiveSessionClient {
-	readonly registry: SessionPresenceRegistry;
+	readonly registry: SessionTransportRegistry;
 	readonly senderSessionId: string;
 	private readonly scheduler: ClientScheduler;
 	private readonly connectDeadlineMs: number;
@@ -583,13 +623,13 @@ export class ActiveSessionClient {
 	private readonly pending = new Set<PendingOutbound>();
 	private stopped = false;
 
-	constructor(registry: SessionPresenceRegistry, senderSessionId: string, config: ActiveSessionClientConfig = {}) {
+	constructor(registry: SessionTransportRegistry, senderSessionId: string, config: ActiveSessionClientConfig = {}) {
 		this.registry = registry;
 		this.senderSessionId = sessionId(senderSessionId);
 		this.scheduler = config.scheduler ?? { setTimeout, clearTimeout };
 		this.connectDeadlineMs = clientDeadline(config.connectDeadlineMs, CLIENT_CONNECT_DEADLINE_MS, CLIENT_CONNECT_DEADLINE_MS);
 		this.ackDeadlineMs = clientDeadline(config.ackDeadlineMs, CLIENT_ACK_DEADLINE_MS, CLIENT_ACK_DEADLINE_MS);
-		this.connect = config.connect ?? createConnection;
+		this.connect = config.connect ?? ((endpoint) => this.registry.connectEndpoint(endpoint));
 	}
 
 	get pendingCount() { return this.pending.size; }
