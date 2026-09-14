@@ -186,8 +186,8 @@ function focusCustomForKeyboard(component: QuestionnaireTuiPresentation, width =
 	assert.fail(`bounded keyboard traversal could not focus ${label}`);
 }
 
-function mouse(width: number, y = 0, height = 24): TuiMouseEvent {
-	return { type: "click", button: "left", x: 0, y, screenX: 0, screenY: y, width, height, shift: false, alt: false, ctrl: false };
+function mouse(width: number, y = 0, height = 24, x = 0): TuiMouseEvent {
+	return { type: "click", button: "left", x, y, screenX: x, screenY: y, width, height, shift: false, alt: false, ctrl: false };
 }
 
 function pointer(type: "press" | "click", width: number, y: number, height: number): TuiMouseEvent {
@@ -207,11 +207,16 @@ function click(component: QuestionnaireTuiPresentation, label: string) {
 
 function clickVisible(component: QuestionnaireTuiPresentation, label: string | RegExp, width = 20) {
 	const lines = component.render(width);
-	const y = lines.findIndex((line) => typeof label === "string"
-		? stripTerminalSequences(line).includes(label)
-		: label.test(stripTerminalSequences(line)));
+	let x = -1;
+	const y = lines.findIndex((line) => {
+		const visible = stripTerminalSequences(line);
+		const index = typeof label === "string" ? visible.indexOf(label) : label.exec(visible)?.index ?? -1;
+		if (index < 0) return false;
+		x = visibleWidth(visible.slice(0, index));
+		return true;
+	});
 	assert.ok(y >= 0, `${width}-column layout contains ${String(label)}`);
-	component.handleMouse(mouse(width, y, lines.length));
+	component.handleMouse(mouse(width, y, lines.length, x));
 }
 
 test("arrow navigation traverses options, Custom answer, primary, and Cancel with visible focus", () => {
@@ -630,6 +635,8 @@ test("closing custom editing keeps its draft, returns option controls, and cance
 	assert.deepEqual(seenNarrowSegments, expectedNarrowSegments,
 		`the narrow editor exposes the complete ordered draft across bounded visible frames; observed ${seenNarrowSegments.join(" -> ")}; final frame:\n${narrowDraft.map((line, index) => `${index}: ${line}`).join("\n")}`);
 	clickVisible(component, "Cancel");
+	assert.deepEqual(outcomes, [{ correlationId: "view-correlation", cancelled: true, answers: [] }],
+		"pointer Cancel completes cancellation before later inputs");
 	component.handleInput("n");
 	component.handleInput("s");
 	component.cancel();
