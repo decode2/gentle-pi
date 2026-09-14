@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { StdinBuffer, stripTerminalSequences, type TUI, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
+import { getKeybindings, matchesKey, StdinBuffer, stripTerminalSequences, type KeybindingsConfig, type KeybindingsManager, type KeyId, type TUI, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import type { QuestionnaireExternalEditor } from "../lib/questions/external-editor.ts";
 import { QuestionnaireTuiPresentation } from "../lib/questions/tui-presentation-view.ts";
 import { validateAndFormat } from "../lib/questions/response.ts";
@@ -15,6 +15,34 @@ const theme = {
 	bg: (_color: string, text: string) => text,
 	bold: (text: string) => text,
 };
+
+type KeybindingName = Parameters<KeybindingsManager["matches"]>[1];
+type TestUserBindings = Partial<Record<KeybindingName, KeyId | KeyId[]>>;
+
+/** A per-test public-manager view; the process-global manager remains untouched for Editor internals. */
+function injectedKeybindings(userBindings: TestUserBindings = {}): KeybindingsManager {
+	const base = getKeybindings();
+	const configured: KeybindingsConfig = { ...userBindings };
+	const keysFor = (keybinding: KeybindingName): KeyId[] => {
+		if (Object.prototype.hasOwnProperty.call(configured, keybinding)) {
+			const value = configured[keybinding];
+			return value === undefined ? [] : Array.isArray(value) ? [...value] : [value];
+		}
+		return base.getKeys(keybinding);
+	};
+	const matches = (data: string, keybinding: KeybindingName): boolean =>
+		keysFor(keybinding).some((key) => matchesKey(data, key));
+	const getKeys = (keybinding: KeybindingName): KeyId[] => keysFor(keybinding);
+	const getUserBindings = (): KeybindingsConfig => ({ ...configured });
+	return new Proxy(base, {
+		get(target, property, receiver) {
+			if (property === "matches") return matches;
+			if (property === "getKeys") return getKeys;
+			if (property === "getUserBindings") return getUserBindings;
+			return Reflect.get(target, property, receiver);
+		},
+	});
+}
 
 function request() {
 	const result = createFrozenQuestionnaireRequest("view-correlation", { questions: [{
@@ -85,9 +113,9 @@ function emptyMultiSubmitRequest() {
 	return result.request;
 }
 
-function view(done: (outcome: unknown) => void = () => {}, questionnaire = request()) {
+function view(done: (outcome: unknown) => void = () => {}, questionnaire = request(), keybindings?: KeybindingsManager) {
 	let renders = 0;
-	const component = new QuestionnaireTuiPresentation({ request: questionnaire, tui: { terminal: { rows: 24 }, requestRender: () => { renders++; } } as TUI, theme, onDone: done });
+	const component = new QuestionnaireTuiPresentation({ request: questionnaire, tui: { terminal: { rows: 24 }, requestRender: () => { renders++; } } as TUI, theme, keybindings, onDone: done });
 	// ui.custom({ overlay: true }) focuses the hosted component before its first render.
 	component.focused = true;
 	return { component, renders: () => renders };
@@ -100,6 +128,11 @@ const ARROW_RIGHT = "\u001b[C";
 const ENTER = "\r";
 const ESCAPE = "\u001b";
 const SHIFT_TAB = "\u001b[Z";
+const SHIFT_ENTER = "\u001b\r";
+const CTRL_J = "\n";
+const CTRL_O = "\u000f";
+const CTRL_Q = "\u0011";
+const CTRL_U = "\u0015";
 // Keyboard stops use the option control's existing visible arrow prefix: "→ ".
 const NEXT_FOCUS_ORDER = ["Direct", "Staged", "Custom answer", "Question note", "Next", "Cancel"];
 const KEYBOARD_FOCUS_ORDER = ["Direct", "Staged", "Custom answer", "Question note", "Global note", "Submit", "Cancel"];
@@ -116,9 +149,9 @@ function keyboardRequest(multiSelect = false) {
 	return result.request;
 }
 
-function keyboardView(done: (outcome: unknown) => void = () => {}, multiSelect = false) {
+function keyboardView(done: (outcome: unknown) => void = () => {}, multiSelect = false, keybindings?: KeybindingsManager) {
 	return new QuestionnaireTuiPresentation({
-		request: keyboardRequest(multiSelect), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone: done,
+		request: keyboardRequest(multiSelect), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, keybindings, onDone: done,
 	});
 }
 
@@ -215,7 +248,7 @@ function assertFocusPath(component: QuestionnaireTuiPresentation, key: string, l
 	}
 }
 
-function focusCustomForKeyboard(component: QuestionnaireTuiPresentation, width = 48, label = "Custom answer"): void {
+function focusCustomForKeyboard(component: QuestionnaireTuiPresentation, width = 48, label = "Custom answer", forwardKey = "\t"): void {
 	const initial = renderedText(component, width);
 	const optionCount = Math.max(2, initial.filter((line) => /^(?:→ )?(?:\([● ]\)|\[[x ]\])\s/.test(line)).length);
 	const maxSteps = optionCount + 3;
@@ -225,7 +258,7 @@ function focusCustomForKeyboard(component: QuestionnaireTuiPresentation, width =
 			component.handleInput(ENTER);
 			return;
 		}
-		component.handleInput("\t");
+		component.handleInput(forwardKey);
 	}
 	assert.fail(`bounded keyboard traversal could not focus ${label}`);
 }
@@ -420,6 +453,159 @@ test("custom editor arrows and Enter preserve cursor edits, newlines, and litera
 	}] }], "keyboard Submit emits the exact custom draft without option selection");
 });
 
+test("injected input bindings preserve owned newlines and prioritize newline over an explicit submit collision", () => {
+	const normalManager = getKeybindings();
+	const normalUserBindings = normalManager.getUserBindings();
+	const defaults = injectedKeybindings();
+	assert.deepEqual(defaults.getUserBindings(), {}, "an unconfigured manager exposes no user override");
+	const outcomes: unknown[] = [];
+	const component = keyboardView((outcome) => outcomes.push(outcome), false, defaults);
+	focusCustomForKeyboard(component);
+	component.handleInput("first");
+	component.handleInput(ENTER);
+	component.handleInput("second");
+	component.handleInput(SHIFT_ENTER);
+	component.handleInput("third");
+	component.handleInput(CTRL_J);
+	component.handleInput("fourth");
+	component.handleInput(ESCAPE);
+	component.handleInput("s");
+	assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+		questionIndex: 0, question: "Choose a route", kind: "custom", answer: "first\nsecond\nthird\nfourth",
+	}] }], "default Shift+Enter, Ctrl+J, and owned Enter remain newline paths");
+
+	const newlineOnlyBindings = injectedKeybindings({ "tui.input.newLine": "ctrl+q" });
+	assert.deepEqual(newlineOnlyBindings.getUserBindings(), { "tui.input.newLine": "ctrl+q" });
+	assert.deepEqual(newlineOnlyBindings.getKeys("tui.input.newLine"), ["ctrl+q"]);
+	assert.deepEqual(newlineOnlyBindings.getKeys("tui.input.submit"), defaults.getKeys("tui.input.submit"),
+		"a newline-only override retains the resolved default submit binding");
+	const newlineOnlyOutcomes: unknown[] = [];
+	const newlineOnly = keyboardView((outcome) => newlineOnlyOutcomes.push(outcome), false, newlineOnlyBindings);
+	focusCustomForKeyboard(newlineOnly);
+	newlineOnly.handleInput("before");
+	newlineOnly.handleInput(CTRL_Q);
+	newlineOnly.handleInput("after");
+	newlineOnly.handleInput(ENTER);
+	assert.deepEqual(newlineOnlyOutcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+		questionIndex: 0, question: "Choose a route", kind: "custom", answer: "before\nafter",
+	}] }], "the resolved default submit confirms after the newline-only override");
+
+	const collisionBindings = injectedKeybindings({ "tui.input.newLine": "ctrl+q", "tui.input.submit": "ctrl+q" });
+	assert.deepEqual(collisionBindings.getUserBindings(), { "tui.input.newLine": "ctrl+q", "tui.input.submit": "ctrl+q" });
+	assert.deepEqual(collisionBindings.getKeys("tui.input.submit"), ["ctrl+q"], "resolved keys alone do not hide the explicit override");
+	const collisionOutcomes: unknown[] = [];
+	const collision = keyboardView((outcome) => collisionOutcomes.push(outcome), false, collisionBindings);
+	focusCustomForKeyboard(collision);
+	collision.handleInput("before");
+	collision.handleInput(CTRL_Q);
+	collision.handleInput("after");
+	collision.handleInput(ESCAPE);
+	collision.handleInput("s");
+	assert.deepEqual(collisionOutcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+		questionIndex: 0, question: "Choose a route", kind: "custom", answer: "before\nafter",
+	}] }], "newline wins when the configured submit and newline actions collide");
+	assert.deepEqual(normalManager.getUserBindings(), normalUserBindings, "injected bindings do not mutate the process-global manager");
+});
+
+test("explicit input.submit confirms custom answers before the vertical primary submits the questionnaire", () => {
+	const keybindings = injectedKeybindings({ "tui.input.submit": "ctrl+q" });
+	const outcomes: unknown[] = [];
+	const component = view((outcome) => outcomes.push(outcome), request(), keybindings).component;
+	focusCustomForKeyboard(component);
+	component.handleInput("first answer");
+	component.handleInput(ENTER);
+	assert.equal(outcomes.length, 0, "the default Enter is no longer an explicit submit action");
+	component.handleInput(CTRL_Q);
+	assert.match(renderedText(component).join("\n"), /Question 2:/, "confirming the first custom answer advances vertically");
+
+	focusCustomForKeyboard(component);
+	component.handleInput("second answer");
+	component.handleInput(CTRL_Q);
+	assert.equal(outcomes.length, 0, "confirming the final answer does not finish before the vertical primary");
+	assert.match(renderedText(component).join("\n"), /second answer/);
+	component.handleInput("s");
+	assert.deepEqual(outcomes, [{ correlationId: "view-correlation", cancelled: false, answers: [
+		{ questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "custom", answer: "first answer" },
+		{ questionIndex: 1, question: "Choose checks", kind: "custom", answer: "second answer" },
+	] }]);
+
+	const noteOutcomes: unknown[] = [];
+	const noteView = view((outcome) => noteOutcomes.push(outcome), keyboardRequest(), keybindings).component;
+	assertFocusPath(noteView, ARROW_DOWN, ["Direct", "Staged", "Custom answer", "Question note"]);
+	noteView.handleInput(ENTER);
+	noteView.handleInput("note");
+	noteView.handleInput(CTRL_Q);
+	assert.equal(noteOutcomes.length, 0, "input.submit on a note only exits the note editor");
+	focusedControl(renderedText(noteView), "Question note");
+	assert.match(renderedText(noteView).join("\n"), /note/);
+
+	const disabled = injectedKeybindings({ "tui.input.submit": [] });
+	assert.deepEqual(disabled.getUserBindings(), { "tui.input.submit": [] });
+	assert.deepEqual(disabled.getKeys("tui.input.submit"), []);
+	const disabledOutcomes: unknown[] = [];
+	const disabledView = keyboardView((outcome) => disabledOutcomes.push(outcome), false, disabled);
+	focusCustomForKeyboard(disabledView);
+	disabledView.handleInput("draft");
+	disabledView.handleInput(ENTER);
+	assert.equal(disabledOutcomes.length, 0, "an explicitly empty submit binding leaves the default Enter inert");
+	assert.match(renderedText(disabledView).join("\n"), /Custom response/);
+	disabledView.handleInput(ESCAPE);
+	disabledView.handleInput("s");
+	assert.deepEqual(disabledOutcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+		questionIndex: 0, question: "Choose a route", kind: "custom", answer: "draft",
+	}] }], "disabling submit preserves the exact draft without falling back to a newline");
+});
+
+test("configured input.tab moves forward in and out of editors, while Shift+Tab stays reverse and [] disables old Tab", () => {
+	const configured = injectedKeybindings({ "tui.input.tab": "ctrl+o" });
+	const outcomes: unknown[] = [];
+	const component = keyboardView((outcome) => outcomes.push(outcome), false, configured);
+	focusedControl(renderedText(component), "Direct");
+	component.handleInput("\t");
+	focusedControl(renderedText(component), "Direct");
+	component.handleInput(CTRL_O);
+	focusedControl(renderedText(component), "Staged");
+	component.handleInput(SHIFT_TAB);
+	focusedControl(renderedText(component), "Direct");
+
+	focusCustomForKeyboard(component, 48, "Custom answer", CTRL_O);
+	component.handleInput("draft");
+	component.handleInput("\t");
+	assert.match(renderedText(component).join("\n"), /Custom response/, "the old Tab is not forward navigation inside the editor");
+	component.handleInput(CTRL_O);
+	focusedControl(renderedText(component), "Question note");
+	assert.match(renderedText(component).join("\n"), /draft/, "the remapped forward action persists the custom draft");
+	component.handleInput(ENTER);
+	component.handleInput("question note");
+	component.handleInput(CTRL_O);
+	focusedControl(renderedText(component), "Global note");
+	assert.match(renderedText(component).join("\n"), /question note/, "the remapped action leaves the note on its own row");
+	component.handleInput(SHIFT_TAB);
+	focusedControl(renderedText(component), "Question note");
+	component.handleInput(CTRL_O);
+	focusedControl(renderedText(component), "Global note");
+	component.handleInput(CTRL_O);
+	focusedControl(renderedText(component), "Submit");
+	component.handleInput(ENTER);
+	assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+		questionIndex: 0, question: "Choose a route", kind: "custom", answer: "draft", notes: "question note",
+	}] }]);
+
+	const disabled = injectedKeybindings({ "tui.input.tab": [] });
+	assert.deepEqual(disabled.getUserBindings(), { "tui.input.tab": [] });
+	assert.deepEqual(disabled.getKeys("tui.input.tab"), []);
+	const disabledView = keyboardView(() => {}, false, disabled);
+	focusedControl(renderedText(disabledView), "Direct");
+	disabledView.handleInput("\t");
+	focusedControl(renderedText(disabledView), "Direct");
+	disabledView.handleInput(ARROW_DOWN);
+	disabledView.handleInput(ARROW_DOWN);
+	disabledView.handleInput(ENTER);
+	disabledView.handleInput("draft");
+	disabledView.handleInput("\t");
+	assert.match(renderedText(disabledView).join("\n"), /Custom response/, "disabled Tab remains editor input instead of navigating");
+});
+
 test("multi-select Enter toggles focused options and waits for the primary action", () => {
 	const outcomes: unknown[] = [];
 	const component = keyboardView((outcome) => outcomes.push(outcome), true);
@@ -459,10 +645,10 @@ type FutureExternalViewOptions = ConstructorParameters<typeof QuestionnaireTuiPr
 	onExternalEditorError?: (message: string) => void;
 };
 
-function externalView(externalEditor: QuestionnaireExternalEditor, onExternalEditorError: (message: string) => void = () => {}, localize?: (key: string, fallback: string) => string) {
+function externalView(externalEditor: QuestionnaireExternalEditor, onExternalEditorError: (message: string) => void = () => {}, localize?: (key: string, fallback: string) => string, keybindings?: KeybindingsManager) {
 	const outcomes: unknown[] = [];
 	const component = new QuestionnaireTuiPresentation({
-		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme,
+		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, keybindings,
 		onDone: (outcome) => outcomes.push(outcome), externalEditor, onExternalEditorError, localize,
 	} as FutureExternalViewOptions);
 	return { component, outcomes };
@@ -505,6 +691,34 @@ test("Ctrl+G is ignored outside a custom-answer editor", async () => {
 	component.handleInput("\u0007");
 	await settleExternalEditor();
 	assert.deepEqual(calls, [], "Ctrl+G on options remains a no-op");
+});
+
+test("configured app.editor.external uses the injected editor, while Ctrl+G and [] remain disabled", async () => {
+	const calls: string[] = [];
+	const mapped = externalView(async (draft) => {
+		calls.push(draft);
+		return "mapped result";
+	}, () => {}, undefined, injectedKeybindings({ "app.editor.external": "ctrl+o" }));
+	focusCustomForKeyboard(mapped.component);
+	mapped.component.handleInput("draft");
+	mapped.component.handleInput("\u0007");
+	await settleExternalEditor();
+	assert.deepEqual(calls, [], "the old Ctrl+G does not bypass the injected external-editor binding");
+	mapped.component.handleInput(CTRL_O);
+	await settleExternalEditor();
+	assert.deepEqual(calls, ["draft"]);
+	assert.match(stripTerminalSequences(mapped.component.render(48).join("\n")), /mapped result/);
+
+	const disabledCalls: string[] = [];
+	const disabled = externalView(async (draft) => {
+		disabledCalls.push(draft);
+		return draft;
+	}, () => {}, undefined, injectedKeybindings({ "app.editor.external": [] }));
+	focusCustomForKeyboard(disabled.component);
+	disabled.component.handleInput("draft");
+	disabled.component.handleInput("\u0007");
+	await settleExternalEditor();
+	assert.deepEqual(disabledCalls, [], "an empty external-editor binding disables the launch");
 });
 
 test("Ctrl+G coalesces a pending launch and permits a later launch after settlement", async () => {
@@ -763,6 +977,44 @@ test("custom drafts preserve Editor normalization while question notes attach to
 		{ questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "option", answer: "Direct", preview: "exact preview" },
 		{ questionIndex: 1, question: "Choose checks", kind: "custom", answer: "  custom    line\nnext  qg", notes: "custom note" },
 	] });
+});
+
+test("configured deleteToLineStart clears the whole custom draft, while notes keep native default line-clear semantics", () => {
+	const keybindings = injectedKeybindings({ "tui.editor.deleteToLineStart": "ctrl+q" });
+	const customOutcomes: unknown[] = [];
+	const custom = view((outcome) => customOutcomes.push(outcome), keyboardRequest(), keybindings).component;
+	focusCustomForKeyboard(custom);
+	custom.handleInput("first line");
+	custom.handleInput(ENTER);
+	custom.handleInput("second line");
+	custom.handleInput(ARROW_UP);
+	custom.handleInput(ARROW_LEFT);
+	custom.handleInput(CTRL_Q);
+	custom.handleInput(ESCAPE);
+	custom.handleInput("s");
+	assert.deepEqual(customOutcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+		questionIndex: 0, question: "Choose a route", kind: "custom", answer: "",
+	}] }], "the configured clear action emits an exact empty custom answer from any caret");
+
+	const noteOutcomes: unknown[] = [];
+	const notes = view((outcome) => noteOutcomes.push(outcome), request()).component;
+	notes.handleInput(ENTER);
+	assertFocusPath(notes, ARROW_DOWN, ["Direct", "Staged", "Custom answer", "Question note"]);
+	notes.handleInput(ENTER);
+	notes.handleInput("alpha");
+	notes.handleInput(ENTER);
+	notes.handleInput("beta");
+	notes.handleInput(CTRL_U);
+	notes.handleInput("gamma");
+	notes.handleInput(ESCAPE);
+	notes.handleInput("\t");
+	notes.handleInput(ENTER);
+	notes.handleInput("s");
+	assert.deepEqual(noteOutcomes, [{ correlationId: "view-correlation", cancelled: false, answers: [{
+		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "option", answer: "Direct", preview: "exact preview", notes: "alpha\ngamma",
+		}, {
+			questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: [],
+	}] }], "unconfigured notes retain the native default current-line clear rather than custom whole-draft clearing");
 });
 
 test("question note editing preserves multiline literal actions and returns focus to its own row", () => {
