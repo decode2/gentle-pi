@@ -131,3 +131,28 @@ jobs:
         if: "!cancelled() && inputs.run_windows_startup_experiment == true && matrix.platform == 'windows' && steps.install_windows_dependencies.outcome == 'success'"
         shell: cmd
         run: node scripts\test-packed-runner.mjs --windows-startup-timing-environment
+
+  windows-node-pilot:
+    if: github.repository == 'decode2/gentle-pi'
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      npm_config_ignore_scripts: "true"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020
+        with:
+          node-version: 24
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1
+        env:
+          npm_config_store_dir: ${{ runner.temp }}/pnpm-store
+        with:
+          version: 11.1.1
+          dest: ${{ runner.temp }}/setup-pnpm
+      - name: Install pinned dependencies without lifecycle scripts
+        shell: pwsh
+        run: pnpm install --frozen-lockfile --ignore-scripts --store-dir "$env:RUNNER_TEMP\pnpm-store"
+      - name: Run native Node transport pilot (RED baseline)
+        shell: pwsh
+        run: node --experimental-strip-types --test tests/windows-node-session-transport.test.ts tests/agents-session-transport.test.ts
