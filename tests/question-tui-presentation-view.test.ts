@@ -57,6 +57,8 @@ function narrowMarkdownRequest() {
 function view(done: (outcome: unknown) => void = () => {}) {
 	let renders = 0;
 	const component = new QuestionnaireTuiPresentation({ request: request(), tui: { terminal: { rows: 24 }, requestRender: () => { renders++; } } as TUI, theme, onDone: done });
+	// ui.custom({ overlay: true }) focuses the hosted component before its first render.
+	component.focused = true;
 	return { component, renders: () => renders };
 }
 
