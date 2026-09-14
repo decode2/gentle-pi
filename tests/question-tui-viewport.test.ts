@@ -137,7 +137,9 @@ function keyboardActionRow(lines: readonly string[], label: "Next" | "Submit" | 
 function isFocusedControlLine(line: string, label: string): boolean {
 	if (line === `→ ${label}` || line === `→ [${label}]`) return true;
 	for (const prefix of ["→ ( ) ", "→ (●) ", "→ [ ] ", "→ [x] "]) {
-		if (line === `${prefix}${label}` || line.startsWith(`${prefix}${label} │`)) return true;
+		const control = `${prefix}${label}`;
+		const suffix = line.startsWith(control) ? line.slice(control.length) : undefined;
+		if (suffix === "" || /^ *│/.test(suffix ?? "")) return true;
 	}
 	return false;
 }
@@ -152,6 +154,10 @@ function optionRow(lines: readonly string[], label: string): number {
 	const row = text(lines).findIndex((line) => line.includes(label));
 	assert.ok(row >= 0, `${label} is inside the visible option body`);
 	return row;
+}
+
+function hasVisibleMatrixTail(lines: readonly string[]): boolean {
+	return text(lines).join(" ").includes("UNIQUE MATRIX TAIL");
 }
 
 function eventAt(
@@ -300,7 +306,10 @@ test("keyboard focus scrolls Custom answer into the visible body while the stick
 		assert.equal(focusedKeyboardRow(lines, "Next"), nextFooter, `${width}x${rows} Next is keyboard-reachable in the sticky footer`);
 		component.handleInput("\r");
 		lines = frame(component, width, rows);
-		assert.match(text(lines).join("\n"), /Question 2:/, `${width}x${rows} keyboard Next advances to the next question`);
+		const secondQuestion = text(lines).join("\n");
+		assert.match(secondQuestion, /every check that/, `${width}x${rows} keyboard Next exposes the second question text`);
+		assert.ok(focusedKeyboardRow(lines, "Unit") < keyboardActionRow(lines, "Submit"),
+			`${width}x${rows} keyboard Next advances to the second question's Unit option`);
 		assert.equal(outcomes.length, 0);
 
 		const secondFooter = keyboardActionRow(lines, "Submit");
@@ -331,17 +340,19 @@ test("body wheel scrolling preserves its manual position until keyboard focus mo
 	assert.ok(custom < initialFooter, "the focused Custom answer control is in the scrollable body");
 
 	let scrolledAway = false;
-	for (let index = 0; index < 120; index++) {
-		lines = frame(component, width, rows);
+	let reachedTail = hasVisibleMatrixTail(lines);
+	const maxBodyWheelSteps = 320;
+	for (let index = 0; index < maxBodyWheelSteps && !reachedTail; index++) {
 		const currentCustom = text(lines).findIndex((line) => isFocusedControlLine(line, "Custom answer"));
 		const wheelRow = currentCustom >= 0 ? currentCustom : 0;
 		if (currentCustom < 0) scrolledAway = true;
 		assert.equal(component.handleMouse(event("wheel", wheelRow, width, lines.length, "none", 1))?.handled, true,
 			"a wheel at the body stays body-owned instead of being treated as preview input");
+		lines = frame(component, width, rows);
+		reachedTail = hasVisibleMatrixTail(lines);
 	}
-	lines = frame(component, width, rows);
 	assert.equal(scrolledAway, true, "manual body scrolling may move the focused control out of view");
-	assert.match(text(lines).join("\n"), /many narrow terminal rows\./, "manual body scrolling reaches the long inline tail");
+	assert.equal(reachedTail, true, "manual body scrolling reaches the unique wrapped matrix tail marker");
 	assert.equal(keyboardActionRow(lines, "Submit"), initialFooter, "manual body scrolling leaves the sticky footer fixed");
 	const manuallyScrolled = lines;
 	assert.deepEqual(frame(component, width, rows), manuallyScrolled, "an ordinary rerender preserves manual body scrolling");
@@ -432,7 +443,8 @@ function matrixRequest() {
 		header: "Matrix", question: "Choose a matrix row with descriptions that wrap at narrow widths.", multiSelect: true,
 		options: Array.from({ length: 4 }, (_, index) => ({
 			label: `Row ${index + 1}`,
-			description: `Description ${index + 1} remains deliberately long enough to require many narrow terminal rows. `.repeat(10),
+			description: `Description ${index + 1} remains deliberately long enough to require many narrow terminal rows. `.repeat(10) +
+					(index === 3 ? " UNIQUE MATRIX TAIL" : ""),
 		})),
 	}] });
 	assert.equal(result.ok, true);
@@ -602,7 +614,8 @@ test("keyboard preview paging reaches and returns from the tail without question
 	const component = view(rows, (outcome) => outcomes.push(outcome), longPreviewRequest());
 	let lines = frame(component, width, rows);
 	const focusedOption = text(lines).find((line) => isFocusedControlLine(line, "Long route"));
-	const focusedOptionPrefix = focusedOption?.split(" │ ")[0]?.trim();
+	assert.ok(focusedOption !== undefined, "the exact long-preview option row starts focused");
+	const focusedOptionPrefix = focusedOption.split(" │ ")[0]?.trim();
 	assert.equal(focusedOptionPrefix, "→ ( ) Long route", "the long-preview option starts focused and unselected");
 	assert.match(text(lines).join("\n"), /Ctrl\+PgUp\/PgDn/, "overflow exposes a keyboard scrolling hint");
 	assert.doesNotMatch(text(lines).join("\n"), /PREVIEW_TAIL/, "the long-preview tail starts below the fixed slot");

@@ -95,7 +95,9 @@ function renderedText(component: QuestionnaireTuiPresentation, width = 80): stri
 function isFocusedControlLine(line: string, label: string): boolean {
 	if (line === `→ ${label}` || line === `→ [${label}]`) return true;
 	for (const prefix of ["→ ( ) ", "→ (●) ", "→ [ ] ", "→ [x] "]) {
-		if (line === `${prefix}${label}` || line.startsWith(`${prefix}${label} │`)) return true;
+		const control = `${prefix}${label}`;
+		const suffix = line.startsWith(control) ? line.slice(control.length) : undefined;
+		if (suffix === "" || /^ *│/.test(suffix ?? "")) return true;
 	}
 	return false;
 }
@@ -108,7 +110,9 @@ function focusedControl(lines: readonly string[], label: string): number {
 
 function isOptionControlLine(line: string, label: string): boolean {
 	for (const prefix of ["( ) ", "(●) ", "[ ] ", "[x] ", "→ ( ) ", "→ (●) ", "→ [ ] ", "→ [x] "]) {
-		if (line === `${prefix}${label}` || line.startsWith(`${prefix}${label} │`)) return true;
+		const control = `${prefix}${label}`;
+		const suffix = line.startsWith(control) ? line.slice(control.length) : undefined;
+		if (suffix === "" || /^ *│/.test(suffix ?? "")) return true;
 	}
 	return false;
 }
