@@ -30,6 +30,17 @@ function request() {
 	return result.request;
 }
 
+function emptyMultiSubmitRequest() {
+	const result = createFrozenQuestionnaireRequest("empty-multi-submit-correlation", { questions: [{
+		question: "Choose checks", header: "Checks", multiSelect: true, options: [
+			{ label: "First", description: "First check." }, { label: "Second", description: "Second check." },
+		],
+	}] });
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error("empty multi submit fixture must be valid");
+	return result.request;
+}
+
 class FakeUi implements Pick<ExtensionUIContext, "select" | "editor"> {
 	readonly calls: Call[] = [];
 	private busy = false;
@@ -117,6 +128,22 @@ test("commits deliberately empty multi and empty custom drafts only through Next
 		{ questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: [] },
 		{ questionIndex: 2, question: "Add context", kind: "custom", answer: "" },
 	]);
+});
+
+test("explicit Submit commits an untouched empty multi as non-cancelled no input", async () => {
+	const questionnaire = emptyMultiSubmitRequest();
+	const ui = new FakeUi(["Submit"]);
+	const outcome = await createRpcQuestionPresentationDriver(ui).present(questionnaire);
+	const formatted = validateAndFormat(questionnaire, outcome);
+	assert.equal(formatted.ok, true, "the RPC emits the owned raw outcome shape");
+	if (!formatted.ok) throw new Error("empty multi submission must be valid");
+	assert.equal(formatted.result.details.cancelled, false);
+	assert.equal(formatted.result.details.answers.length, 1);
+	const multi = formatted.result.details.answers[0];
+	if (!multi || multi.kind !== "multi" || multi.question !== "Choose checks") throw new Error("explicit Submit must commit the only empty multi answer");
+	assert.deepEqual(multi.selected, []);
+	assert.match(formatted.result.content[0]!.text, /"Choose checks"="\(no input\)"/);
+	assert.doesNotMatch(formatted.result.content[0]!.text, /^User declined to answer questions$/);
 });
 
 test("backs up without erasing commits, revisits custom as options, and cancels partial results", async () => {

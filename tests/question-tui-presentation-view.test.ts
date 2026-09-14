@@ -4,6 +4,7 @@ import { initTheme } from "@earendil-works/pi-coding-agent";
 import { StdinBuffer, stripTerminalSequences, type TUI, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import type { QuestionnaireExternalEditor } from "../lib/questions/external-editor.ts";
 import { QuestionnaireTuiPresentation } from "../lib/questions/tui-presentation-view.ts";
+import { validateAndFormat } from "../lib/questions/response.ts";
 import { createFrozenQuestionnaireRequest } from "../lib/questions/validation.ts";
 
 // Markdown delegates styling to the SDK's process-wide theme callbacks.
@@ -54,9 +55,39 @@ function narrowMarkdownRequest() {
 	return result.request;
 }
 
-function view(done: (outcome: unknown) => void = () => {}) {
+function emptyMultiNextRequest() {
+	const result = createFrozenQuestionnaireRequest("empty-multi-next-correlation", { questions: [{
+		question: "Choose a route", header: "Route", options: [
+			{ label: "Direct", description: "Fast" }, { label: "Staged", description: "Careful" },
+		],
+	}, {
+		question: "Choose checks", header: "Checks", multiSelect: true, options: [
+			{ label: "Unit", description: "Fast" }, { label: "Integration", description: "Broad" },
+		],
+	}, {
+		question: "Finish route", header: "Finish", options: [
+			{ label: "Keep", description: "Keep defaults" }, { label: "Change", description: "Change defaults" },
+		],
+	}] });
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error("empty multi next fixture must be valid");
+	return result.request;
+}
+
+function emptyMultiSubmitRequest() {
+	const result = createFrozenQuestionnaireRequest("empty-multi-submit-correlation", { questions: [{
+		question: "Choose checks", header: "Checks", multiSelect: true, options: [
+			{ label: "First", description: "First check." }, { label: "Second", description: "Second check." },
+		],
+	}] });
+	assert.equal(result.ok, true);
+	if (!result.ok) throw new Error("empty multi submit fixture must be valid");
+	return result.request;
+}
+
+function view(done: (outcome: unknown) => void = () => {}, questionnaire = request()) {
 	let renders = 0;
-	const component = new QuestionnaireTuiPresentation({ request: request(), tui: { terminal: { rows: 24 }, requestRender: () => { renders++; } } as TUI, theme, onDone: done });
+	const component = new QuestionnaireTuiPresentation({ request: questionnaire, tui: { terminal: { rows: 24 }, requestRender: () => { renders++; } } as TUI, theme, onDone: done });
 	// ui.custom({ overlay: true }) focuses the hosted component before its first render.
 	component.focused = true;
 	return { component, renders: () => renders };
@@ -863,6 +894,67 @@ test("a 20-column pointer affordance visibly opens inline custom editors for sin
 	clickVisible(component, "Custom answer");
 	assert.match(stripTerminalSequences(component.render(20).join("\n")), /Custom response/, "pointer activation opens the public editor inline for the multi-select question");
 	component.handleInput("multi answer");
+});
+
+test("explicit Next commits an untouched empty multi-select and advances", () => {
+	const outcomes: unknown[] = [];
+	const questionnaire = emptyMultiNextRequest();
+	const { component } = view((outcome) => outcomes.push(outcome), questionnaire);
+	component.handleInput(ENTER);
+	component.handleInput("n");
+	assert.match(renderedText(component).join("\n"), /Question 2:/, "the selected single question advances first");
+	assert.doesNotMatch(renderedText(component).join("\n"), /\[x\]/, "the untouched multi-select starts empty");
+	component.handleInput("n");
+	assert.match(renderedText(component).join("\n"), /Question 3:/, "explicit Next advances past an empty multi-select");
+	assert.equal(outcomes.length, 0, "advancing does not submit the focused overlay");
+	component.handleInput("s");
+	assert.equal(outcomes.length, 1, "the trailing question can submit the committed partial answers");
+
+	const formatted = validateAndFormat(questionnaire, outcomes[0]);
+	assert.equal(formatted.ok, true, "the TUI emits the owned raw outcome shape");
+	if (!formatted.ok) throw new Error("empty multi outcome must be valid");
+	const multi = formatted.result.details.answers.find((answer) => answer.question === "Choose checks");
+	if (!multi || multi.kind !== "multi") throw new Error("empty multi answer must be present");
+	assert.deepEqual(multi.selected, [], "explicit Next commits an empty selected list");
+});
+
+test("explicit Next does not select or advance an untouched single-select", () => {
+	const outcomes: unknown[] = [];
+	const { component } = view((outcome) => outcomes.push(outcome));
+	component.handleInput("n");
+	const visible = renderedText(component).join("\n");
+	assert.match(visible, /Question 1:/, "an untouched single-select remains active");
+	assert.doesNotMatch(visible, /\(●\)/, "explicit Next does not select a single option");
+	assert.equal(outcomes.length, 0, "an untouched single-select does not complete the overlay");
+});
+
+test("explicit Submit formats an untouched empty multi-select as no input while Cancel still declines", () => {
+	const questionnaire = emptyMultiSubmitRequest();
+	const outcomes: unknown[] = [];
+	const component = view((outcome) => outcomes.push(outcome), questionnaire).component;
+	component.handleInput("s");
+	assert.equal(outcomes.length, 1);
+
+	const formatted = validateAndFormat(questionnaire, outcomes[0]);
+	assert.equal(formatted.ok, true, "explicit Submit emits the owned raw outcome shape");
+	if (!formatted.ok) throw new Error("empty multi submission must be valid");
+	assert.equal(formatted.result.details.cancelled, false);
+	assert.equal(formatted.result.details.answers.length, 1);
+	const multi = formatted.result.details.answers[0];
+	if (!multi || multi.kind !== "multi" || multi.question !== "Choose checks") throw new Error("explicit Submit must commit the only empty multi answer");
+	assert.deepEqual(multi.selected, []);
+	assert.match(formatted.result.content[0]!.text, /"Choose checks"="\(no input\)"/);
+	assert.doesNotMatch(formatted.result.content[0]!.text, /^User declined to answer questions$/);
+
+	const cancelled: unknown[] = [];
+	const cancelView = view((outcome) => cancelled.push(outcome), questionnaire).component;
+	cancelView.handleInput(ESCAPE);
+	const declined = validateAndFormat(questionnaire, cancelled[0]);
+	assert.equal(declined.ok, true);
+	if (!declined.ok) throw new Error("Cancel outcome must be valid");
+	assert.equal(declined.result.details.cancelled, true);
+	assert.deepEqual(declined.result.details.answers, []);
+	assert.equal(declined.result.content[0]!.text, "User declined to answer questions");
 });
 
 test("pointer Next commits each answer and Submit remains explicit on the last question", () => {
