@@ -567,9 +567,9 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 
 	private hasExplicitActiveAnswer(): boolean {
 		const index = this.state.activeQuestionIndex;
-		if (this.state.tabs[index] === "custom") return true;
+		if (this.state.tabs[index] === "custom") return this.state.customDrafts[index] !== undefined;
 		const question = this.state.request.questions[index]!;
-		return question.multiSelect ? this.state.multiSelections[index]!.length > 0 : this.state.optionSelections[index] !== undefined;
+		return question.multiSelect ? true : this.state.optionSelections[index] !== undefined;
 	}
 
 	private openEditor(editing: Exclude<Editing, undefined>): void {

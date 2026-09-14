@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { RawQuestionnaireOutcome } from "../lib/questions/contract.ts";
 import type { QuestionnaireLocalizer } from "../lib/questions/localization.ts";
 import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
 import { validateAndFormat } from "../lib/questions/response.ts";
@@ -64,10 +65,15 @@ class FakeUi implements Pick<ExtensionUIContext, "select" | "editor"> {
 	}
 }
 
-function owned(outcome: unknown) {
-	const formatted = validateAndFormat(request(), outcome);
-	assert.equal(formatted.ok, true, "driver raw outcome belongs to the owner validator");
+function owned(outcome: unknown): RawQuestionnaireOutcome {
+	assertOwnedOutcome(outcome);
 	return outcome;
+}
+
+function assertOwnedOutcome(value: unknown): asserts value is RawQuestionnaireOutcome {
+	const formatted = validateAndFormat(request(), value);
+	assert.equal(formatted.ok, true, "driver raw outcome belongs to the owner validator");
+	if (!formatted.ok) throw new Error("driver raw outcome belongs to the owner validator");
 }
 
 test("presents exact static descriptions and frozen previews while keeping routing separate", async () => {
@@ -180,7 +186,7 @@ test("awaits each RPC dialog before requesting the next", async () => {
 test("propagates native RPC dialog rejection instead of converting it to cancellation", async () => {
 	const rejection = new Error("native-select-rejection");
 	const ui = new FakeUi([Promise.reject(rejection)]);
-	await assert.rejects(() => createRpcQuestionPresentationDriver(ui).present(request()), rejection);
+	await assert.rejects(async () => createRpcQuestionPresentationDriver(ui).present(request()), rejection);
 	assert.equal(ui.calls.length, 1);
 });
 
