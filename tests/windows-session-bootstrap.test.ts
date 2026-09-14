@@ -555,7 +555,7 @@ function probeWithNeutralSeams(outputChunks = ['{"event":"startup-marker","marke
 		clock = target;
 		drainMicrotasks();
 	};
-	return { child, timers, promise, advance, drain: () => { advance(30_000); drainMicrotasks(); } };
+	return { child, timers, promise, advance, setClock: (at: number) => { clock = BigInt(at) * 1_000_000n; }, emit: (output: string) => child.stdout.emit("data", Buffer.from(output)), close: () => child.emit("close", 0), drain: () => { advance(30_000); drainMicrotasks(); } };
 }
 
 test("Windows startup timing diagnostics records monotonic marker and deadline observations", async () => {
@@ -611,6 +611,66 @@ test("Windows startup timing diagnostics treats coalesced and separate late fram
 	assert.deepEqual(coalescedResult.failure, separateResult.failure);
 	assert.equal(coalesced.timers.size, 0);
 	assert.equal(separate.timers.size, 0);
+});
+
+test("Windows startup timing diagnostics records budget-late reply before delayed deadline callback", async () => {
+	const probe = probeWithNeutralSeams();
+	try {
+		probe.setClock(25_001);
+		probe.emit('{"event":"startup-marker","marker":"native-ready"}\n{"requestId":"start-1","ok":true,"result":{"state":"partial"}}\n');
+		probe.close();
+		const result = await probe.promise;
+		assert.deepEqual(result.failure, { stage: "helper-start", code: "timed-out" });
+		assert.equal(result.deadlineSnapshot, null);
+		assert.equal(result.lateValidResponseElapsedMs, 25_001);
+		assert.equal(result.lateValidResponseClassification, "after-budget-before-deadline");
+	} finally { probe.drain(); }
+});
+
+test("Windows startup timing diagnostics latches the first late reply and halts duplicate protocol frames", async () => {
+	const probe = probeWithNeutralSeams();
+	try {
+		probe.advance(25_000);
+		probe.advance(25_002, '{"event":"startup-marker","marker":"native-ready"}\n{"requestId":"start-1","ok":true,"result":{"state":"partial"}}\n');
+		probe.setClock(25_003);
+		probe.emit('{"requestId":"start-1","ok":true,"result":{"state":"partial"}}\n');
+		probe.setClock(25_004);
+		probe.emit('{"requestId":"start-1","ok":true,"result":{"state":"partial"}}\n');
+		probe.drain();
+		const result = await probe.promise;
+		assert.deepEqual(result.failure, { stage: "helper-start", code: "timed-out" });
+		assert.equal(result.lateValidResponseElapsedMs, 25_002);
+		assert.equal(result.lateValidResponseClassification, "after-deadline");
+	} finally { probe.drain(); }
+});
+
+test("Windows startup timing diagnostics stops a malformed frame before a coalesced valid reply", async () => {
+	const probe = probeWithNeutralSeams();
+	try {
+		probe.setClock(1_000);
+		probe.emit('{"requestId":"start-1","ok":true,"result":{"state":"partial"}}\n{"event":"startup-marker","marker":"native-ready"}\n{"requestId":"start-1","ok":true,"result":{"state":"partial"}}\n');
+		probe.close();
+		const result = await probe.promise;
+		assert.deepEqual(result.failure, { stage: "helper-start", code: "invalid-output" });
+		assert.equal(result.helperStartOutcome, "invalid-output");
+		assert.equal(result.nativeReadyElapsedMs, null);
+		assert.equal(result.lateValidResponseElapsedMs, null);
+	} finally { probe.drain(); }
+});
+
+test("Windows startup timing diagnostics halts recognized rejection before later valid frames", async () => {
+	const probe = probeWithNeutralSeams();
+	try {
+		probe.advance(25_000);
+		probe.setClock(25_002);
+		probe.emit('{"requestId":"start-1","ok":false,"error":"busy"}\n{"event":"startup-marker","marker":"native-ready"}\n{"requestId":"start-1","ok":true,"result":{"state":"partial"}}\n');
+		probe.emit('{"event":"startup-marker","marker":"native-ready"}\n');
+		probe.drain();
+		const result = await probe.promise;
+		assert.deepEqual(result.failure, { stage: "helper-start", code: "timed-out" });
+		assert.equal(result.lateValidResponseElapsedMs, null);
+		assert.equal(result.nativeReadyElapsedMs, null);
+	} finally { probe.drain(); }
 });
 
 test("owned helper cleanup settles a spawn error without an exit event", async () => {
@@ -882,7 +942,7 @@ test("packed Windows startup timing source guard uses the installed helper direc
 	assert.match(source, /WINDOWS_STARTUP_TIMING_VALID_START_REPLIES\.has\(line\) \|\| markerOrdinal !== 2/);
 	assert.match(source, /WINDOWS_STARTUP_TIMING_REJECTED_START_REPLY\.test\(line\)/);
 	assert.match(source, /line\.length >= 3 && line\[0\] === 0xef && line\[1\] === 0xbb && line\[2\] === 0xbf/);
-	assert.match(source, /const elapsedMs = Number\(now\(\) - startedAt\) \/ 1e6;/);
+	assert.match(source, /const elapsedSinceStart = \(\) => Number\(now\(\) - startedAt\) \/ 1e6;/);
 	assert.match(source, /const spawnProcess = options\.spawnProcess \?\? spawn/);
 	assert.match(source, /const now = options\.now \?\? \(\(\) => process\.hrtime\.bigint\(\)\)/);
 	assert.match(source, /const schedule = options\.setTimeout \?\? setTimeout/);

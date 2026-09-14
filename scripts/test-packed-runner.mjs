@@ -108,6 +108,8 @@ export function newWindowsStartupTimingReceipt() {
 	return {
 		checkId: "not-attempted", packVerified: false, installCompleted: false, budgetMs: WINDOWS_STARTUP_TIMING_BUDGET_MS,
 		helperStartOutcome: "not-attempted", startElapsedMs: null, lastStartupMarker: null,
+		scriptEnteredElapsedMs: null, nativeReadyElapsedMs: null, markerOrder: [], deadlineSnapshot: null,
+		lateValidResponseElapsedMs: null, lateValidResponseClassification: null,
 		cleanup: "not-attempted", physicalCloseObserved: false, cleanupCompleted: false,
 	};
 }
@@ -117,6 +119,8 @@ function newWindowsStartupTimingEnvironmentCase(name, pathAdditionKeys) {
 	return {
 		name, pathAdditionKeys, budgetMs: WINDOWS_STARTUP_TIMING_BUDGET_MS,
 		helperStartOutcome: "not-attempted", startElapsedMs: null, lastStartupMarker: null,
+		scriptEnteredElapsedMs: null, nativeReadyElapsedMs: null, markerOrder: [], deadlineSnapshot: null,
+		lateValidResponseElapsedMs: null, lateValidResponseClassification: null,
 		cleanup: "not-attempted", physicalCloseObserved: false, failureStage: null, failureCode: null,
 	};
 }
@@ -263,6 +267,12 @@ export function reportWindowsStartupTimingReceipt(receipt, error, writers = { st
 		helperStartOutcome: receipt.helperStartOutcome,
 		startElapsedMs: receipt.startElapsedMs,
 		lastStartupMarker: receipt.lastStartupMarker,
+		scriptEnteredElapsedMs: receipt.scriptEnteredElapsedMs,
+		nativeReadyElapsedMs: receipt.nativeReadyElapsedMs,
+		markerOrder: receipt.markerOrder,
+		deadlineSnapshot: receipt.deadlineSnapshot,
+		lateValidResponseElapsedMs: receipt.lateValidResponseElapsedMs,
+		lateValidResponseClassification: receipt.lateValidResponseClassification,
 		cleanup: receipt.cleanup,
 		physicalCloseObserved: receipt.physicalCloseObserved,
 		cleanupCompleted: receipt.cleanupCompleted,
@@ -271,7 +281,7 @@ export function reportWindowsStartupTimingReceipt(receipt, error, writers = { st
 	const line = JSON.stringify(report);
 	const boundedLine = Buffer.byteLength(line, "utf8") <= MAX_WINDOWS_STARTUP_TIMING_REPORT_BYTES
 		? line
-		: '{"mode":"windows-startup-timing","status":"failed","checkId":"not-attempted","packVerified":false,"installCompleted":false,"budgetMs":25000,"helperStartOutcome":"not-attempted","startElapsedMs":null,"lastStartupMarker":null,"cleanup":"not-attempted","physicalCloseObserved":false,"cleanupCompleted":false,"stage":"cleanup","code":"unknown"}';
+		: '{"mode":"windows-startup-timing","status":"failed","checkId":"not-attempted","packVerified":false,"installCompleted":false,"budgetMs":25000,"helperStartOutcome":"not-attempted","startElapsedMs":null,"lastStartupMarker":null,"scriptEnteredElapsedMs":null,"nativeReadyElapsedMs":null,"markerOrder":[],"deadlineSnapshot":null,"lateValidResponseElapsedMs":null,"lateValidResponseClassification":null,"cleanup":"not-attempted","physicalCloseObserved":false,"cleanupCompleted":false,"stage":"cleanup","code":"unknown"}';
 	try { (failure === undefined ? writers.stdout : writers.stderr).write(`${boundedLine}\n`); } catch { /* Reporting cannot expose a raw secondary error. */ }
 	if (failure !== undefined) process.exitCode = 1;
 }
@@ -492,7 +502,7 @@ export function runWindowsStartupTimingProbe(runtimeScript, env, cwd, options = 
 	const schedule = options.setTimeout ?? setTimeout;
 	const cancel = options.clearTimeout ?? clearTimeout;
 	return new Promise((resolveProbe) => {
-		const observation = { helperStartOutcome: "not-attempted", startElapsedMs: null, lastStartupMarker: null, cleanup: "not-attempted", physicalCloseObserved: false };
+		const observation = { helperStartOutcome: "not-attempted", startElapsedMs: null, lastStartupMarker: null, scriptEnteredElapsedMs: null, nativeReadyElapsedMs: null, markerOrder: [], deadlineSnapshot: null, lateValidResponseElapsedMs: null, lateValidResponseClassification: null, cleanup: "not-attempted", physicalCloseObserved: false };
 		let child;
 		let startedAt;
 		let startTimer;
@@ -504,6 +514,8 @@ export function runWindowsStartupTimingProbe(runtimeScript, env, cwd, options = 
 		let output = Buffer.alloc(0);
 		let outputBytes = 0;
 		let failure;
+		let validReplyObserved = false;
+		let diagnosticStreamHalted = false;
 		const clearTimers = () => {
 			if (startTimer) cancel(startTimer);
 			if (cleanupTimer) cancel(cleanupTimer);
@@ -528,6 +540,10 @@ export function runWindowsStartupTimingProbe(runtimeScript, env, cwd, options = 
 			if (!startReplyObserved && WINDOWS_STARTUP_TIMING_OUTCOMES.has(startOutcome)) observation.helperStartOutcome = startOutcome;
 			failure = { stage, code };
 		};
+		const elapsedSinceStart = () => Number(now() - startedAt) / 1e6;
+		const captureDeadline = () => {
+			if (observation.deadlineSnapshot === null) observation.deadlineSnapshot = Object.freeze({ elapsedMs: elapsedSinceStart(), lastStartupMarker: observation.lastStartupMarker, failure: { stage: "helper-start", code: "timed-out" } });
+		};
 		const beginBoundedCleanup = () => {
 			if (!child || observation.physicalCloseObserved || cleanupTimer || settled) return;
 			cleanupTimer = schedule(() => {
@@ -544,22 +560,30 @@ export function runWindowsStartupTimingProbe(runtimeScript, env, cwd, options = 
 			setFailure(stage, code, startOutcome);
 			beginBoundedCleanup();
 		};
-		const rejectOutput = () => failAndCleanup(startReplyObserved ? "helper-result" : "helper-start", "invalid-output", "invalid-output");
+		const rejectOutput = () => { diagnosticStreamHalted = true; failAndCleanup(startReplyObserved ? "helper-result" : "helper-start", "invalid-output", "invalid-output"); };
+		const mayContinueAfterFailure = () => failure === undefined || (failure.stage === "helper-start" && failure.code === "timed-out" && !diagnosticStreamHalted);
 		const observeControlLine = (rawLine) => {
 			const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
 			if (line === '{"event":"startup-marker","marker":"script-entered"}') {
 				if (startReplyObserved || markerOrdinal !== 0) return rejectOutput();
-				markerOrdinal = 1; observation.lastStartupMarker = "script-entered"; return;
+				markerOrdinal = 1; observation.lastStartupMarker = "script-entered"; observation.scriptEnteredElapsedMs = elapsedSinceStart(); observation.markerOrder.push("script-entered"); return;
 			}
 			if (line === '{"event":"startup-marker","marker":"native-ready"}') {
 				if (startReplyObserved || markerOrdinal !== 1) return rejectOutput();
-				markerOrdinal = 2; observation.lastStartupMarker = "native-ready"; return;
+				markerOrdinal = 2; observation.lastStartupMarker = "native-ready"; observation.nativeReadyElapsedMs = elapsedSinceStart(); observation.markerOrder.push("native-ready"); return;
 			}
-			if (startReplyObserved) return rejectOutput();
-			if (WINDOWS_STARTUP_TIMING_REJECTED_START_REPLY.test(line)) return failAndCleanup("helper-start", "rejected", "rejected");
+			if (startReplyObserved || validReplyObserved) return rejectOutput();
+			if (WINDOWS_STARTUP_TIMING_REJECTED_START_REPLY.test(line)) { diagnosticStreamHalted = true; return failAndCleanup("helper-start", "rejected", "rejected"); }
 			if (!WINDOWS_STARTUP_TIMING_VALID_START_REPLIES.has(line) || markerOrdinal !== 2) return rejectOutput();
-			const elapsedMs = Number(now() - startedAt) / 1e6;
-			if (!Number.isFinite(elapsedMs) || elapsedMs > WINDOWS_STARTUP_TIMING_BUDGET_MS) return failAndCleanup("helper-start", "timed-out", "timed-out");
+			const elapsedMs = elapsedSinceStart();
+			if (Number.isFinite(elapsedMs) && elapsedMs > WINDOWS_STARTUP_TIMING_BUDGET_MS) {
+				validReplyObserved = true;
+				observation.lateValidResponseElapsedMs = elapsedMs;
+				observation.lateValidResponseClassification = observation.deadlineSnapshot === null ? "after-budget-before-deadline" : "after-deadline";
+				return failAndCleanup("helper-start", "timed-out", "timed-out");
+			}
+			if (!Number.isFinite(elapsedMs)) return failAndCleanup("helper-start", "timed-out", "timed-out");
+			validReplyObserved = true;
 			startReplyObserved = true;
 			observation.helperStartOutcome = "valid-reply";
 			observation.startElapsedMs = elapsedMs;
@@ -569,6 +593,7 @@ export function runWindowsStartupTimingProbe(runtimeScript, env, cwd, options = 
 		};
 		const onStdout = (chunk) => {
 			if (!Buffer.isBuffer(chunk) || settled) return failAndCleanup("helper-start", "stream-failed", "stream-failed");
+			if (diagnosticStreamHalted) return;
 			outputBytes += chunk.length;
 			if (outputBytes > MAX_WINDOWS_STARTUP_TIMING_OUTPUT_BYTES) return rejectOutput();
 			const combined = output.length === 0 ? chunk : Buffer.concat([output, chunk]);
@@ -584,7 +609,7 @@ export function runWindowsStartupTimingProbe(runtimeScript, env, cwd, options = 
 				offset = newline + 1;
 				if (line.length > 16_385 || (line.length >= 3 && line[0] === 0xef && line[1] === 0xbb && line[2] === 0xbf)) return rejectOutput();
 				try { observeControlLine(new TextDecoder("utf-8", { fatal: true }).decode(line)); } catch { return rejectOutput(); }
-				if (failure !== undefined) return;
+				if (!mayContinueAfterFailure()) return;
 			}
 		};
 		const onClose = (status) => {
@@ -610,7 +635,7 @@ export function runWindowsStartupTimingProbe(runtimeScript, env, cwd, options = 
 		child.stderr.resume();
 		child.once("error", () => failAndCleanup(startReplyObserved ? "helper-result" : "helper-start", "stream-failed", "stream-failed"));
 		child.once("close", onClose);
-		startTimer = schedule(() => failAndCleanup("helper-start", "timed-out", "timed-out"), WINDOWS_STARTUP_TIMING_BUDGET_MS);
+		startTimer = schedule(() => { captureDeadline(); failAndCleanup("helper-start", "timed-out", "timed-out"); }, WINDOWS_STARTUP_TIMING_BUDGET_MS);
 		try { child.stdin.end(WINDOWS_STARTUP_TIMING_START_REQUEST, (error) => { if (error) failAndCleanup(startReplyObserved ? "helper-result" : "helper-start", "write-failed", "write-failed"); }); }
 		catch { failAndCleanup("helper-start", "write-failed", "write-failed"); }
 	});
@@ -1525,6 +1550,12 @@ async function testWindowsStartupTimingPackedHelper() {
 		receipt.helperStartOutcome = measured.helperStartOutcome;
 		receipt.startElapsedMs = measured.startElapsedMs;
 		receipt.lastStartupMarker = measured.lastStartupMarker;
+		receipt.scriptEnteredElapsedMs = measured.scriptEnteredElapsedMs;
+		receipt.nativeReadyElapsedMs = measured.nativeReadyElapsedMs;
+		receipt.markerOrder = measured.markerOrder;
+		receipt.deadlineSnapshot = measured.deadlineSnapshot;
+		receipt.lateValidResponseElapsedMs = measured.lateValidResponseElapsedMs;
+		receipt.lateValidResponseClassification = measured.lateValidResponseClassification;
 		receipt.cleanup = measured.cleanup;
 		receipt.physicalCloseObserved = measured.physicalCloseObserved;
 		stage = "helper-result";
@@ -1619,6 +1650,12 @@ async function testWindowsStartupTimingEnvironmentExperiment() {
 			caseReceipt.helperStartOutcome = measured.helperStartOutcome;
 			caseReceipt.startElapsedMs = measured.startElapsedMs;
 			caseReceipt.lastStartupMarker = measured.lastStartupMarker;
+			caseReceipt.scriptEnteredElapsedMs = measured.scriptEnteredElapsedMs;
+			caseReceipt.nativeReadyElapsedMs = measured.nativeReadyElapsedMs;
+			caseReceipt.markerOrder = measured.markerOrder;
+			caseReceipt.deadlineSnapshot = measured.deadlineSnapshot;
+			caseReceipt.lateValidResponseElapsedMs = measured.lateValidResponseElapsedMs;
+			caseReceipt.lateValidResponseClassification = measured.lateValidResponseClassification;
 			caseReceipt.cleanup = measured.cleanup;
 			caseReceipt.physicalCloseObserved = measured.physicalCloseObserved;
 			stage = "helper-result";
