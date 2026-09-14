@@ -230,8 +230,11 @@ function assertStablePreviewGeometry(
 	for (const label of labels) {
 		assert.equal(optionRow(after, label), optionRow(before, label), `${width}-column focus keeps ${label} in the same row`);
 	}
-	assert.equal(actionRow(after, "Submit"), actionRow(before, "Submit"), `${width}-column focus keeps Submit in the same row`);
-	assert.equal(actionRow(after, "Cancel"), actionRow(before, "Cancel"), `${width}-column focus keeps Cancel in the same row`);
+	for (const label of ["Submit", "Cancel"] as const) {
+		assert.equal(actionRow(after, label), actionRow(before, label), `${width}-column focus keeps ${label} in its own footer row`);
+	}
+	assert.equal(actionRow(after, "Cancel"), actionRow(after, "Submit") + 1,
+		`${width}-column footer keeps the primary immediately above Cancel`);
 	assertFooter(after, "Submit");
 }
 
@@ -254,12 +257,15 @@ function exercisePreviewFocusCycle(component: QuestionnaireTuiPresentation, widt
 
 function assertFooter(lines: readonly string[], primary: "Next" | "Submit") {
 	const footerRows = text(lines).map(actionButtons).filter((buttons) => buttons.length > 0);
-	assert.equal(footerRows.length, 1, "primary and Cancel share one physical footer row");
-	const footer = footerRows[0]!;
-	assert.equal(footer.filter((button) => button.label === primary).length, 1, "the footer has exactly one primary action");
+	assert.equal(footerRows.length, 2, "primary and Cancel occupy adjacent footer rows");
+	const primaryRow = footerRows[0]!;
+	const cancelRow = footerRows[1]!;
+	assert.deepEqual(primaryRow.map((button) => button.label), [primary], "the upper footer row has exactly one primary action");
+	assert.deepEqual(cancelRow.map((button) => button.label), ["Cancel"], "the lower footer row has exactly one Cancel action");
+	assert.equal(actionRow(lines, primary) + 1, actionRow(lines, "Cancel"), "Cancel is immediately below the primary action");
+	assert.equal(actionRow(lines, "Cancel"), lines.length - 1, "Cancel is anchored to the bottom of the visible frame");
 	const opposite = primary === "Next" ? "Submit" : "Next";
-	assert.equal(footer.filter((button) => button.label === opposite).length, 0, "the opposite primary action is absent");
-	assert.equal(footer.filter((button) => button.label === "Cancel").length, 1, "the footer has exactly one Cancel action");
+	assert.equal(footerRows.flat().filter((button) => button.label === opposite).length, 0, "the opposite primary action is absent");
 }
 
 for (const width of [20, 32]) {
@@ -391,6 +397,8 @@ test("keyboard focus scrolls Custom answer into the visible body while the stick
 		assert.equal(outcomes.length, 0);
 
 		const secondFooter = keyboardActionRow(lines, "Submit");
+		const secondCancelFooter = keyboardActionRow(lines, "Cancel");
+		assert.equal(secondCancelFooter, secondFooter + 1, `${width}x${rows} Cancel is the adjacent lower sticky footer row`);
 		component.handleInput("\u001b[B");
 		component.handleInput("\u001b[B");
 		component.handleInput("\u001b[B");
@@ -399,8 +407,9 @@ test("keyboard focus scrolls Custom answer into the visible body while the stick
 		assert.equal(keyboardActionRow(lines, "Submit"), secondFooter, `${width}x${rows} Submit stays in the sticky footer`);
 		component.handleInput("\u001b[B");
 		lines = frame(component, width, rows);
-		assert.equal(focusedKeyboardRow(lines, "Cancel"), secondFooter, `${width}x${rows} Cancel shares the physical footer row with Submit`);
-		assert.equal(keyboardActionRow(lines, "Submit"), secondFooter, `${width}x${rows} Cancel focus does not move the sticky footer`);
+		assert.equal(focusedKeyboardRow(lines, "Cancel"), secondCancelFooter, `${width}x${rows} Cancel focus moves to the lower sticky footer row`);
+		assert.equal(keyboardActionRow(lines, "Submit"), secondFooter, `${width}x${rows} Cancel focus does not move the primary footer row`);
+		assert.equal(keyboardActionRow(lines, "Cancel"), secondCancelFooter, `${width}x${rows} Cancel focus does not move its sticky footer row`);
 		assert.equal(outcomes.length, 0, `${width}x${rows} reaching footer actions does not auto-submit or cancel`);
 	}
 });
@@ -444,86 +453,118 @@ test("body wheel scrolling preserves its manual position until keyboard focus mo
 });
 
 for (const rows of [1, 2, 3]) {
-	test(`a ${rows}-row overlay keeps pointer Cancel when its label physically fits`, () => {
-		const outcomes: unknown[] = [];
+	test(`a ${rows}-row overlay keeps footer bounds inside the visible frame`, () => {
 		const width = 20;
+		const outcomes: unknown[] = [];
 		const component = view(rows, (outcome) => outcomes.push(outcome), simpleRequest());
 		const lines = frame(component, width, rows);
+		const primary = text(lines).findIndex((line) => actionButtons(line).some((button) => button.label === "Submit"));
 		const cancel = actionRow(lines, "Cancel");
-		component.handleMouse(event("press", cancel, width, lines.length));
-		component.handleMouse(event("click", cancel, width, lines.length));
-		assert.equal(outcomes.length, 1, "the minimal frame does not require a keyboard shortcut to cancel");
+		assert.equal(cancel, lines.length - 1, `${rows}-row Cancel is the natural bottom slice of the frame`);
+
+		if (rows === 1) {
+			assert.equal(primary, -1, "a one-row frame exposes only Cancel, never an invisible primary action");
+			const cancelX = stripTerminalSequences(lines[cancel]!).indexOf("Cancel");
+			assert.ok(cancelX >= 0, "the one-row Cancel label is visible and clickable");
+			component.handleMouse(eventAt("press", cancelX + 1, cancel, width, lines.length));
+			component.handleMouse(eventAt("click", cancelX + 1, cancel, width, lines.length));
+			assert.deepEqual(outcomes, [{ correlationId: "cancel-correlation", cancelled: true, answers: [] }],
+				"a one-row click routes to visible Cancel instead of an invisible primary");
+			return;
+		}
+
+		assert.equal(primary, lines.length - 2, `${rows}-row primary is the upper footer row`);
+		assert.equal(cancel, primary + 1, `${rows}-row Cancel is immediately below the primary`);
+		if (rows === 3) {
+			assert.equal(text(lines)[primary - 1], "", "a three-row frame keeps the body gap above the two-row footer");
+			component.handleMouse(eventAt("press", 1, primary - 1, width, lines.length));
+			component.handleMouse(eventAt("click", 1, primary - 1, width, lines.length));
+			assert.equal(outcomes.length, 0, "the three-row body gap is inert");
+		}
+
+		const primaryOutcomes: unknown[] = [];
+		const primaryView = view(rows, (outcome) => primaryOutcomes.push(outcome), simpleRequest());
+		const primaryLines = frame(primaryView, width, rows);
+		const primaryRow = actionRow(primaryLines, "Submit");
+		const primaryX = stripTerminalSequences(primaryLines[primaryRow]!).indexOf("Submit");
+		assert.ok(primaryX >= 0, `${rows}-row primary label is visible and clickable`);
+		primaryView.handleMouse(eventAt("press", primaryX + 1, primaryRow, width, primaryLines.length));
+		primaryView.handleMouse(eventAt("click", primaryX + 1, primaryRow, width, primaryLines.length));
+		assert.deepEqual(primaryOutcomes, [{ correlationId: "cancel-correlation", cancelled: false, answers: [] }],
+			`${rows}-row primary remains clickable in its visible row`);
+
+		const cancelX = stripTerminalSequences(lines[cancel]!).indexOf("Cancel");
+		assert.ok(cancelX >= 0, `${rows}-row Cancel label is visible and clickable`);
+		component.handleMouse(eventAt("press", cancelX + 1, cancel, width, lines.length));
+		component.handleMouse(eventAt("click", cancelX + 1, cancel, width, lines.length));
+		assert.deepEqual(outcomes, [{ correlationId: "cancel-correlation", cancelled: true, answers: [] }],
+			`${rows}-row Cancel remains pointer-reachable in its visible row`);
 	});
 }
 
-test("primary and Cancel share one bottom row with distinct pointer bounds at narrow widths and after resize", () => {
+test("stacked primary and Cancel keep adjacent pointer rows, inert gaps, and resize-safe bounds", () => {
 	for (const width of [20, 32]) {
 		const host = { terminal: { rows: 24 }, requestRender() {} };
-		const outcomes: unknown[] = [];
-		const component = new QuestionnaireTuiPresentation({ request: simpleRequest(), tui: host as TUI, theme, onDone: (outcome) => outcomes.push(outcome) });
-		let lines = frame(component, width, host.terminal.rows);
 		for (const rows of [24, 8]) {
 			host.terminal.rows = rows;
-			lines = frame(component, width, rows);
+			const component = new QuestionnaireTuiPresentation({ request: simpleRequest(), tui: host as TUI, theme, onDone() {} });
+			const lines = frame(component, width, rows);
 			assertFooter(lines, "Submit");
 			const submit = actionRow(lines, "Submit");
 			const cancel = actionRow(lines, "Cancel");
-			assert.equal(submit, cancel, `${width}x${rows} primary and Cancel share one physical row`);
-			assert.equal(submit, lines.length - 1, `${width}x${rows} footer stays anchored to the bottom`);
-			const footer = stripTerminalSequences(lines[submit]!);
-			const submitX = footer.indexOf("Submit");
-			const cancelX = footer.indexOf("Cancel");
-			assert.ok(submitX >= 0 && cancelX > submitX + "Submit".length, `${width}x${rows} actions retain a clickable gap`);
+			assert.equal(cancel, submit + 1, `${width}x${rows} Cancel is the adjacent lower footer row`);
+			assert.equal(cancel, lines.length - 1, `${width}x${rows} Cancel stays anchored to the bottom`);
 		}
 
+		host.terminal.rows = 8;
+		const inertOutcomes: unknown[] = [];
+		const inertView = new QuestionnaireTuiPresentation({ request: simpleRequest(), tui: host as TUI, theme, onDone: (outcome) => inertOutcomes.push(outcome) });
+		const lines = frame(inertView, width, host.terminal.rows);
 		const submit = actionRow(lines, "Submit");
-		const footer = stripTerminalSequences(lines[submit]!);
-		const submitX = footer.indexOf("Submit");
-		const cancelX = footer.indexOf("Cancel");
-		const submitEnd = submitX + "Submit".length;
-		let gapX = -1;
-		for (let x = cancelX - 1; x >= submitEnd; x--) {
-			if (/\s/.test(footer[x]!)) {
-				gapX = x;
-				break;
-			}
-		}
-		assert.ok(gapX > submitEnd && gapX < cancelX, `${width}-column gap is visibly outside both action labels`);
-		component.handleMouse(eventAt("press", gapX, submit, width, lines.length));
-		component.handleMouse(eventAt("click", gapX, submit, width, lines.length));
-		assert.equal(outcomes.length, 0, `${width}-column gap is not part of either action bound`);
-		assert.deepEqual(frame(component, width, host.terminal.rows), lines,
-			`${width}-column gap click leaves the presentation state unchanged`);
-		const verticalGap = submit - 1;
-		if (verticalGap >= 0 && text(lines)[verticalGap] === "") {
-			component.handleMouse(eventAt("press", 0, verticalGap, width, lines.length));
-			component.handleMouse(eventAt("click", 0, verticalGap, width, lines.length));
-			assert.equal(outcomes.length, 0, `${width}-column vertical gap cannot activate a footer action`);
-			assert.deepEqual(frame(component, width, host.terminal.rows), lines,
-				`${width}-column vertical gap leaves the presentation state unchanged`);
-		}
-		if (width === 32 && width > cancelX + "Cancel".length) {
-			const unused = width - 1;
-			component.handleMouse(eventAt("press", unused, submit, width, lines.length));
-			component.handleMouse(eventAt("click", unused, submit, width, lines.length));
-			assert.equal(outcomes.length, 0, "right-side unused space cannot activate a footer action");
-			assert.deepEqual(frame(component, width, host.terminal.rows), lines,
-				"right-side unused space leaves the presentation state unchanged");
-		}
-		component.handleMouse(eventAt("press", submitX + 2, submit, width, lines.length));
-		component.handleMouse(eventAt("click", submitX + 2, submit, width, lines.length));
-		assert.deepEqual(outcomes, [{ correlationId: "cancel-correlation", cancelled: false, answers: [] }],
-			`${width}-column primary label remains clickable at its own bound`);
+		const cancel = actionRow(lines, "Cancel");
+		const submitLine = stripTerminalSequences(lines[submit]!);
+		const cancelLine = stripTerminalSequences(lines[cancel]!);
+		const submitX = submitLine.indexOf("Submit");
+		const cancelX = cancelLine.indexOf("Cancel");
+		assert.ok(submitX >= 0 && cancelX >= 0, `${width}-column action labels remain visible after resize`);
+		const outsideX = width - 1;
+		assert.ok(outsideX > submitX + "Submit".length && outsideX > cancelX + "Cancel".length,
+			`${width}-column trailing space is outside both action labels`);
+		inertView.handleMouse(eventAt("press", outsideX, submit, width, lines.length));
+		inertView.handleMouse(eventAt("click", outsideX, submit, width, lines.length));
+		inertView.handleMouse(eventAt("press", outsideX, cancel, width, lines.length));
+		inertView.handleMouse(eventAt("click", outsideX, cancel, width, lines.length));
+		assert.equal(inertOutcomes.length, 0, `${width}-column horizontal space outside labels is inert on both rows`);
 
-		const cancelled: unknown[] = [];
-		const cancelView = new QuestionnaireTuiPresentation({ request: simpleRequest(), tui: host as TUI, theme, onDone: (outcome) => cancelled.push(outcome) });
+		const verticalGap = submit - 1;
+		assert.ok(verticalGap >= 0 && text(lines)[verticalGap] === "", `${width}-column body gap is visible above the footer`);
+		inertView.handleMouse(eventAt("press", Math.max(submitX, cancelX), verticalGap, width, lines.length));
+		inertView.handleMouse(eventAt("click", Math.max(submitX, cancelX), verticalGap, width, lines.length));
+		assert.equal(inertOutcomes.length, 0, `${width}-column body gap cannot activate a footer action`);
+		assert.deepEqual(frame(inertView, width, host.terminal.rows), lines,
+			`${width}-column inert footer spaces leave the presentation state unchanged`);
+
+		const primaryOutcomes: unknown[] = [];
+		const primaryView = new QuestionnaireTuiPresentation({ request: simpleRequest(), tui: host as TUI, theme, onDone: (outcome) => primaryOutcomes.push(outcome) });
+		const primaryLines = frame(primaryView, width, host.terminal.rows);
+		const primaryRow = actionRow(primaryLines, "Submit");
+		const primaryLabelX = stripTerminalSequences(primaryLines[primaryRow]!).indexOf("Submit");
+		const cancelViewOutcomes: unknown[] = [];
+		const cancelView = new QuestionnaireTuiPresentation({ request: simpleRequest(), tui: host as TUI, theme, onDone: (outcome) => cancelViewOutcomes.push(outcome) });
 		const cancelLines = frame(cancelView, width, host.terminal.rows);
 		const cancelRow = actionRow(cancelLines, "Cancel");
-		const cancelXAtCurrentWidth = stripTerminalSequences(cancelLines[cancelRow]!).indexOf("Cancel");
-		cancelView.handleMouse(eventAt("press", cancelXAtCurrentWidth + 2, cancelRow, width, cancelLines.length));
-		cancelView.handleMouse(eventAt("click", cancelXAtCurrentWidth + 2, cancelRow, width, cancelLines.length));
-		assert.deepEqual(cancelled, [{ correlationId: "cancel-correlation", cancelled: true, answers: [] }],
-			`${width}-column Cancel remains clickable at its own bound`);
+		const cancelLabelX = stripTerminalSequences(cancelLines[cancelRow]!).indexOf("Cancel");
+		const sharedX = Math.max(primaryLabelX, cancelLabelX);
+		assert.ok(sharedX >= 0 && sharedX < primaryLabelX + "Submit".length && sharedX < cancelLabelX + "Cancel".length,
+			`${width}-column primary and Cancel share a valid horizontal pointer coordinate`);
+		primaryView.handleMouse(eventAt("press", sharedX, primaryRow, width, primaryLines.length));
+		primaryView.handleMouse(eventAt("click", sharedX, primaryRow, width, primaryLines.length));
+		assert.deepEqual(primaryOutcomes, [{ correlationId: "cancel-correlation", cancelled: false, answers: [] }],
+			`${width}-column primary row wins at the shared pointer x`);
+		cancelView.handleMouse(eventAt("press", sharedX, cancelRow, width, cancelLines.length));
+		cancelView.handleMouse(eventAt("click", sharedX, cancelRow, width, cancelLines.length));
+		assert.deepEqual(cancelViewOutcomes, [{ correlationId: "cancel-correlation", cancelled: true, answers: [] }],
+			`${width}-column Cancel row wins at the same pointer x`);
 	}
 });
 
@@ -602,6 +643,9 @@ for (const width of [20, 32]) {
 			assert.ok(lines.length < rows, "short content does not pad to the terminal height");
 			assert.doesNotMatch(visible.join("\n"), /Question note|Global note/, "notes have no TUI control");
 			const next = actionRow(lines, "Next");
+			const cancel = actionRow(lines, "Cancel");
+			assert.equal(cancel, next + 1, "the compact footer keeps Cancel immediately below the primary");
+			assert.equal(cancel, lines.length - 1, "the compact footer keeps Cancel on the bottom row");
 			assert.equal(visible[next - 1], "", "exactly one gap separates body content from the footer");
 			assert.notEqual(visible[next - 2], "", "the footer gap is not terminal padding");
 		});

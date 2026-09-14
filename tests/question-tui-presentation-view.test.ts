@@ -227,6 +227,18 @@ test("arrow navigation traverses options, Custom answer, primary, and Cancel wit
 	assertFocusPath(component, ARROW_DOWN, KEYBOARD_FOCUS_ORDER);
 	assert.equal(outcomes.length, 0, "focus movement does not complete the questionnaire");
 	assert.doesNotMatch(renderedText(component).join("\n"), /\(●\)/, "focus movement does not select an option");
+	let lines = renderedText(component);
+	const primaryRow = actionRow(lines, "Submit");
+	const cancelRow = actionRow(lines, "Cancel");
+	assert.equal(cancelRow, primaryRow + 1, "the visual footer places Cancel immediately below the primary");
+	assert.equal(cancelRow, lines.length - 1, "the visual footer keeps Cancel on the bottom row");
+	assert.equal(focusedControl(lines, "Cancel"), cancelRow, "the initial down traversal reaches visible Cancel");
+	component.handleInput(ARROW_UP);
+	lines = renderedText(component);
+	assert.equal(focusedControl(lines, "Submit"), primaryRow, "ArrowUp moves visually back to the primary row");
+	component.handleInput(ARROW_DOWN);
+	lines = renderedText(component);
+	assert.equal(focusedControl(lines, "Cancel"), cancelRow, "ArrowDown moves visually from primary to Cancel");
 	component.handleInput(ARROW_DOWN);
 	focusedControl(renderedText(component), "Cancel");
 	assert.equal(outcomes.length, 0, "down clamps at the outer focus boundary");
@@ -283,7 +295,12 @@ test("Tab and Shift+Tab traverse the same bounded focus order without opening Cu
 	const component = keyboardView((outcome) => outcomes.push(outcome));
 	assertFocusPath(component, "\t", KEYBOARD_FOCUS_ORDER);
 	assert.equal(outcomes.length, 0);
-	let visible = renderedText(component).join("\n");
+	const tabLines = renderedText(component);
+	const tabPrimaryRow = actionRow(tabLines, "Submit");
+	const tabCancelRow = actionRow(tabLines, "Cancel");
+	assert.equal(tabCancelRow, tabPrimaryRow + 1, "Tab traversal preserves the stacked footer order");
+	assert.equal(focusedControl(tabLines, "Cancel"), tabCancelRow, "Tab traversal ends on the visible lower Cancel row");
+	let visible = tabLines.join("\n");
 	assert.doesNotMatch(visible, /Custom response \(Esc/, "focusing Custom answer does not auto-open the editor");
 	assert.doesNotMatch(visible, /\(●\)/, "tab focus does not select an option");
 
@@ -563,7 +580,8 @@ test("renders authored options then Custom answer without obsolete tab chrome", 
 	const primary = actionRow(lines, "Next");
 	const cancel = actionRow(lines, "Cancel");
 	assert.ok(custom < primary, "Custom answer precedes the primary action");
-	assert.equal(primary, cancel, "primary and Cancel occupy one visual action row");
+	assert.equal(cancel, primary + 1, "the primary action is rendered immediately above Cancel");
+	assert.equal(cancel, lines.length - 1, "Cancel is rendered on the bottom footer row");
 	assert.equal(lines.filter((line) => line === "Options" || line === "[Options]").length, 0,
 		"the obsolete Options tab is not rendered");
 	assert.equal(lines.filter((line) => line === "[Custom answer]").length, 0,
