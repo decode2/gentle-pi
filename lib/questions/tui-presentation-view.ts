@@ -137,8 +137,9 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	override handleMouse(event: TuiMouseEvent): FullscreenMouseResult {
 		if (this.disposed || this.collapsed || this.renderedWidth === undefined || this.renderedTerminalRows === undefined || this.renderedHeight === undefined ||
 			Math.max(0, Math.floor(this.presentationOptions.tui.terminal.rows)) !== this.renderedTerminalRows ||
-			event.width !== this.renderedWidth || event.height !== this.renderedHeight) return undefined;
-		const controls = Math.min(this.renderedHeight, 1);
+			event.width !== this.renderedWidth || event.height !== this.renderedHeight ||
+			event.x < 0 || event.x >= this.renderedWidth || event.y < 0 || event.y >= this.renderedHeight) return undefined;
+		const controls = Math.min(this.renderedHeight, 2);
 		const footerGap = this.renderedHeight > controls ? 1 : 0;
 		if (event.type === "wheel") {
 			if (event.y >= this.bodyVisibleHeight || !event.wheelDelta) return undefined;
@@ -209,10 +210,10 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (bounded === 0 || terminalRows === 0) return [];
 		const document = super.render(bounded).map((line) => truncateToWidth(line, bounded, ""));
 		this.documentHeight = document.length;
-		this.footerStart = Math.max(0, document.length - 1);
+		this.footerStart = Math.max(0, document.length - 2);
 		this.bodyVirtualHeight = this.footerStart;
-		const height = Math.min(terminalRows, this.bodyVirtualHeight + 2);
-		const controls = Math.min(height, 1);
+		const height = Math.min(terminalRows, this.bodyVirtualHeight + 3);
+		const controls = Math.min(height, 2);
 		const footerGap = height > controls ? 1 : 0;
 		this.bodyVisibleHeight = height - controls - footerGap;
 		const maximum = Math.max(0, this.bodyVirtualHeight - this.bodyVisibleHeight);
@@ -239,7 +240,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		}
 		const body = document.slice(this.bodyScrollTop, Math.min(this.footerStart, this.bodyScrollTop + this.bodyVisibleHeight));
 		this.bodyContentHeight = body.length;
-		const footer = document.slice(document.length - controls);
+		const footer = document.slice(Math.max(0, document.length - controls));
 		const lines = [
 			...body,
 			...Array(Math.max(0, this.bodyVisibleHeight - body.length)).fill(""),
@@ -1129,7 +1130,6 @@ class QuestionnaireFooterRow implements Component {
 	private lastWidth: number | undefined;
 	private primaryWidth = 0;
 	private cancelWidth = 0;
-	private gap = 0;
 
 	constructor(primary: Component, cancel: Component, primaryPreferred: number, cancelPreferred: number) {
 		this.primary = primary;
@@ -1142,34 +1142,27 @@ class QuestionnaireFooterRow implements Component {
 		const bounded = Math.max(0, Math.floor(width));
 		this.lastWidth = bounded;
 		if (bounded === 0) return [];
-		this.gap = Math.min(3, Math.max(1, bounded - this.primaryPreferred - this.cancelPreferred));
-		const available = Math.max(0, bounded - this.gap);
-		this.primaryWidth = Math.min(this.primaryPreferred, available);
-		this.cancelWidth = Math.min(this.cancelPreferred, Math.max(0, available - this.primaryWidth));
-		if (this.cancelWidth === 0 && available > 0) {
-			this.cancelWidth = 1;
-			this.primaryWidth = Math.max(0, available - 1);
-		}
-		const primary = this.primaryWidth > 0 ? this.primary.render(this.primaryWidth)[0] ?? "" : "";
-		const cancel = this.cancelWidth > 0 ? this.cancel.render(this.cancelWidth)[0] ?? "" : "";
-		return [primary + " ".repeat(this.gap) + cancel];
+		this.primaryWidth = Math.min(this.primaryPreferred, bounded);
+		this.cancelWidth = Math.min(this.cancelPreferred, bounded);
+		return [
+			this.primary.render(this.primaryWidth)[0] ?? "",
+			this.cancel.render(this.cancelWidth)[0] ?? "",
+		];
 	}
 
 	handleMouse(event: TuiMouseEvent) {
 		const width = Math.max(0, Math.floor(event.width));
-		if (this.lastWidth !== width || event.y !== 0 || event.x < 0 || event.x >= width) return undefined;
-		if (event.x < this.primaryWidth && this.primaryWidth > 0) {
-			return this.primary.handleMouse?.({ ...event, width: this.primaryWidth });
-		}
-		const cancelStart = this.primaryWidth + this.gap;
-		if (event.x >= cancelStart && event.x < cancelStart + this.cancelWidth && this.cancelWidth > 0) {
-			return this.cancel.handleMouse?.({ ...event, x: event.x - cancelStart, width: this.cancelWidth });
-		}
-		return { handled: true };
+		if (this.lastWidth !== width || event.x < 0 || event.x >= width || event.y < 0 || event.y >= 2) return undefined;
+		const targetWidth = event.y === 0 ? this.primaryWidth : this.cancelWidth;
+		if (event.x >= targetWidth || targetWidth === 0) return { handled: true };
+		const target = event.y === 0 ? this.primary : this.cancel;
+		return target.handleMouse?.({ ...event, y: 0, width: targetWidth }) ?? { handled: true };
 	}
 
 	invalidate(): void {
 		this.lastWidth = undefined;
+		this.primaryWidth = 0;
+		this.cancelWidth = 0;
 		this.primary.invalidate();
 		this.cancel.invalidate();
 	}
