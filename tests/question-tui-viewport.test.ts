@@ -436,6 +436,7 @@ test("narrow scrolling keeps Question and Global note controls pointer-reachable
 	const width = 20;
 	const rows = 10;
 	const component = view(rows, (outcome) => outcomes.push(outcome));
+	component.focused = true;
 	let lines = scrollBodyUntil(component, width, rows, "Question note");
 	assertFooter(lines, "Next");
 	const questionNote = text(lines).findIndex((line) => isExactSemanticControlLine(line, "Question note"));
