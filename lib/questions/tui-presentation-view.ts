@@ -58,6 +58,8 @@ type Editing = "custom" | "question-note" | "global-note" | undefined;
 type KeyboardFocusTarget =
 	| { readonly type: "option"; readonly id: string }
 	| { readonly type: "custom" }
+	| { readonly type: "question-note" }
+	| { readonly type: "global-note" }
 	| { readonly type: "primary" }
 	| { readonly type: "cancel" };
 
@@ -317,8 +319,10 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 			else if (matchesKey(data, "tab")) this.moveKeyboardFocusFromEditor(1);
 			else if (matchesKey(data, "shift+tab")) this.moveKeyboardFocusFromEditor(-1);
 			else if (!isKeyRepeat(data) && matchesKey(data, "escape")) {
+				const target: KeyboardFocusTarget = this.editing === "custom" ? { type: "custom" }
+					: this.editing === "question-note" ? { type: "question-note" } : { type: "global-note" };
 				this.closeEditor();
-				this.setKeyboardFocus({ type: "custom" });
+				this.setKeyboardFocus(target);
 			} else if (matchesKey(data, "enter")) this.editor!.insertTextAtCursor("\n");
 			else this.handleEditorInput(data);
 			return;
@@ -411,7 +415,10 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	}
 
 	private moveKeyboardFocusFromEditor(delta: -1 | 1): void {
+		const origin: KeyboardFocusTarget = this.editing === "custom" ? { type: "custom" }
+			: this.editing === "question-note" ? { type: "question-note" } : { type: "global-note" };
 		this.closeEditor(false);
+		this.keyboardFocus = origin;
 		this.moveKeyboardFocus(delta);
 	}
 
@@ -430,6 +437,12 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 				return;
 			case "custom":
 				this.setTab("custom");
+				return;
+			case "question-note":
+				this.openEditor("question-note");
+				return;
+			case "global-note":
+				this.openEditor("global-note");
 				return;
 			case "primary":
 				this.activatePrimary(true);
@@ -481,27 +494,31 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	}
 
 	private keyboardFocusCount(): number {
-		return this.optionCount() + 3;
+		return this.keyboardFocusTargets().length;
 	}
 
 	private keyboardFocusPosition(): number {
-		const optionCount = this.optionCount();
-		if (this.keyboardFocus.type === "option") {
-			const focused = this.optionControl?.getFocusedOption();
-			const optionIndex = this.optionIndex(focused?.id ?? this.keyboardFocus.id);
-			return optionIndex >= 0 ? optionIndex : 0;
-		}
-		if (this.keyboardFocus.type === "custom") return optionCount;
-		if (this.keyboardFocus.type === "primary") return optionCount + 1;
-		return optionCount + 2;
+		const targets = this.keyboardFocusTargets();
+		const current: KeyboardFocusTarget = this.keyboardFocus.type === "option"
+			? { type: "option", id: this.optionControl?.getFocusedOption()?.id ?? this.keyboardFocus.id }
+			: this.keyboardFocus;
+		const position = targets.findIndex((target) => this.sameKeyboardFocus(target, current));
+		return position >= 0 ? position : 0;
 	}
 
 	private keyboardTargetAt(position: number): KeyboardFocusTarget {
-		const optionCount = this.optionCount();
-		if (position < optionCount) return { type: "option", id: String(position) };
-		if (position === optionCount) return { type: "custom" };
-		if (position === optionCount + 1) return { type: "primary" };
-		return { type: "cancel" };
+		return this.keyboardFocusTargets()[position]!;
+	}
+
+	private keyboardFocusTargets(): KeyboardFocusTarget[] {
+		const question = this.state.request.questions[this.state.activeQuestionIndex];
+		const targets: KeyboardFocusTarget[] = question?.options.map((_, optionIndex) => ({
+			type: "option" as const, id: String(optionIndex),
+		})) ?? [];
+		targets.push({ type: "custom" }, { type: "question-note" });
+		if (this.isFinalQuestion()) targets.push({ type: "global-note" });
+		targets.push({ type: "primary" }, { type: "cancel" });
+		return targets;
 	}
 
 	private optionCount(): number {
@@ -524,11 +541,13 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	}
 
 	private normalizeKeyboardFocus(target: KeyboardFocusTarget): KeyboardFocusTarget {
-		if (target.type !== "option") return target;
-		const targetIndex = this.optionIndex(target.id);
-		if (targetIndex >= 0) return { type: "option", id: String(targetIndex) };
-		const remembered = this.rememberedOptionTarget();
-		return remembered.type === "option" ? remembered : { type: "custom" };
+		const targets = this.keyboardFocusTargets();
+		const candidate = target.type !== "option" ? target : (() => {
+			const targetIndex = this.optionIndex(target.id);
+			if (targetIndex >= 0) return { type: "option", id: String(targetIndex) } as const;
+			return this.rememberedOptionTarget();
+		})();
+		return targets.find((focus) => this.sameKeyboardFocus(focus, candidate)) ?? targets[0]!;
 	}
 
 	private sameKeyboardFocus(left: KeyboardFocusTarget, right: KeyboardFocusTarget): boolean {
@@ -537,8 +556,12 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 	}
 
 	private activatePrimary(followKeyboardFocus = false): void {
-		if (this.state.activeQuestionIndex === this.state.request.questions.length - 1) return this.submitCurrent();
+		if (this.isFinalQuestion()) return this.submitCurrent();
 		this.continueToNextQuestion(followKeyboardFocus);
+	}
+
+	private isFinalQuestion(): boolean {
+		return this.state.activeQuestionIndex === this.state.request.questions.length - 1;
 	}
 
 	private continueToNextQuestion(followKeyboardFocus = false): void {
@@ -677,9 +700,11 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 
 	private persistEditor(): void {
 		this.flushPendingPaste();
-		if (this.editor && this.editing && this.editorQuestionIndex !== undefined) {
-			this.storeEditorValue(this.editing, this.editorQuestionIndex, this.editor.getExpandedText());
-		}
+		const editing = this.editing;
+		const questionIndex = this.editorQuestionIndex;
+		if (!this.editor || !editing || questionIndex === undefined) return;
+		const value = this.editor.getExpandedText();
+		this.storeEditorValue(editing, questionIndex, editing === "custom" ? value : value.trim());
 	}
 
 	private flushPendingPaste(): void {
@@ -744,15 +769,35 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 				this.addChild(this.optionLayout);
 			}
 			this.addChild(this.clickable(custom, () => this.setTab("custom"), undefined, { type: "custom" }));
-			if (this.editing) {
+			if (this.editing === "custom") {
 				this.addChild(new Text(this.presentationOptions.theme.fg("muted", editorLabel(this.editing, this.localize.bind(this))), 1, 0));
 				this.addChild(this.editor!);
 			} else {
 				const draft = this.state.customDrafts[index];
 				if (draft !== undefined) this.addChild(new Text(this.presentationOptions.localize ? `${this.localize("chrome.custom.response", "Custom response:")} ${display(draft)}` : display(draft), 1, 0));
-				this.addChild(new Text(this.presentationOptions.theme.fg("dim", this.localize("chrome.navigation.escape", "Esc to cancel")), 1, 0));
 			}
-			const primary = index === request.questions.length - 1
+			const questionNote = this.localize("chrome.note.question", "Question note");
+			this.addChild(this.clickable(questionNote, () => this.openEditor("question-note"), undefined, { type: "question-note" }));
+			if (this.editing === "question-note") {
+				this.addChild(new Text(this.presentationOptions.theme.fg("muted", editorLabel(this.editing, this.localize.bind(this))), 1, 0));
+				this.addChild(this.editor!);
+			} else {
+				const note = this.state.questionNotes[index];
+				if (note !== undefined && note.length > 0) this.addChild(new Text(`${questionNote}: ${display(note)}`, 1, 0));
+			}
+			if (this.isFinalQuestion()) {
+				const globalNote = this.localize("chrome.note.global", "Global note");
+				this.addChild(this.clickable(globalNote, () => this.openEditor("global-note"), undefined, { type: "global-note" }));
+				if (this.editing === "global-note") {
+					this.addChild(new Text(this.presentationOptions.theme.fg("muted", editorLabel(this.editing, this.localize.bind(this))), 1, 0));
+					this.addChild(this.editor!);
+				} else {
+					const note = this.state.globalNote;
+					if (note !== undefined && note.length > 0) this.addChild(new Text(`${globalNote}: ${display(note)}`, 1, 0));
+				}
+			}
+			if (!this.editing) this.addChild(new Text(this.presentationOptions.theme.fg("dim", this.localize("chrome.navigation.escape", "Esc to cancel")), 1, 0));
+			const primary = this.isFinalQuestion()
 				? this.localize("chrome.primary.submit", "Submit") : this.localize("chrome.primary.next", "Next");
 			const cancel = this.localize("chrome.cancel", "Cancel");
 			const primaryButton = this.clickable(`[${primary}]`, () => this.activatePrimary(), "primary", { type: "primary" });
