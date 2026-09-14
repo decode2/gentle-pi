@@ -486,9 +486,13 @@ test("injected input bindings preserve owned newlines and prioritize newline ove
 	newlineOnly.handleInput(CTRL_Q);
 	newlineOnly.handleInput("after");
 	newlineOnly.handleInput(ENTER);
+	assert.equal(newlineOnlyOutcomes.length, 0, "the resolved default submit confirms the editor without finishing the questionnaire");
+	assert.doesNotMatch(renderedText(newlineOnly).join("\n"), /Custom response/, "the resolved default submit closes the custom editor");
+	focusedControl(renderedText(newlineOnly), "Submit");
+	newlineOnly.handleInput("s");
 	assert.deepEqual(newlineOnlyOutcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose a route", kind: "custom", answer: "before\nafter",
-	}] }], "the resolved default submit confirms after the newline-only override");
+	}] }], "the vertical primary submits the confirmed custom answer");
 
 	const collisionBindings = injectedKeybindings({ "tui.input.newLine": "ctrl+q", "tui.input.submit": "ctrl+q" });
 	assert.deepEqual(collisionBindings.getUserBindings(), { "tui.input.newLine": "ctrl+q", "tui.input.submit": "ctrl+q" });
@@ -719,6 +723,20 @@ test("configured app.editor.external uses the injected editor, while Ctrl+G and 
 	disabled.component.handleInput("\u0007");
 	await settleExternalEditor();
 	assert.deepEqual(disabledCalls, [], "an empty external-editor binding disables the launch");
+});
+
+test("a configured external Ctrl+J remains reachable when newline is remapped", async () => {
+	const calls: string[] = [];
+	const { component, outcomes } = externalView(async (draft) => {
+		calls.push(draft);
+		return draft;
+	}, () => {}, undefined, injectedKeybindings({ "tui.input.newLine": "ctrl+q", "app.editor.external": "ctrl+j" }));
+	focusCustomForKeyboard(component);
+	component.handleInput("draft");
+	component.handleInput(CTRL_J);
+	await settleExternalEditor();
+	assert.deepEqual(calls, ["draft"], "the configured external-editor action wins over the old default newline key");
+	assert.deepEqual(outcomes, [], "launching the external editor does not complete the questionnaire");
 });
 
 test("Ctrl+G coalesces a pending launch and permits a later launch after settlement", async () => {
@@ -980,6 +998,21 @@ test("custom drafts preserve Editor normalization while question notes attach to
 });
 
 test("configured deleteToLineStart clears the whole custom draft, while notes keep native default line-clear semantics", () => {
+	const defaultOutcomes: unknown[] = [];
+	const defaultClear = view((outcome) => defaultOutcomes.push(outcome), keyboardRequest()).component;
+	focusCustomForKeyboard(defaultClear);
+	defaultClear.handleInput("first line");
+	defaultClear.handleInput(ENTER);
+	defaultClear.handleInput("second line");
+	defaultClear.handleInput(ARROW_UP);
+	defaultClear.handleInput(ARROW_LEFT);
+	defaultClear.handleInput(CTRL_U);
+	defaultClear.handleInput(ESCAPE);
+	defaultClear.handleInput("s");
+	assert.deepEqual(defaultOutcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+		questionIndex: 0, question: "Choose a route", kind: "custom", answer: "",
+	}] }], "the default clear action emits an exact empty custom answer from any caret");
+
 	const keybindings = injectedKeybindings({ "tui.editor.deleteToLineStart": "ctrl+q" });
 	const customOutcomes: unknown[] = [];
 	const custom = view((outcome) => customOutcomes.push(outcome), keyboardRequest(), keybindings).component;
