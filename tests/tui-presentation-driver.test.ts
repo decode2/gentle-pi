@@ -419,7 +419,10 @@ test("invokes custom once with host arguments and returns a reducer-owned partia
 	assert.deepEqual(host.received, [{ tui: host.tui, theme, keybindings: host.keybindings }]);
 	assert.deepEqual(outcome, {
 		correlationId: "tui-driver-correlation", cancelled: false,
-		answers: [{ questionIndex: 0, question: "Choose a route", kind: "option", answer: "Direct" }],
+		answers: [
+			{ questionIndex: 0, question: "Choose a route", kind: "option", answer: "Direct" },
+			{ questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: [] },
+		],
 	});
 });
 

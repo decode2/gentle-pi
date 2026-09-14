@@ -467,6 +467,8 @@ test("Ctrl+G updates the visible custom draft without completing, then Next and 
 	component.handleInput("s");
 	assert.deepEqual(outcomes, [{ correlationId: "view-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "custom", answer: "edited externally\nsecond line",
+		}, {
+			questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: [],
 	}] }]);
 });
 
@@ -706,6 +708,8 @@ test("selecting is display-only until Next, then Submit emits reducer-owned froz
 	component.handleInput("s");
 	assert.deepEqual(outcomes, [{ correlationId: "view-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "option", answer: "Direct", preview: "exact preview",
+		}, {
+			questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: [],
 	}] }]);
 	component.handleInput("s");
 	assert.equal(component.render(48).length, 0, "completion disposes before its callback can reenter");
@@ -765,6 +769,8 @@ test("preserves a split large bracketed paste except Editor line-ending and tab 
 	component.handleInput("s");
 	assert.deepEqual(outcomes[0], { correlationId: "view-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "custom", answer: expected,
+		}, {
+			questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: [],
 	}] });
 });
 
@@ -806,6 +812,8 @@ test("rebuild invalidates same-width pointer geometry, retains focus, and hides 
 	component.handleInput("s");
 	assert.deepEqual(outcomes[0], { correlationId: "view-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "option", answer: "Staged",
+		}, {
+			questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: [],
 	}] });
 	const hidden = view((outcome) => outcomes.push(outcome)).component;
 	focusCustomForKeyboard(hidden);
@@ -841,6 +849,8 @@ test("active paste owns command-shaped fragments, including split end markers", 
 	component.handleInput("s");
 	assert.deepEqual(outcomes[0], { correlationId: "view-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "custom", answer: "a\nbs",
+		}, {
+			questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: [],
 	}] });
 });
 
@@ -858,6 +868,8 @@ test("unfinished paste persists before mouse header navigation", () => {
 	navigated.handleInput("s");
 	assert.deepEqual(outcomes[0], { correlationId: "view-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "custom", answer: "nav\u001b",
+		}, {
+			questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: [],
 	}] });
 });
 
@@ -870,6 +882,8 @@ test("unfinished paste persists before mouse finalization", () => {
 	click(finished, "Submit");
 	assert.deepEqual(outcomes[0], { correlationId: "view-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "custom", answer: "finish",
+		}, {
+			questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: [],
 	}] });
 });
 
@@ -991,6 +1005,8 @@ test("Escape closes an active custom editor without losing its draft, including 
 	clickVisible(empty, "Submit");
 	assert.deepEqual(outcomes[0], { correlationId: "view-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "custom", answer: "",
+		}, {
+			questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: [],
 	}] });
 });
 
