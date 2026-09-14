@@ -27,12 +27,8 @@ const WINDOWS_STARTUP_TIMING_FORCE_CLOSE_GRACE_MS = 2_500;
 const WINDOWS_STARTUP_TIMING_POWERSHELL = "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe";
 const WINDOWS_STARTUP_TIMING_START_REQUEST = '{"requestId":"start-1","operation":"start"}\n';
 const WINDOWS_STARTUP_TIMING_ENVIRONMENT_CASE_NAMES = Object.freeze(["baseline", "windows-paths"]);
-const WINDOWS_STARTUP_TIMING_ENVIRONMENT_RECEIPT_FLAGS = Object.freeze({
-	caseOrder: "baseline-first-fixed",
-	sharedState: "shared-owned-home-and-cache",
-	confounders: "baseline-first-order-and-cache-effects",
-	conclusion: "no-causal-attribution-not-product-ready",
-});
+const WINDOWS_STARTUP_TIMING_ENVIRONMENT_ORDERS = Object.freeze({ AB: Object.freeze(["baseline", "windows-paths"]), BA: Object.freeze(["windows-paths", "baseline"]) });
+const WINDOWS_STARTUP_TIMING_ENVIRONMENT_RECEIPT_FLAGS = Object.freeze({ experiment: "counterbalanced-two-case" });
 export const WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS = Object.freeze([
 	"ProgramFiles", "ProgramFiles(x86)", "ProgramW6432",
 	"CommonProgramFiles", "CommonProgramFiles(x86)", "CommonProgramW6432", "PSModulePath",
@@ -107,6 +103,7 @@ function newSdkLifecycleReceipt() {
 export function newWindowsStartupTimingReceipt() {
 	return {
 		checkId: "not-attempted", packVerified: false, installCompleted: false, budgetMs: WINDOWS_STARTUP_TIMING_BUDGET_MS,
+		experimentOrder: null, caseIsolationVerified: false,
 		helperStartOutcome: "not-attempted", startElapsedMs: null, lastStartupMarker: null,
 		scriptEnteredElapsedMs: null, nativeReadyElapsedMs: null, markerOrder: [], deadlineSnapshot: null,
 		lateValidResponseElapsedMs: null, lateValidResponseClassification: null,
@@ -118,6 +115,7 @@ function newWindowsStartupTimingEnvironmentCase(name, pathAdditionKeys) {
 	if (!WINDOWS_STARTUP_TIMING_ENVIRONMENT_CASE_NAMES.includes(name)) throw new Error("invalid Windows startup environment case");
 	return {
 		name, pathAdditionKeys, budgetMs: WINDOWS_STARTUP_TIMING_BUDGET_MS,
+		casePosition: null, caseIsolationVerified: false,
 		helperStartOutcome: "not-attempted", startElapsedMs: null, lastStartupMarker: null,
 		scriptEnteredElapsedMs: null, nativeReadyElapsedMs: null, markerOrder: [], deadlineSnapshot: null,
 		lateValidResponseElapsedMs: null, lateValidResponseClassification: null,
@@ -299,11 +297,15 @@ export function reportWindowsStartupTimingEnvironmentReceipt(receipt, error, wri
 		checkId: failure === undefined ? "windows-helper-startup-environment-measured" : receipt.checkId,
 		packVerified: receipt.packVerified,
 		installCompleted: receipt.installCompleted,
-		isolation: "shared-owned-homes-fresh-helper",
+		experimentOrder: receipt.experimentOrder,
+		caseIsolationVerified: receipt.caseIsolationVerified === true,
+		isolation: "independent-owned-homes-fresh-helper",
 		...WINDOWS_STARTUP_TIMING_ENVIRONMENT_RECEIPT_FLAGS,
 		allowedPathAdditionKeys: WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS,
 		cases: receipt.cases,
 		cleanupCompleted: receipt.cleanupCompleted,
+		cleanupReason: receipt.cleanupReason ?? null,
+		ownedRootRetained: receipt.ownedRootRetained === true,
 		stage: failure?.stage ?? null,
 		code: failure?.code ?? null,
 	};
@@ -311,9 +313,11 @@ export function reportWindowsStartupTimingEnvironmentReceipt(receipt, error, wri
 	const fallback = JSON.stringify({
 		mode: "windows-startup-timing-environment", status: "failed", checkId: receipt.checkId,
 		packVerified: receipt.packVerified, installCompleted: receipt.installCompleted,
-		isolation: "shared-owned-homes-fresh-helper", ...WINDOWS_STARTUP_TIMING_ENVIRONMENT_RECEIPT_FLAGS,
+		experimentOrder: receipt.experimentOrder,
+		caseIsolationVerified: receipt.caseIsolationVerified === true,
+		isolation: "independent-owned-homes-fresh-helper", ...WINDOWS_STARTUP_TIMING_ENVIRONMENT_RECEIPT_FLAGS,
 		allowedPathAdditionKeys: WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS, cases: receipt.cases,
-		cleanupCompleted: receipt.cleanupCompleted, stage: failure?.stage ?? "unknown", code: failure?.code ?? "unknown",
+		cleanupCompleted: receipt.cleanupCompleted, cleanupReason: receipt.cleanupReason ?? null, ownedRootRetained: receipt.ownedRootRetained === true, stage: failure?.stage ?? "unknown", code: failure?.code ?? "unknown",
 	});
 	const boundedLine = Buffer.byteLength(line, "utf8") <= MAX_WINDOWS_STARTUP_TIMING_ENVIRONMENT_REPORT_BYTES ? line : fallback;
 	try { (failure === undefined ? writers.stdout : writers.stderr).write(`${boundedLine}\n`); } catch { /* Reporting cannot expose a raw secondary error. */ }
@@ -1582,23 +1586,30 @@ async function testWindowsStartupTimingPackedHelper() {
 }
 
 /**
- * Executes the existing two-case environment loop. Defaults intentionally preserve
- * the original baseline-first shared-root experiment until counterbalancing is enabled.
- * @param {{ receipt: object, isolatedEnv: object, treatmentPathDelta?: { pathAdditionKeys: readonly string[], values: object }, installedHelper: string, consumerDirectory: string, caseNames?: readonly string[], allocateCaseRoot?: (name: string) => string | undefined, createIsolatedEnvironment?: (root: string | undefined, name: string) => object, probe?: (helper: string, environment: object, cwd: string, name: string) => Promise<object>, cleanupCase?: (name: string, caseReceipt: object) => boolean }} options
+ * Executes the two-case environment experiment in the requested counterbalanced order.
+ * @param {{ receipt: object, isolatedEnv: object, treatmentPathDelta?: { pathAdditionKeys: readonly string[], values: object }, installedHelper: string, consumerDirectory: string, caseOrder?: "AB" | "BA", caseNames?: readonly string[], allocateCaseRoot?: (name: string) => string | undefined, createIsolatedEnvironment?: (root: string | undefined, name: string) => object, probe?: (helper: string, environment: object, cwd: string, name: string) => Promise<object>, cleanupCase?: (name: string, caseReceipt: object) => boolean, onCaseOwnershipFailure?: () => void }} options
  */
 export async function runWindowsStartupTimingEnvironmentCases(options) {
 	const { receipt, isolatedEnv, treatmentPathDelta, installedHelper, consumerDirectory } = options;
-	const caseNames = options.caseNames ?? WINDOWS_STARTUP_TIMING_ENVIRONMENT_CASE_NAMES;
+	const caseOrder = options.caseOrder ?? "AB";
+	const caseNames = options.caseNames ?? WINDOWS_STARTUP_TIMING_ENVIRONMENT_ORDERS[caseOrder];
+	if (caseNames === undefined || caseNames.length !== 2 || caseNames.some((name) => !WINDOWS_STARTUP_TIMING_ENVIRONMENT_CASE_NAMES.includes(name))) throw new Error("invalid Windows startup environment order");
+	receipt.experimentOrder = caseOrder;
+	receipt.caseIsolationVerified = options.allocateCaseRoot !== undefined && options.createIsolatedEnvironment !== undefined;
 	const allocateCaseRoot = options.allocateCaseRoot ?? (() => undefined);
 	const createIsolatedEnvironment = options.createIsolatedEnvironment ?? (() => isolatedEnv);
 	const probe = options.probe ?? runWindowsStartupTimingProbe;
 	const cleanupCase = options.cleanupCase ?? (() => true);
-	let failure;
-	for (const name of caseNames) {
+	const onCaseOwnershipFailure = options.onCaseOwnershipFailure ?? (() => {});
+	let measurementFailure;
+	let ownershipCleanupFailure;
+	for (const [index, name] of caseNames.entries()) {
 		const isTreatment = name === "windows-paths";
 		const caseReceipt = newWindowsStartupTimingEnvironmentCase(name, isTreatment && treatmentPathDelta !== undefined ? treatmentPathDelta.pathAdditionKeys : []);
+		caseReceipt.casePosition = index + 1;
+		caseReceipt.caseIsolationVerified = receipt.caseIsolationVerified;
 		receipt.cases.push(caseReceipt);
-		if (isTreatment && receipt.cases[0].physicalCloseObserved !== true) {
+		if (ownershipCleanupFailure !== undefined) {
 			caseReceipt.cleanup = "blocked";
 			caseReceipt.failureStage = "cleanup";
 			caseReceipt.failureCode = "cleanup-unconfirmed";
@@ -1607,14 +1618,20 @@ export async function runWindowsStartupTimingEnvironmentCases(options) {
 		if (isTreatment && treatmentPathDelta === undefined) {
 			caseReceipt.failureStage = "helper-start";
 			caseReceipt.failureCode = "environment-invalid";
-			if (failure === undefined) failure = new WindowsStartupTimingFailure("helper-start", "environment-invalid");
+			if (measurementFailure === undefined) measurementFailure = new WindowsStartupTimingFailure("helper-start", "environment-invalid");
 			continue;
 		}
 		selectWindowsStartupTimingCheck(receipt, "helper-start");
 		const root = allocateCaseRoot(name);
 		const baseEnvironment = createIsolatedEnvironment(root, name);
 		const environment = isTreatment && treatmentPathDelta !== undefined ? Object.assign({}, baseEnvironment, treatmentPathDelta.values) : baseEnvironment;
-		const measured = await probe(installedHelper, environment, consumerDirectory, name);
+		let measured;
+		try {
+			measured = await probe(installedHelper, environment, consumerDirectory, name);
+		} catch (error) {
+			onCaseOwnershipFailure();
+			throw error;
+		}
 		Object.assign(caseReceipt, {
 			helperStartOutcome: measured.helperStartOutcome, startElapsedMs: measured.startElapsedMs, lastStartupMarker: measured.lastStartupMarker,
 			scriptEnteredElapsedMs: measured.scriptEnteredElapsedMs, nativeReadyElapsedMs: measured.nativeReadyElapsedMs, markerOrder: measured.markerOrder,
@@ -1626,26 +1643,27 @@ export async function runWindowsStartupTimingEnvironmentCases(options) {
 		if (measured.failure !== undefined) {
 			caseReceipt.failureStage = measured.failure.stage;
 			caseReceipt.failureCode = measured.failure.code;
-			if (failure === undefined) failure = new WindowsStartupTimingFailure(measured.failure.stage, measured.failure.code);
+			if (measurementFailure === undefined) measurementFailure = new WindowsStartupTimingFailure(measured.failure.stage, measured.failure.code);
 		} else if (caseReceipt.cleanup !== "close-observed" || measured.helperStartOutcome !== "valid-reply" || measured.startElapsedMs === null || measured.lastStartupMarker !== "native-ready" || !measured.physicalCloseObserved) {
 			caseReceipt.failureStage = "helper-result";
 			caseReceipt.failureCode = "assertion-failed";
-			if (failure === undefined) failure = new WindowsStartupTimingFailure("helper-result", "assertion-failed");
+			if (measurementFailure === undefined) measurementFailure = new WindowsStartupTimingFailure("helper-result", "assertion-failed");
 		}
 		if (!cleanupCase(name, caseReceipt)) {
 			caseReceipt.cleanup = "blocked";
 			caseReceipt.failureStage = "cleanup";
 			caseReceipt.failureCode = "cleanup-unconfirmed";
-			if (failure === undefined) failure = new WindowsStartupTimingFailure("cleanup", "cleanup-unconfirmed");
+			if (ownershipCleanupFailure === undefined) ownershipCleanupFailure = new WindowsStartupTimingFailure("cleanup", "cleanup-unconfirmed");
 		}
 	}
 	if (receipt.cases.length !== caseNames.length) throw new WindowsStartupTimingFailure("helper-result", "assertion-failed");
-	return { receipt, failure };
+	return { receipt, failure: measurementFailure ?? ownershipCleanupFailure };
 }
 
 async function testWindowsStartupTimingEnvironmentExperiment() {
-	const receipt = { checkId: "not-attempted", packVerified: false, installCompleted: false, cases: [], cleanupCompleted: false };
+	const receipt = { checkId: "not-attempted", packVerified: false, installCompleted: false, cases: [], cleanupCompleted: false, cleanupReason: null, ownedRootRetained: false };
 	let temporary;
+	let caseOwnershipSafe = true;
 	let stage = "pack";
 	let failure;
 	try {
@@ -1660,8 +1678,6 @@ async function testWindowsStartupTimingEnvironmentExperiment() {
 		const consumerDirectory = join(temporary, "consumer");
 		mkdirSync(packDirectory);
 		mkdirSync(consumerDirectory);
-		// Both cases retain this exact existing minimal isolation environment; only
-		// the treatment receives the validated, fixed Windows path-key delta.
 		const { env: isolatedEnv } = isolatedUnhookedEnvironment(temporary);
 		Object.assign(isolatedEnv, { GENTLE_PI_AGENTS: "1", PI_OFFLINE: "1" });
 		const pathDelta = deriveWindowsStartupTimingPathDelta(process.env);
@@ -1691,7 +1707,28 @@ async function testWindowsStartupTimingEnvironmentExperiment() {
 		selectWindowsStartupTimingCheck(receipt, "installed-helper");
 		const installedHelper = assertOwnedRegularFile(packageRoot, "runtime/windows-session-transport.ps1");
 		stage = "helper-start";
-		const caseResult = await runWindowsStartupTimingEnvironmentCases({ receipt, isolatedEnv, treatmentPathDelta, installedHelper, consumerDirectory });
+		const caseOrder = process.argv.find((arg) => arg.startsWith("--windows-startup-timing-environment-order="))?.slice("--windows-startup-timing-environment-order=".length) ?? "AB";
+		if (caseOrder !== "AB" && caseOrder !== "BA") throw new WindowsStartupTimingFailure("pack", "assertion-failed");
+		const caseRoots = new Map();
+		const caseResult = await runWindowsStartupTimingEnvironmentCases({
+			receipt, isolatedEnv, treatmentPathDelta, installedHelper, consumerDirectory, caseOrder,
+			allocateCaseRoot: (name) => { const root = mkdtempSync(join(temporary, `case-${name}-`)); caseRoots.set(name, root); return root; },
+			createIsolatedEnvironment: (root) => {
+				const { env } = isolatedUnhookedEnvironment(root);
+				Object.assign(env, { GENTLE_PI_AGENTS: "1", PI_OFFLINE: "1" });
+				return env;
+			},
+			onCaseOwnershipFailure: () => { caseOwnershipSafe = false; },
+			cleanupCase: (name, caseReceipt) => {
+				if (caseReceipt.physicalCloseObserved !== true) { caseOwnershipSafe = false; return false; }
+				const root = caseRoots.get(name);
+				if (root === undefined) { caseOwnershipSafe = false; return false; }
+				rmSync(root, { recursive: true, force: true });
+				const removed = !existsSync(root);
+				if (!removed) caseOwnershipSafe = false;
+				return removed;
+			},
+		});
 		if (caseResult.failure !== undefined) failure = caseResult.failure;
 		if (failure === undefined) selectWindowsStartupTimingCheck(receipt, "windows-helper-startup-environment-measured");
 	} catch (error) {
@@ -1703,10 +1740,16 @@ async function testWindowsStartupTimingEnvironmentExperiment() {
 	}
 	if (temporary !== undefined) {
 		try {
-			if (failure === undefined) selectWindowsStartupTimingCheck(receipt, "cleanup-owned-root-removal");
-			rmSync(temporary, { recursive: true, force: true });
-			receipt.cleanupCompleted = !existsSync(temporary);
-			if (!receipt.cleanupCompleted) throw new Error("owned temporary root remains after cleanup");
+			if (!caseOwnershipSafe) {
+				receipt.cleanupCompleted = false;
+				receipt.cleanupReason = "case-ownership-unconfirmed";
+				receipt.ownedRootRetained = true;
+			} else {
+				if (failure === undefined) selectWindowsStartupTimingCheck(receipt, "cleanup-owned-root-removal");
+				rmSync(temporary, { recursive: true, force: true });
+				receipt.cleanupCompleted = !existsSync(temporary);
+				if (!receipt.cleanupCompleted) throw new Error("owned temporary root remains after cleanup");
+			}
 		} catch {
 			if (failure === undefined) failure = new WindowsStartupTimingFailure("cleanup", "cleanup-failed");
 		}

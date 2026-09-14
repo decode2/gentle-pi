@@ -82,7 +82,7 @@ jobs:
       - name: Run Windows registry and marker source/stream guards
         if: "!cancelled() && matrix.platform == 'windows' && steps.install_windows_dependencies.outcome == 'success'"
         shell: cmd
-        run: node --experimental-strip-types --test --test-name-pattern="^(Windows registry source guard preserves operation failure through observer cleanup|packed lifecycle source uses the exported phase sequence|Windows listener (source guard publishes only from its Gate-protected readiness transition|failure source guard emits only a fixed post-cleanup generation event|source guard retains owned pipe continuity across the last close|ACK watchdog source guard releases Gate before asynchronous write)|Windows startup marker source emits fixed ordinal control records|packed Windows startup timing source guard uses the installed helper direct driver|Windows startup environment delta admits only the fixed machine path allowlist|Windows startup environment operational validation rejects noncanonical machine paths|Windows packed startup environment experiment source guard selects the paired CI case|Windows packed runner entrypoint guard distinguishes imports, aliases, and unresolved entries|Windows helper control stream enforces fixed marker framing and order|held helper reader rejects deferred malformed and duplicate control frames|held helper reader rejects truncated and oversized suffixes after valid replies|Windows startup timing diagnostics records monotonic marker and deadline observations|Windows startup timing diagnostics preserves timeout while classifying a late valid reply|Windows startup timing diagnostics treats coalesced and separate late frames equivalently|Windows startup timing diagnostics propagates bounded private observations|Windows startup timing diagnostics records budget-late reply before delayed deadline callback|Windows startup timing diagnostics latches the first late reply and halts duplicate protocol frames|Windows startup timing diagnostics stops a malformed frame before a coalesced valid reply|Windows startup timing diagnostics halts recognized rejection before later valid frames|Windows startup environment counterbalanced execution runs the actual seam in requested AB and BA order|Windows startup environment counterbalanced cleanup blocks the second case in either order|Windows startup environment counterbalanced receipt reports bounded metadata for legal cases)$" tests/windows-session-bootstrap.test.ts
+        run: node --experimental-strip-types --test --test-name-pattern="^(Windows registry source guard preserves operation failure through observer cleanup|packed lifecycle source uses the exported phase sequence|Windows listener (source guard publishes only from its Gate-protected readiness transition|failure source guard emits only a fixed post-cleanup generation event|source guard retains owned pipe continuity across the last close|ACK watchdog source guard releases Gate before asynchronous write)|Windows startup marker source emits fixed ordinal control records|packed Windows startup timing source guard uses the installed helper direct driver|Windows startup environment delta admits only the fixed machine path allowlist|Windows startup environment operational validation rejects noncanonical machine paths|Windows packed startup environment experiment source guard selects the paired CI case|Windows packed runner entrypoint guard distinguishes imports, aliases, and unresolved entries|Windows helper control stream enforces fixed marker framing and order|held helper reader rejects deferred malformed and duplicate control frames|held helper reader rejects truncated and oversized suffixes after valid replies|Windows startup timing diagnostics records monotonic marker and deadline observations|Windows startup timing diagnostics preserves timeout while classifying a late valid reply|Windows startup timing diagnostics treats coalesced and separate late frames equivalently|Windows startup timing diagnostics propagates bounded private observations|Windows startup timing diagnostics records budget-late reply before delayed deadline callback|Windows startup timing diagnostics latches the first late reply and halts duplicate protocol frames|Windows startup timing diagnostics stops a malformed frame before a coalesced valid reply|Windows startup timing diagnostics halts recognized rejection before later valid frames|Windows startup environment counterbalanced execution runs the actual seam in requested AB and BA order|Windows startup environment counterbalanced cleanup blocks the second case in either order|Windows startup environment counterbalanced receipt reports bounded metadata for legal cases|Windows startup environment measurement failure still runs the clean second case in either order)$" tests/windows-session-bootstrap.test.ts
       - name: Run Windows startup marker transport semantics
         if: matrix.platform == 'windows'
         shell: cmd
@@ -127,7 +127,36 @@ jobs:
         if: "!cancelled() && matrix.platform != 'windows' && steps.install_unix_dependencies.outcome == 'success'"
         shell: bash
         run: node scripts/test-packed-runner.mjs --sdk-lifecycle
-      - name: Measure paired packed Windows helper startup environment experiment (experimental)
-        if: "!cancelled() && inputs.run_windows_startup_experiment == true && matrix.platform == 'windows' && steps.install_windows_dependencies.outcome == 'success'"
+
+  windows-startup-experiment:
+    if: github.repository == 'decode2/gentle-pi' && inputs.run_windows_startup_experiment == true
+    strategy:
+      fail-fast: false
+      matrix:
+        experiment-order: [AB, BA]
+    runs-on: windows-latest
+    timeout-minutes: 15
+    env:
+      npm_config_ignore_scripts: "true"
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: 24
+      - name: Setup pnpm
+        if: runner.environment == 'github-hosted'
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        env:
+          npm_config_store_dir: ${{ runner.temp }}/pnpm-store
+        with:
+          version: 11.1.1
+          dest: ${{ runner.temp }}/setup-pnpm
+      - name: Install pinned dependencies without lifecycle scripts (Windows)
+        id: install_windows_dependencies
+        if: runner.environment == 'github-hosted'
+        shell: pwsh
+        run: pnpm install --frozen-lockfile --ignore-scripts --store-dir "$env:RUNNER_TEMP\pnpm-store"
+      - name: Measure packed Windows helper startup environment experiment
+        if: "!cancelled() && steps.install_windows_dependencies.outcome == 'success'"
         shell: cmd
-        run: node scripts\test-packed-runner.mjs --windows-startup-timing-environment
+        run: node scripts\test-packed-runner.mjs --windows-startup-timing-environment --windows-startup-timing-environment-order=${{ matrix.experiment-order }}
