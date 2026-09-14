@@ -3,7 +3,7 @@ name: Questionnaire UX validation
 on:
   push:
     branches:
-      - test/questionnaire-ux-validation-isolated-7453d5d
+      - test/questionnaire-visual-polish-5594c1f4
 
 permissions:
   contents: read

@@ -92,8 +92,36 @@ function renderedText(component: QuestionnaireTuiPresentation, width = 80): stri
 	return component.render(width).map((line) => stripTerminalSequences(line).trim());
 }
 
+type ActionLabel = "Next" | "Submit" | "Cancel";
+interface ActionButton {
+	readonly label: ActionLabel;
+	readonly focused: boolean;
+}
+
+function actionButtons(line: string): ActionButton[] {
+	const buttons: ActionButton[] = [];
+	const value = line.trim();
+	let cursor = 0;
+	while (cursor < value.length) {
+		if (buttons.length > 0) {
+			const separator = /^\s+/.exec(value.slice(cursor));
+			if (!separator) return [];
+			cursor += separator[0].length;
+		}
+		const match = /^(→\s*)?(?:\[\s*(Next|Submit|Cancel)\s*\]|(Next|Submit|Cancel))/.exec(value.slice(cursor));
+		if (!match) return [];
+		buttons.push({ label: (match[2] ?? match[3]) as ActionLabel, focused: match[1] !== undefined });
+		cursor += match[0].length;
+	}
+	return buttons;
+}
+
 function isFocusedControlLine(line: string, label: string): boolean {
+	if (actionButtons(line).some((button) => button.label === label && button.focused)) return true;
 	if (line === `→ ${label}` || line === `→ [${label}]`) return true;
+	const marker = `→ ${label}`;
+	const markerIndex = line.indexOf(marker);
+	if (markerIndex >= 0 && (line.length === markerIndex + marker.length || /\s/.test(line[markerIndex + marker.length]!))) return true;
 	for (const prefix of ["→ ( ) ", "→ (●) ", "→ [ ] ", "→ [x] "]) {
 		const control = `${prefix}${label}`;
 		const suffix = line.startsWith(control) ? line.slice(control.length) : undefined;
@@ -120,6 +148,15 @@ function isOptionControlLine(line: string, label: string): boolean {
 function optionControlRow(lines: readonly string[], label: string): number {
 	const row = lines.findIndex((line) => isOptionControlLine(line, label));
 	assert.ok(row >= 0, `the option control row is visible for ${label}`);
+	return row;
+}
+
+function actionRow(lines: readonly string[], label: ActionLabel): number {
+	let row = -1;
+	for (const [index, line] of lines.entries()) {
+		if (actionButtons(line).some((button) => button.label === label)) row = index;
+	}
+	assert.ok(row >= 0, `the footer action row is visible for ${label}`);
 	return row;
 }
 
@@ -378,7 +415,7 @@ test("Ctrl+G updates the visible custom draft without completing, then Next and 
 	}] }]);
 });
 
-test("Ctrl+G is ignored from an option tab", async () => {
+test("Ctrl+G is ignored outside a custom-answer editor", async () => {
 	const calls: string[] = [];
 	const { component } = externalView(async (draft) => {
 		calls.push(draft);
@@ -451,7 +488,7 @@ test("a deferred editor completion after disposal cannot resurrect the view", as
 	assert.deepEqual(outcomes, []);
 });
 
-test("single-select preview uses a Markdown side panel while the custom-answer tab stays discoverable", () => {
+test("single-select preview uses a Markdown side panel while the Custom answer control stays discoverable", () => {
 	const component = new QuestionnaireTuiPresentation({
 		request: markdownRequest(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {},
 	});
@@ -512,13 +549,64 @@ test("narrow Markdown fallback keeps every preview row across viewport scroll", 
 	assert.ok(seen.has("last-line"), "the final Markdown row survives scrolling");
 });
 
+test("renders authored options then Custom answer without obsolete tab chrome", () => {
+	const lines = renderedText(view().component, 48);
+	const direct = optionControlRow(lines, "Direct");
+	const staged = optionControlRow(lines, "Staged");
+	const custom = lines.findIndex((line) => line === "Custom answer");
+	assert.ok(custom > Math.max(direct, staged), "Custom answer is rendered below every authored option");
+	const primary = actionRow(lines, "Next");
+	const cancel = actionRow(lines, "Cancel");
+	assert.ok(custom < primary, "Custom answer precedes the primary action");
+	assert.equal(primary, cancel, "primary and Cancel occupy one visual action row");
+	assert.equal(lines.filter((line) => line === "Options" || line === "[Options]").length, 0,
+		"the obsolete Options tab is not rendered");
+	assert.equal(lines.filter((line) => line === "[Custom answer]").length, 0,
+		"Custom answer is a control, not tab chrome");
+});
+
+test("keeps an open custom editor below options and makes Escape preserve rather than cancel its draft", () => {
+	const outcomes: unknown[] = [];
+	const component = view((outcome) => outcomes.push(outcome)).component;
+	const width = 48;
+	const initial = renderedText(component, width).join("\n");
+	assert.match(initial, /Esc(?:ape)?[^\n]*cancel/i, "non-editing navigation explains Escape cancellation");
+	assert.doesNotMatch(initial, /Esc(?:ape)?[^\n]*(?:keep|preserv)[^\n]*draft/i);
+	focusCustomForKeyboard(component, width);
+	component.handleInput(ENTER);
+	component.handleInput("kept draft");
+	component.handleInput(ENTER);
+	component.handleInput("second line");
+
+	let lines = renderedText(component, width);
+	const direct = optionControlRow(lines, "Direct");
+	const staged = optionControlRow(lines, "Staged");
+	const draft = lines.findIndex((line) => line.includes("kept draft"));
+	const primary = actionRow(lines, "Next");
+	assert.ok(draft > Math.max(direct, staged), "an open custom editor remains below authored options");
+	assert.ok(draft < primary, "the open editor remains above the primary action");
+	assert.match(lines.join("\n"), /Esc(?:ape)?[^\n]*(?:keep|preserv|draft)/i,
+		"editing navigation explains that Escape preserves the draft");
+	assert.doesNotMatch(lines.join("\n"), /Esc(?:ape)?[^\n]*cancel/i,
+		"editing navigation does not falsely describe Escape as cancellation");
+
+	component.handleInput(ESCAPE);
+	assert.equal(outcomes.length, 0, "Escape closes editing without cancelling the questionnaire");
+	lines = renderedText(component, width);
+	assert.match(lines.join("\n"), /kept draft[\s\S]*second line/, "closing editing preserves the multiline draft");
+	assert.doesNotMatch(lines.join("\n"), /Custom response/);
+	component.handleInput(ENTER);
+	assert.match(renderedText(component, width).join("\n"), /kept draft[\s\S]*second line/,
+		"reopening Custom answer restores the preserved draft");
+});
+
 test("closing custom editing keeps its draft, returns option controls, and cancellation completes once", () => {
 	const outcomes: unknown[] = [];
 	const component = view((outcome) => outcomes.push(outcome)).component;
 	focusCustomForKeyboard(component);
 	component.handleInput("draft kept while browsing options");
-	clickVisible(component, "Options");
-	assert.equal(outcomes.length, 0, "switching back to options does not finish the questionnaire");
+	component.handleInput(ESCAPE);
+	assert.equal(outcomes.length, 0, "closing editing does not finish the questionnaire");
 	assert.match(stripTerminalSequences(component.render(20).join("\n")), /Direct/);
 	clickVisible(component, /Custom/);
 	const retainedDraft = component.render(64).map((line) => stripTerminalSequences(line));
@@ -537,7 +625,10 @@ test("closing custom editing keeps its draft, returns option controls, and cance
 test("selecting is display-only until Next, then Submit emits reducer-owned frozen metadata once", () => {
 	const outcomes: unknown[] = [];
 	const { component } = view((outcome) => outcomes.push(outcome));
-	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Question 1[\s\S]*Options[\s\S]*Custom[\s\S]*exact preview/);
+	const initial = stripTerminalSequences(component.render(48).join("\n"));
+	assert.match(initial, /Question 1[\s\S]*Direct[\s\S]*Staged[\s\S]*Custom answer/);
+	assert.match(initial, /exact preview/, "the authored option preview remains visible");
+	assert.doesNotMatch(initial, /(?:^|\n)Options(?:\n|$)/, "the old Options tab is absent from the visual chrome");
 	component.handleInput("\r");
 	component.handleInput("n");
 	component.handleInput("s");
@@ -750,14 +841,14 @@ test("pointer Next commits each answer and Submit remains explicit on the last q
 	] }]);
 });
 
-test("Options closes an active custom editor without losing its draft, including an explicit empty custom answer", () => {
+test("Escape closes an active custom editor without losing its draft, including an explicit empty custom answer", () => {
 	const outcomes: unknown[] = [];
 	const { component } = view((outcome) => outcomes.push(outcome));
 	clickVisible(component, /Custom/);
 	component.handleInput("saved draft");
-	clickVisible(component, "Options");
-	assert.doesNotMatch(stripTerminalSequences(component.render(20).join("\n")), /Custom response/, "Options restores option controls instead of leaving the custom editor open");
-	assert.match(stripTerminalSequences(component.render(20).join("\n")), /Direct/, "Options are visible after the pointer switch");
+	component.handleInput(ESCAPE);
+	assert.doesNotMatch(stripTerminalSequences(component.render(20).join("\n")), /Custom response/, "Escape restores option controls instead of leaving the custom editor open");
+	assert.match(stripTerminalSequences(component.render(20).join("\n")), /Direct/, "authored options are visible after editing closes");
 	clickVisible(component, /Custom/);
 	assert.match(stripTerminalSequences(component.render(20).join("\n")), /saved draft/, "switching back preserves the custom draft");
 
@@ -904,7 +995,6 @@ test("renders only static questionnaire chrome through an injected localizer", (
 	let german = true;
 	const localize = (key: string, fallback: string) => german ? ({
 		"chrome.question.prefix": "Frage {index}:",
-		"chrome.tab.options": "Optionen",
 		"chrome.tab.custom": "Eigene Antwort",
 		"chrome.custom.response": "Eigene Eingabe:",
 		"chrome.editor.custom": "Eigene Eingabe (Esc behält Entwurf)",
@@ -918,7 +1008,12 @@ test("renders only static questionnaire chrome through an injected localizer", (
 	});
 
 	const translated = stripTerminalSequences(component.render(48).join("\n"));
-	assert.match(translated, /Frage 1:[\s\S]*Optionen[\s\S]*Eigene Antwort[\s\S]*Vorschau:\nexact preview[\s\S]*Weiter[\s\S]*Abbrechen/);
+	assert.match(translated, /Frage 1:/);
+	assert.match(translated, /Eigene Antwort/);
+	assert.match(translated, /Vorschau:\nexact preview/);
+	assert.match(translated, /Weiter/);
+	assert.match(translated, /Abbrechen/);
+	assert.doesNotMatch(translated, /(?:^|\n)Optionen(?:\n|$)/, "the obsolete Options tab is not localized or rendered");
 	assert.match(translated, /Route[\s\S]*Choose a route[\s\S]*Direct[\s\S]*Fast[\s\S]*exact preview/, "request content remains byte-preserved");
 
 	focusCustomForKeyboard(component, 48, "Eigene Antwort");
@@ -934,7 +1029,8 @@ test("renders only static questionnaire chrome through an injected localizer", (
 	german = false;
 	component.handleInput("\r");
 	const rebuilt = stripTerminalSequences(component.render(48).join("\n"));
-	assert.match(rebuilt, /Question 2:[\s\S]*Options[\s\S]*Custom answer[\s\S]*Submit[\s\S]*Cancel/);
+	assert.match(rebuilt, /Question 2:[\s\S]*Custom answer[\s\S]*Submit[\s\S]*Cancel/);
+	assert.doesNotMatch(rebuilt, /(?:^|\n)Options(?:\n|$)/);
 });
 
 test("a configured collapse key replaces Ctrl+] and displays its normalized key", () => {

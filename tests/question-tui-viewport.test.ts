@@ -122,20 +122,51 @@ function text(lines: readonly string[]): string[] {
 	return lines.map((line) => stripTerminalSequences(line).trim());
 }
 
-function actionRow(lines: readonly string[], label: "Next" | "Submit" | "Cancel"): number {
-	const row = text(lines).findIndex((line) => line === label);
+type ActionLabel = "Next" | "Submit" | "Cancel";
+interface ActionButton {
+	readonly label: ActionLabel;
+	readonly focused: boolean;
+}
+
+function actionButtons(line: string): ActionButton[] {
+	const buttons: ActionButton[] = [];
+	const value = line.trim();
+	let cursor = 0;
+	while (cursor < value.length) {
+		if (buttons.length > 0) {
+			const separator = /^\s+/.exec(value.slice(cursor));
+			if (!separator) return [];
+			cursor += separator[0].length;
+		}
+		const match = /^(→\s*)?(?:\[\s*(Next|Submit|Cancel)\s*\]|(Next|Submit|Cancel))/.exec(value.slice(cursor));
+		if (!match) return [];
+		buttons.push({ label: (match[2] ?? match[3]) as ActionLabel, focused: match[1] !== undefined });
+		cursor += match[0].length;
+	}
+	return buttons;
+}
+
+function actionRow(lines: readonly string[], label: ActionLabel): number {
+	let row = -1;
+	for (const [index, line] of text(lines).entries()) {
+		if (actionButtons(line).some((button) => button.label === label)) row = index;
+	}
 	assert.ok(row >= 0, `${label} is inside the visible capped frame`);
 	return row;
 }
 
-function keyboardActionRow(lines: readonly string[], label: "Next" | "Submit" | "Cancel"): number {
-	const row = text(lines).findIndex((line) => line === label || line === `→ ${label}`);
+function keyboardActionRow(lines: readonly string[], label: ActionLabel): number {
+	const row = actionRow(lines, label);
 	assert.ok(row >= 0, `${label} is inside the visible keyboard footer`);
 	return row;
 }
 
 function isFocusedControlLine(line: string, label: string): boolean {
+	if (actionButtons(line).some((button) => button.label === label && button.focused)) return true;
 	if (line === `→ ${label}` || line === `→ [${label}]`) return true;
+	const marker = `→ ${label}`;
+	const markerIndex = line.indexOf(marker);
+	if (markerIndex >= 0 && (line.length === markerIndex + marker.length || /\s/.test(line[markerIndex + marker.length]!))) return true;
 	for (const prefix of ["→ ( ) ", "→ (●) ", "→ [ ] ", "→ [x] "]) {
 		const control = `${prefix}${label}`;
 		const suffix = line.startsWith(control) ? line.slice(control.length) : undefined;
@@ -197,12 +228,13 @@ function exercisePreviewFocusCycle(component: QuestionnaireTuiPresentation, widt
 }
 
 function assertFooter(lines: readonly string[], primary: "Next" | "Submit") {
-	const labels = text(lines).filter((line) => line === "Next" || line === "Submit" || line === "Cancel");
-	assert.equal(labels.filter((label) => label === primary).length, 1, "the footer has exactly one primary action");
+	const footerRows = text(lines).map(actionButtons).filter((buttons) => buttons.length > 0);
+	assert.equal(footerRows.length, 1, "primary and Cancel share one physical footer row");
+	const footer = footerRows[0]!;
+	assert.equal(footer.filter((button) => button.label === primary).length, 1, "the footer has exactly one primary action");
 	const opposite = primary === "Next" ? "Submit" : "Next";
-	assert.equal(labels.filter((label) => label === opposite).length, 0, "the opposite primary action is absent");
-	assert.ok(labels.includes("Cancel"), "Cancel remains inside the visible footer");
-	assert.ok(labels.every((label) => !/^\[/.test(label)), "pointer controls do not require keyboard-shortcut labels");
+	assert.equal(footer.filter((button) => button.label === opposite).length, 0, "the opposite primary action is absent");
+	assert.equal(footer.filter((button) => button.label === "Cancel").length, 1, "the footer has exactly one Cancel action");
 }
 
 for (const width of [20, 32]) {
@@ -321,7 +353,7 @@ test("keyboard focus scrolls Custom answer into the visible body while the stick
 		assert.equal(keyboardActionRow(lines, "Submit"), secondFooter, `${width}x${rows} Submit stays in the sticky footer`);
 		component.handleInput("\u001b[B");
 		lines = frame(component, width, rows);
-		assert.equal(focusedKeyboardRow(lines, "Cancel"), secondFooter + 1, `${width}x${rows} Cancel is keyboard-reachable after Submit`);
+		assert.equal(focusedKeyboardRow(lines, "Cancel"), secondFooter, `${width}x${rows} Cancel shares the physical footer row with Submit`);
 		assert.equal(keyboardActionRow(lines, "Submit"), secondFooter, `${width}x${rows} Cancel focus does not move the sticky footer`);
 		assert.equal(outcomes.length, 0, `${width}x${rows} reaching footer actions does not auto-submit or cancel`);
 	}
@@ -377,22 +409,75 @@ for (const rows of [1, 2, 3]) {
 	});
 }
 
-test("the single footer gap cannot activate a footer action", () => {
-	const outcomes: unknown[] = [];
-	const width = 32;
-	const rows = 24;
-	const component = view(rows, (outcome) => outcomes.push(outcome), simpleRequest());
-	const before = frame(component, width, rows);
-	const submit = actionRow(before, "Submit");
-	const gap = submit - 1;
-	assert.equal(text(before)[gap], "", "short content has exactly one blank gap above the visible footer");
-	component.handleMouse(event("press", gap, width, before.length));
-	component.handleMouse(event("click", gap, width, before.length));
-	assert.equal(outcomes.length, 0, "the footer gap cannot submit or cancel through an invisible document row");
-	assert.deepEqual(frame(component, width, rows), before, "the inert gap leaves the visible presentation state unchanged");
-	component.handleMouse(event("press", submit, width, before.length));
-	component.handleMouse(event("click", submit, width, before.length));
-	assert.equal(outcomes.length, 1, "the actually visible footer action remains pointer-reachable");
+test("primary and Cancel share one bottom row with distinct pointer bounds at narrow widths and after resize", () => {
+	for (const width of [20, 32]) {
+		const host = { terminal: { rows: 24 }, requestRender() {} };
+		const outcomes: unknown[] = [];
+		const component = new QuestionnaireTuiPresentation({ request: simpleRequest(), tui: host as TUI, theme, onDone: (outcome) => outcomes.push(outcome) });
+		let lines = frame(component, width, host.terminal.rows);
+		for (const rows of [24, 8]) {
+			host.terminal.rows = rows;
+			lines = frame(component, width, rows);
+			assertFooter(lines, "Submit");
+			const submit = actionRow(lines, "Submit");
+			const cancel = actionRow(lines, "Cancel");
+			assert.equal(submit, cancel, `${width}x${rows} primary and Cancel share one physical row`);
+			assert.equal(submit, lines.length - 1, `${width}x${rows} footer stays anchored to the bottom`);
+			const footer = stripTerminalSequences(lines[submit]!);
+			const submitX = footer.indexOf("Submit");
+			const cancelX = footer.indexOf("Cancel");
+			assert.ok(submitX >= 0 && cancelX > submitX + "Submit".length, `${width}x${rows} actions retain a clickable gap`);
+		}
+
+		const submit = actionRow(lines, "Submit");
+		const footer = stripTerminalSequences(lines[submit]!);
+		const submitX = footer.indexOf("Submit");
+		const cancelX = footer.indexOf("Cancel");
+		const submitEnd = submitX + "Submit".length;
+		let gapX = -1;
+		for (let x = cancelX - 1; x >= submitEnd; x--) {
+			if (/\s/.test(footer[x]!)) {
+				gapX = x;
+				break;
+			}
+		}
+		assert.ok(gapX > submitEnd && gapX < cancelX, `${width}-column gap is visibly outside both action labels`);
+		component.handleMouse(eventAt("press", gapX, submit, width, lines.length));
+		component.handleMouse(eventAt("click", gapX, submit, width, lines.length));
+		assert.equal(outcomes.length, 0, `${width}-column gap is not part of either action bound`);
+		assert.deepEqual(frame(component, width, host.terminal.rows), lines,
+			`${width}-column gap click leaves the presentation state unchanged`);
+		const verticalGap = submit - 1;
+		if (verticalGap >= 0 && text(lines)[verticalGap] === "") {
+			component.handleMouse(eventAt("press", 0, verticalGap, width, lines.length));
+			component.handleMouse(eventAt("click", 0, verticalGap, width, lines.length));
+			assert.equal(outcomes.length, 0, `${width}-column vertical gap cannot activate a footer action`);
+			assert.deepEqual(frame(component, width, host.terminal.rows), lines,
+				`${width}-column vertical gap leaves the presentation state unchanged`);
+		}
+		if (width === 32 && width > cancelX + "Cancel".length) {
+			const unused = width - 1;
+			component.handleMouse(eventAt("press", unused, submit, width, lines.length));
+			component.handleMouse(eventAt("click", unused, submit, width, lines.length));
+			assert.equal(outcomes.length, 0, "right-side unused space cannot activate a footer action");
+			assert.deepEqual(frame(component, width, host.terminal.rows), lines,
+				"right-side unused space leaves the presentation state unchanged");
+		}
+		component.handleMouse(eventAt("press", submitX + 2, submit, width, lines.length));
+		component.handleMouse(eventAt("click", submitX + 2, submit, width, lines.length));
+		assert.deepEqual(outcomes, [{ correlationId: "cancel-correlation", cancelled: false, answers: [] }],
+			`${width}-column primary label remains clickable at its own bound`);
+
+		const cancelled: unknown[] = [];
+		const cancelView = new QuestionnaireTuiPresentation({ request: simpleRequest(), tui: host as TUI, theme, onDone: (outcome) => cancelled.push(outcome) });
+		const cancelLines = frame(cancelView, width, host.terminal.rows);
+		const cancelRow = actionRow(cancelLines, "Cancel");
+		const cancelXAtCurrentWidth = stripTerminalSequences(cancelLines[cancelRow]!).indexOf("Cancel");
+		cancelView.handleMouse(eventAt("press", cancelXAtCurrentWidth + 2, cancelRow, width, cancelLines.length));
+		cancelView.handleMouse(eventAt("click", cancelXAtCurrentWidth + 2, cancelRow, width, cancelLines.length));
+		assert.deepEqual(cancelled, [{ correlationId: "cancel-correlation", cancelled: true, answers: [] }],
+			`${width}-column Cancel remains clickable at its own bound`);
+	}
 });
 
 test("manual body scroll can browse out of a focused Editor and typing reveals its cursor marker again", () => {
@@ -413,14 +498,12 @@ test("manual body scroll can browse out of a focused Editor and typing reveals i
 	lines = frame(component, width, host.terminal.rows);
 	assert.ok(lines.join("\n").includes(CURSOR_MARKER), "long paste and resize initially reveal the public Editor marker");
 	for (let index = 0; index < 12; index++) component.handleMouse(event("wheel", 2, width, lines.length, "none", -1));
+	component.handleInput("\u001b");
 	lines = frame(component, width, host.terminal.rows);
-	const options = text(lines).findIndex((line) => line === "Options");
-	assert.ok(options >= 0, "manual body scroll reaches Options without Escape or keyboard navigation");
-	component.handleMouse(event("press", options, width, lines.length));
-	component.handleMouse(event("click", options, width, lines.length));
-	lines = frame(component, width, host.terminal.rows);
+	const direct = text(lines).findIndex((line) => line.includes("Direct"));
+	assert.ok(direct >= 0, "Escape closes editing and restores authored options after manual body scrolling");
 	const reopen = text(lines).findIndex((line) => line === "Custom answer");
-	assert.ok(reopen >= 0, "pointer Options closes the editor while keeping its custom draft available to reopen");
+	assert.ok(reopen >= 0, "closing the editor keeps its custom draft available to reopen");
 	component.handleMouse(event("press", reopen, width, lines.length));
 	component.handleMouse(event("click", reopen, width, lines.length));
 	component.handleInput("typing again");

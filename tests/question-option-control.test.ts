@@ -54,6 +54,26 @@ test("single-select callers can keep previews out of the option rows for a side 
 	assert.equal(control.getFocusedOption(), items[1]);
 });
 
+test("focused unselected options use accent and selected background without changing selection", () => {
+	const actions: QuestionOptionControlAction[] = [];
+	const control = new QuestionOptionControl({ items, multiSelect: false, theme, onAction: (action) => actions.push(action) });
+	const initial = control.render(48).join("\n");
+	assert.match(initial, /\u001b\[38;5;39m→ /, "focus uses the theme accent for its navigation marker");
+	assert.match(initial, /\u001b\[38;5;39mDirect/, "focused text uses the theme accent");
+	assert.match(initial, /\u001b\[48;5;236m/, "the focused row uses the subtle selected background");
+	assert.match(stripTerminalSequences(initial), /→ \( \) Direct/, "focus is visibly distinct from selection");
+	assert.deepEqual([...actions], [], "rendering an unselected focused option has no activation side effect");
+
+	control.handleInput("\r");
+	control.handleInput("\u001b[B");
+	const moved = control.render(48).join("\n");
+	assert.match(stripTerminalSequences(moved), /\(●\) Direct[\s\S]*→ \( \) Staged/,
+		"moving focus preserves the existing single selection");
+	assert.match(moved, /\u001b\[48;5;236m/, "the newly focused option keeps the selected background");
+	assert.deepEqual(actions.map((action) => action.type), ["select-option", "focus-option"],
+		"focus movement remains separate from option activation");
+});
+
 test("multi-select toggles independently, honors public configured bindings, and never submits", () => {
 	const actions: QuestionOptionControlAction[] = [];
 	const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.select.down": "j", "tui.select.confirm": "x" });
