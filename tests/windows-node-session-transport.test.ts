@@ -4,7 +4,7 @@ import { basename, join } from "node:path";
 import { tmpdir } from "node:os";
 import { once } from "node:events";
 import nodeTest from "node:test";
-import { ActiveSessionClient, ActiveSessionClientError, ActiveSessionListener, type ReceivedNotification } from "../lib/agents-session-transport.ts";
+import { ActiveSessionClient, ActiveSessionClientError, ActiveSessionListener, SessionPresenceError, type ReceivedNotification } from "../lib/agents-session-transport.ts";
 import { WindowsNodeSessionPresenceRegistry, windowsNodePipeName, windowsNodeTransportPaths } from "../lib/windows-node-session-transport.ts";
 
 const test = process.platform === "win32" ? nodeTest : nodeTest.skip;
@@ -52,8 +52,9 @@ nodeTest("Windows Node metadata derives isolated bounded paths without traversal
 });
 
 nodeTest("Windows Node pipe names retain the required prefix and reject forged tokens", () => {
-	const pipe = windowsNodePipeName("a".repeat(22), "b".repeat(22));
-	assert.match(pipe, /^\\\\\.\\pipe\\gentle-pi-a{22}-b{22}$/);
+	const pipe = windowsNodePipeName("a".repeat(32), "b".repeat(22));
+	assert.match(pipe, /^\\\\\.\\pipe\\gentle-pi-a{32}-b{22}$/);
+	assert.throws(() => windowsNodePipeName("a".repeat(22), "b".repeat(22)), /unsafe transport path/);
 	assert.throws(() => windowsNodePipeName("../escape", "b".repeat(22)), /unsafe transport path/);
 });
 
@@ -67,6 +68,16 @@ async function registry() {
 		throw error;
 	}
 }
+
+test("Windows Node publication is exclusive for one activation target", async () => {
+	const { root, transport } = await registry();
+	try {
+		const first = await transport.record("collision", 1), competing = { ...first, createdAt: 2 };
+		await transport.publish(first);
+		await assert.rejects(transport.publish(competing), (error: unknown) => error instanceof SessionPresenceError && error.code === "busy");
+		assert.deepEqual(await transport.resolve(first.sessionId), first);
+	} finally { await rm(root, { recursive: true, force: true }); }
+});
 
 // These cases are same-process native Windows pilot coverage, not the later
 // two-process acceptance proof. They are RED against the loadable skeleton.
