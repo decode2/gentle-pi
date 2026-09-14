@@ -101,7 +101,8 @@ const ENTER = "\r";
 const ESCAPE = "\u001b";
 const SHIFT_TAB = "\u001b[Z";
 // Keyboard stops use the option control's existing visible arrow prefix: "→ ".
-const KEYBOARD_FOCUS_ORDER = ["Direct", "Staged", "Custom answer", "Submit", "Cancel"];
+const NEXT_FOCUS_ORDER = ["Direct", "Staged", "Custom answer", "Question note", "Next", "Cancel"];
+const KEYBOARD_FOCUS_ORDER = ["Direct", "Staged", "Custom answer", "Question note", "Global note", "Submit", "Cancel"];
 
 function keyboardRequest(multiSelect = false) {
 	const result = createFrozenQuestionnaireRequest("keyboard-correlation", { questions: [{
@@ -154,7 +155,8 @@ function isFocusedControlLine(line: string, label: string): boolean {
 	if (line === `→ ${label}` || line === `→ [${label}]`) return true;
 	const marker = `→ ${label}`;
 	const markerIndex = line.indexOf(marker);
-	if (markerIndex >= 0 && (line.length === markerIndex + marker.length || /\s/.test(line[markerIndex + marker.length]!))) return true;
+	const suffix = markerIndex >= 0 ? line.slice(markerIndex + marker.length) : "";
+	if (markerIndex >= 0 && (suffix === "" || /^\s|^:/.test(suffix))) return true;
 	for (const prefix of ["→ ( ) ", "→ (●) ", "→ [ ] ", "→ [x] "]) {
 		const control = `${prefix}${label}`;
 		const suffix = line.startsWith(control) ? line.slice(control.length) : undefined;
@@ -181,6 +183,15 @@ function isOptionControlLine(line: string, label: string): boolean {
 function optionControlRow(lines: readonly string[], label: string): number {
 	const row = lines.findIndex((line) => isOptionControlLine(line, label));
 	assert.ok(row >= 0, `the option control row is visible for ${label}`);
+	return row;
+}
+
+function semanticControlRow(lines: readonly string[], label: string): number {
+	const row = lines.findIndex((line) => {
+		const value = line.trim();
+		return value === label || value === `→ ${label}` || value.startsWith(`${label}:`) || value.startsWith(`→ ${label}:`);
+	});
+	assert.ok(row >= 0, `the semantic control row is visible for ${label}`);
 	return row;
 }
 
@@ -252,7 +263,7 @@ function clickVisible(component: QuestionnaireTuiPresentation, label: string | R
 	component.handleMouse(mouse(width, y, lines.length, x));
 }
 
-test("arrow navigation traverses options, Custom answer, primary, and Cancel with visible focus", () => {
+test("arrow navigation traverses options, Custom answer, notes, primary, and Cancel with visible focus", () => {
 	const outcomes: unknown[] = [];
 	const component = keyboardView((outcome) => outcomes.push(outcome));
 	const initial = renderedText(component);
@@ -285,6 +296,7 @@ test("arrow navigation traverses options, Custom answer, primary, and Cancel wit
 	assert.match(renderedText(component).join("\n"), /→ \(●\) Direct/, "Enter selects an option without submitting");
 	assert.equal(outcomes.length, 0);
 	assertFocusPath(component, ARROW_DOWN, KEYBOARD_FOCUS_ORDER.slice(0, 4));
+	assertFocusPath(component, ARROW_DOWN, ["Question note", "Global note", "Submit"]);
 	component.handleInput(ENTER);
 	assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose a route", kind: "option", answer: "Direct",
@@ -301,7 +313,7 @@ test("arrow navigation traverses options, Custom answer, primary, and Cancel wit
 test("pointer press synchronizes global focus before click activation", () => {
 	const outcomes: unknown[] = [];
 	const component = keyboardView((outcome) => outcomes.push(outcome));
-	assertFocusPath(component, ARROW_DOWN, ["Direct", "Staged", "Custom answer", "Submit", "Cancel"]);
+	assertFocusPath(component, ARROW_DOWN, KEYBOARD_FOCUS_ORDER);
 	let lines = renderedText(component);
 	const direct = optionControlRow(lines, "Direct");
 	assert.match(lines[direct]!, /^\( \) Direct(?: │|$)/, "the pointer target starts unselected");
@@ -344,11 +356,19 @@ test("Tab and Shift+Tab traverse the same bounded focus order without opening Cu
 	component.handleInput("draft");
 	assert.equal(outcomes.length, 0, "typing a custom draft does not complete the questionnaire");
 	component.handleInput("\t");
-	focusedControl(renderedText(component), "Submit");
+	focusedControl(renderedText(component), "Question note");
 	visible = renderedText(component).join("\n");
 	assert.match(visible, /draft/, "Tab closes the editor while retaining its draft");
 	assert.equal(outcomes.length, 0);
+	component.handleInput("\t");
+	focusedControl(renderedText(component), "Global note");
+	component.handleInput("\t");
+	focusedControl(renderedText(component), "Submit");
 
+	component.handleInput(SHIFT_TAB);
+	focusedControl(renderedText(component), "Global note");
+	component.handleInput(SHIFT_TAB);
+	focusedControl(renderedText(component), "Question note");
 	component.handleInput(SHIFT_TAB);
 	focusedControl(renderedText(component), "Custom answer");
 	assert.doesNotMatch(renderedText(component).join("\n"), /Custom response \(Esc/, "Shift+Tab returns to Custom answer without reopening its editor");
@@ -388,6 +408,10 @@ test("custom editor arrows and Enter preserve cursor edits, newlines, and litera
 	assert.equal(outcomes.length, 0, "editor arrows and literal n/s never trigger questionnaire actions");
 
 	component.handleInput("\t");
+	focusedControl(renderedText(component), "Question note");
+	component.handleInput("\t");
+	focusedControl(renderedText(component), "Global note");
+	component.handleInput("\t");
 	focusedControl(renderedText(component), "Submit");
 	assert.match(renderedText(component).join("\n"), /abXc\nn\/sd/, "editor navigation retains the exact multiline draft");
 	component.handleInput(ENTER);
@@ -407,7 +431,7 @@ test("multi-select Enter toggles focused options and waits for the primary actio
 	component.handleInput(ENTER);
 	assert.match(renderedText(component).join("\n"), /→ \[x\] Staged/);
 	assert.equal(outcomes.length, 0);
-	assertFocusPath(component, ARROW_DOWN, ["Staged", "Custom answer", "Submit"]);
+	assertFocusPath(component, ARROW_DOWN, ["Staged", "Custom answer", "Question note", "Global note", "Submit"]);
 	component.handleInput(ENTER);
 	assert.equal(outcomes.length, 1, "the primary action is the first keyboard action that completes multi-select");
 });
@@ -606,15 +630,18 @@ test("narrow Markdown fallback keeps every preview row across viewport scroll", 
 	assert.ok(seen.has("last-line"), "the final Markdown row survives scrolling");
 });
 
-test("renders authored options then Custom answer without obsolete tab chrome", () => {
+test("renders authored options, Custom answer, and Question note in visual focus order", () => {
 	const lines = renderedText(view().component, 48);
 	const direct = optionControlRow(lines, "Direct");
 	const staged = optionControlRow(lines, "Staged");
-	const custom = lines.findIndex((line) => line === "Custom answer");
+	const custom = semanticControlRow(lines, "Custom answer");
+	const note = semanticControlRow(lines, "Question note");
 	assert.ok(custom > Math.max(direct, staged), "Custom answer is rendered below every authored option");
+	assert.ok(note > custom, "Question note is rendered below Custom answer");
 	const primary = actionRow(lines, "Next");
 	const cancel = actionRow(lines, "Cancel");
-	assert.ok(custom < primary, "Custom answer precedes the primary action");
+	assert.ok(note < primary, "Question note precedes the primary action");
+	assert.doesNotMatch(lines.join("\n"), /Global note/, "a non-final question has no global-note control");
 	assert.equal(cancel, primary + 1, "the primary action is rendered immediately above Cancel");
 	assert.equal(cancel, lines.length - 1, "Cancel is rendered on the bottom footer row");
 	assert.equal(lines.filter((line) => line === "Options" || line === "[Options]").length, 0,
@@ -715,10 +742,10 @@ test("selecting is display-only until Next, then Submit emits reducer-owned froz
 	assert.equal(component.render(48).length, 0, "completion disposes before its callback can reenter");
 });
 
-test("custom drafts preserve Editor normalization while note controls are absent", () => {
+test("custom drafts preserve Editor normalization while question notes attach to committed answers", () => {
 	const outcomes: unknown[] = [];
 	const { component } = view((outcome) => outcomes.push(outcome));
-	assert.doesNotMatch(stripTerminalSequences(component.render(48).join("\n")), /Question note|Global note/, "the TUI exposes no note controls");
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Question note/, "the TUI exposes the question-note control");
 	component.handleInput("\r");
 	component.handleInput("n");
 	component.handleInput("]");
@@ -727,12 +754,190 @@ test("custom drafts preserve Editor normalization while note controls are absent
 	component.handleInput("\r");
 	component.handleInput("next  qg");
 	component.handleInput("\u001b");
-	component.handleInput("n");
+	component.handleInput("\t");
+	component.handleInput("\r");
+	component.handleInput("  custom note  ");
+	component.handleInput("\u001b");
 	component.handleInput("s");
 	assert.deepEqual(outcomes[0], { correlationId: "view-correlation", cancelled: false, answers: [
 		{ questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "option", answer: "Direct", preview: "exact preview" },
-		{ questionIndex: 1, question: "Choose checks", kind: "custom", answer: "  custom    line\nnext  qg" },
+		{ questionIndex: 1, question: "Choose checks", kind: "custom", answer: "  custom    line\nnext  qg", notes: "custom note" },
 	] });
+});
+
+test("question note editing preserves multiline literal actions and returns focus to its own row", () => {
+	const outcomes: unknown[] = [];
+	const component = view((outcome) => outcomes.push(outcome)).component;
+	assertFocusPath(component, ARROW_DOWN, NEXT_FOCUS_ORDER.slice(0, 4));
+	component.handleInput(ENTER);
+	component.handleInput("first n/s");
+	component.handleInput(ENTER);
+	component.handleInput("second n/s");
+	assert.equal(outcomes.length, 0, "literal note actions never complete the questionnaire");
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /first n\/s[\s\S]*second n\/s/);
+	component.handleInput(ESCAPE);
+	focusedControl(renderedText(component), "Question note");
+	assert.match(renderedText(component).join("\n"), /first n\/s[\s\S]*second n\/s/, "Escape preserves the note draft");
+	component.handleInput(ENTER);
+	component.handleInput(" updated");
+	component.handleInput("\t");
+	focusedControl(renderedText(component), "Next");
+	component.handleInput(SHIFT_TAB);
+	focusedControl(renderedText(component), "Question note");
+	component.handleInput(ENTER);
+	component.handleInput(SHIFT_TAB);
+	focusedControl(renderedText(component), "Custom answer");
+	assert.equal(outcomes.length, 0, "Tab and Shift+Tab only persist and move note focus");
+});
+
+test("trimmed question notes attach to committed option and multi answers", () => {
+	const outcomes: unknown[] = [];
+	const component = view((outcome) => outcomes.push(outcome)).component;
+	assertFocusPath(component, ARROW_DOWN, ["Direct", "Staged", "Custom answer", "Question note"]);
+	component.handleInput(ENTER);
+	// The space before Enter is internal note content; only outer whitespace is trimmed.
+	component.handleInput("  route note ");
+	component.handleInput(ENTER);
+	component.handleInput("second line  ");
+	component.handleInput(ESCAPE);
+	for (let step = 0; step < 3; step++) component.handleInput(ARROW_UP);
+	component.handleInput(ENTER);
+	component.handleInput("n");
+	assertFocusPath(component, ARROW_DOWN, ["Unit", "Integration", "Custom answer", "Question note"]);
+	component.handleInput(ENTER);
+	component.handleInput("  checks note ");
+	component.handleInput(ENTER);
+	component.handleInput("  ");
+	component.handleInput(ESCAPE);
+	component.handleInput(ARROW_UP);
+	component.handleInput(ARROW_UP);
+	component.handleInput(ENTER);
+	component.handleInput(ARROW_UP);
+	component.handleInput(ARROW_UP);
+	component.handleInput(ENTER);
+	component.handleInput("s");
+	assert.deepEqual(outcomes, [{ correlationId: "view-correlation", cancelled: false, answers: [
+		{ questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "option", answer: "Direct", preview: "exact preview", notes: "route note \nsecond line" },
+		{ questionIndex: 1, question: "Choose checks", kind: "multi", answer: null, selected: ["Unit", "Integration"], notes: "checks note" },
+	] }]);
+});
+
+test("question and global note controls are pointer reachable without auto-committing", () => {
+	const outcomes: unknown[] = [];
+	const component = view((outcome) => outcomes.push(outcome)).component;
+	let lines = renderedText(component, 48);
+	const questionNote = semanticControlRow(lines, "Question note");
+	component.handleMouse(mouse(48, questionNote, lines.length));
+	assert.match(renderedText(component, 48).join("\n"), /Question note \(Esc keeps draft\)/);
+	component.handleInput("pointer note");
+	component.handleInput(ESCAPE);
+	focusedControl(renderedText(component, 48), "Question note");
+	for (let step = 0; step < 3; step++) component.handleInput(ARROW_UP);
+	component.handleInput(ENTER);
+	component.handleInput("n");
+	lines = renderedText(component, 48);
+	const globalNote = semanticControlRow(lines, "Global note");
+	component.handleMouse(mouse(48, globalNote, lines.length));
+	assert.match(renderedText(component, 48).join("\n"), /Global note \(Esc keeps draft\)/);
+	assert.equal(outcomes.length, 0, "pointer note activation does not commit the questionnaire");
+});
+
+test("whitespace-only notes are omitted, custom whitespace is preserved, and a lone note emits no answer", () => {
+	const customOutcomes: unknown[] = [];
+	const custom = keyboardView((outcome) => customOutcomes.push(outcome));
+	assertFocusPath(custom, ARROW_DOWN, ["Direct", "Staged", "Custom answer"]);
+	custom.handleInput(ENTER);
+	custom.handleInput("  custom whitespace  ");
+	custom.handleInput("\t");
+	custom.handleInput(ENTER);
+	custom.handleInput(" \t ");
+	custom.handleInput(ESCAPE);
+	custom.handleInput("s");
+	const customFormatted = validateAndFormat(keyboardRequest(), customOutcomes[0]);
+	assert.equal(customFormatted.ok, true, "custom whitespace outcome satisfies the raw response contract");
+	if (customFormatted.ok) {
+		assert.equal(customFormatted.result.details.cancelled, false);
+		assert.deepEqual(customFormatted.result.details.answers, [{
+			questionIndex: 0, question: "Choose a route", kind: "custom", answer: "  custom whitespace  ",
+		}]);
+		assert.equal("notes" in customFormatted.result.details.answers[0]!, false, "a blank question note is omitted publicly");
+	}
+
+	const loneOutcomes: unknown[] = [];
+	const lone = keyboardView((outcome) => loneOutcomes.push(outcome));
+	assertFocusPath(lone, ARROW_DOWN, ["Direct", "Staged", "Custom answer", "Question note"]);
+	lone.handleInput(ENTER);
+	lone.handleInput("orphan note");
+	lone.handleInput(ESCAPE);
+	lone.handleInput("s");
+	const loneFormatted = validateAndFormat(keyboardRequest(), loneOutcomes[0]);
+	assert.equal(loneFormatted.ok, true, "a lone question note still emits a valid raw response");
+	if (loneFormatted.ok) {
+		assert.equal(loneFormatted.result.details.cancelled, true, "a lone question note is canonically declined");
+		assert.deepEqual(loneFormatted.result.details.answers, []);
+		assert.equal(loneFormatted.result.content[0]!.text, "User declined to answer questions");
+	}
+
+	const blankGlobalOutcomes: unknown[] = [];
+	const blankGlobal = keyboardView((outcome) => blankGlobalOutcomes.push(outcome));
+	assertFocusPath(blankGlobal, ARROW_DOWN, ["Direct", "Staged", "Custom answer", "Question note", "Global note"]);
+	blankGlobal.handleInput(ENTER);
+	blankGlobal.handleInput(" \t ");
+	blankGlobal.handleInput(ESCAPE);
+	blankGlobal.handleInput("s");
+	const blankGlobalFormatted = validateAndFormat(keyboardRequest(), blankGlobalOutcomes[0]);
+	assert.equal(blankGlobalFormatted.ok, true, "a blank global note still satisfies the raw response contract");
+	if (blankGlobalFormatted.ok) {
+		assert.equal(blankGlobalFormatted.result.details.cancelled, true, "a blank global note is canonically declined");
+		assert.deepEqual(blankGlobalFormatted.result.details.answers, []);
+		assert.equal("globalNote" in blankGlobalFormatted.result.details, false, "a blank global note is omitted publicly");
+		assert.equal(blankGlobalFormatted.result.content[0]!.text, "User declined to answer questions");
+	}
+
+	const globalOutcomes: unknown[] = [];
+	const global = keyboardView((outcome) => globalOutcomes.push(outcome));
+	assertFocusPath(global, ARROW_DOWN, ["Direct", "Staged", "Custom answer", "Question note", "Global note"]);
+	global.handleInput(ENTER);
+	global.handleInput("  global context  ");
+	global.handleInput(ESCAPE);
+	global.handleInput(ARROW_DOWN);
+	global.handleInput(ENTER);
+	assert.deepEqual(globalOutcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [], globalNote: "global context" }]);
+	const formatted = validateAndFormat(keyboardRequest(), globalOutcomes[0]);
+	assert.equal(formatted.ok, true);
+	if (formatted.ok) {
+		assert.equal(formatted.result.details.cancelled, false);
+		assert.deepEqual(formatted.result.details.answers, []);
+	}
+});
+
+test("Cancel declines while retaining committed question and global note details", () => {
+	const outcomes: unknown[] = [];
+	const component = view((outcome) => outcomes.push(outcome)).component;
+	assertFocusPath(component, ARROW_DOWN, ["Direct", "Staged", "Custom answer", "Question note"]);
+	component.handleInput(ENTER);
+	component.handleInput(" route note ");
+	component.handleInput(ESCAPE);
+	for (let step = 0; step < 3; step++) component.handleInput(ARROW_UP);
+	component.handleInput(ENTER);
+	component.handleInput("n");
+	assertFocusPath(component, ARROW_DOWN, ["Unit", "Integration", "Custom answer", "Question note", "Global note"]);
+	component.handleInput(ENTER);
+	component.handleInput(" global context ");
+	component.handleInput(ESCAPE);
+	component.handleInput(ESCAPE);
+	const expectedAnswers = [{
+		questionIndex: 0, question: "Choose \u001b[31ma route\u001b[0m", kind: "option", answer: "Direct", preview: "exact preview", notes: "route note",
+	}];
+	assert.deepEqual(outcomes, [{ correlationId: "view-correlation", cancelled: true, answers: expectedAnswers, globalNote: "global context" }]);
+	const formatted = validateAndFormat(request(), outcomes[0]);
+	assert.equal(formatted.ok, true);
+	if (formatted.ok) {
+		assert.equal(formatted.result.details.cancelled, true);
+		assert.equal(formatted.result.content[0]!.text, "User declined to answer questions");
+		assert.deepEqual(formatted.result.details.answers, expectedAnswers);
+		assert.equal(formatted.result.details.globalNote, "global context");
+	}
 });
 
 test("Escape leaves an editor draft, then cancels committed partials; width and text display stay safe", () => {

@@ -123,6 +123,16 @@ function text(lines: readonly string[]): string[] {
 	return lines.map((line) => stripTerminalSequences(line).trim());
 }
 
+function normalizedVisibleText(lines: readonly string[]): string {
+	return text(lines).join(" ").replace(/\s+/g, " ").trim();
+}
+
+function assertEditorHeading(lines: readonly string[], label: string): void {
+	const expected = `${label} (Esc keeps draft)`;
+	const visible = normalizedVisibleText(lines);
+	assert.ok(visible.includes(expected), `bounded frame contains complete ${label} editor heading; observed: ${visible}`);
+}
+
 function rowHasSelectedBackground(lines: readonly string[], label: string): boolean {
 	const line = lines.find((value) => stripTerminalSequences(value).includes(label));
 	assert.ok(line !== undefined, `layout contains ${label}`);
@@ -191,7 +201,8 @@ function isFocusedControlLine(line: string, label: string): boolean {
 	if (line === `→ ${label}` || line === `→ [${label}]`) return true;
 	const marker = `→ ${label}`;
 	const markerIndex = line.indexOf(marker);
-	if (markerIndex >= 0 && (line.length === markerIndex + marker.length || /\s/.test(line[markerIndex + marker.length]!))) return true;
+	const suffix = markerIndex >= 0 ? line.slice(markerIndex + marker.length) : "";
+	if (markerIndex >= 0 && (suffix === "" || /^\s|^:/.test(suffix))) return true;
 	for (const prefix of ["→ ( ) ", "→ (●) ", "→ [ ] ", "→ [x] "]) {
 		const control = `${prefix}${label}`;
 		const suffix = line.startsWith(control) ? line.slice(control.length) : undefined;
@@ -386,8 +397,16 @@ test("keyboard focus scrolls Custom answer into the visible body while the stick
 		component.handleInput("\r");
 		component.handleInput("\t");
 		lines = frame(component, width, rows);
+		assert.ok(focusedKeyboardRow(lines, "Question note") < keyboardActionRow(lines, "Next"),
+			`${width}x${rows} Question note is keyboard-reachable in the body`);
+		component.handleInput("\t");
+		lines = frame(component, width, rows);
 		const nextFooter = keyboardActionRow(lines, "Next");
 		assert.equal(focusedKeyboardRow(lines, "Next"), nextFooter, `${width}x${rows} Next is keyboard-reachable in the sticky footer`);
+		component.handleInput("\u001b[B");
+		lines = frame(component, width, rows);
+		assert.equal(focusedKeyboardRow(lines, "Cancel"), keyboardActionRow(lines, "Cancel"), `${width}x${rows} Cancel follows Next in the focus order`);
+		component.handleInput("\u001b[A");
 		component.handleInput("\r");
 		lines = frame(component, width, rows);
 		const secondQuestion = text(lines).join("\n");
@@ -399,9 +418,7 @@ test("keyboard focus scrolls Custom answer into the visible body while the stick
 		const secondFooter = keyboardActionRow(lines, "Submit");
 		const secondCancelFooter = keyboardActionRow(lines, "Cancel");
 		assert.equal(secondCancelFooter, secondFooter + 1, `${width}x${rows} Cancel is the adjacent lower sticky footer row`);
-		component.handleInput("\u001b[B");
-		component.handleInput("\u001b[B");
-		component.handleInput("\u001b[B");
+		for (let step = 0; step < 5; step++) component.handleInput("\u001b[B");
 		lines = frame(component, width, rows);
 		assert.equal(focusedKeyboardRow(lines, "Submit"), secondFooter, `${width}x${rows} Submit is keyboard-reachable after the body scroll`);
 		assert.equal(keyboardActionRow(lines, "Submit"), secondFooter, `${width}x${rows} Submit stays in the sticky footer`);
@@ -412,6 +429,31 @@ test("keyboard focus scrolls Custom answer into the visible body while the stick
 		assert.equal(keyboardActionRow(lines, "Cancel"), secondCancelFooter, `${width}x${rows} Cancel focus does not move its sticky footer row`);
 		assert.equal(outcomes.length, 0, `${width}x${rows} reaching footer actions does not auto-submit or cancel`);
 	}
+});
+
+test("narrow scrolling keeps Question and Global note controls pointer-reachable with a sticky footer", () => {
+	const outcomes: unknown[] = [];
+	const width = 20;
+	const rows = 10;
+	const component = view(rows, (outcome) => outcomes.push(outcome));
+	let lines = scrollBodyUntil(component, width, rows, "Question note");
+	assertFooter(lines, "Next");
+	const questionNote = text(lines).findIndex((line) => isExactSemanticControlLine(line, "Question note"));
+	assert.ok(questionNote >= 0, "bounded scrolling reveals the question-note control");
+	assert.equal(clickFrame(component, questionNote, width, lines.length)?.handled, true, "pointer activation reaches Question note");
+	assertEditorHeading(frame(component, width, rows), "Question note");
+	component.handleInput("narrow note");
+	component.handleInput("\u001b");
+	for (let step = 0; step < 3; step++) component.handleInput("\u001b[A");
+	component.handleInput("\r");
+	component.handleInput("n");
+	lines = scrollBodyUntil(component, width, rows, "Global note");
+	assertFooter(lines, "Submit");
+	const globalNote = text(lines).findIndex((line) => isExactSemanticControlLine(line, "Global note"));
+	assert.ok(globalNote >= 0, "bounded scrolling reveals the final global-note control");
+	assert.equal(clickFrame(component, globalNote, width, lines.length)?.handled, true, "pointer activation reaches Global note");
+	assertEditorHeading(frame(component, width, rows), "Global note");
+	assert.equal(outcomes.length, 0, "note editors do not auto-submit while browsing a narrow frame");
 });
 
 test("body wheel scrolling preserves its manual position until keyboard focus moves", () => {
@@ -641,7 +683,8 @@ for (const width of [20, 32]) {
 			const lines = compactFrame(view(rows, () => {}, compactRequest()), width, rows);
 			const visible = text(lines);
 			assert.ok(lines.length < rows, "short content does not pad to the terminal height");
-			assert.doesNotMatch(visible.join("\n"), /Question note|Global note/, "notes have no TUI control");
+			assert.match(visible.join("\n"), /Question note/, "non-final questions expose a question-note control");
+			assert.doesNotMatch(visible.join("\n"), /Global note/, "non-final questions defer the global-note control to the final question");
 			const next = actionRow(lines, "Next");
 			const cancel = actionRow(lines, "Cancel");
 			assert.equal(cancel, next + 1, "the compact footer keeps Cancel immediately below the primary");
