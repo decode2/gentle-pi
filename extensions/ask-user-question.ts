@@ -34,21 +34,35 @@ type LegacyFailure = (typeof LEGACY_FAILURES)[keyof typeof LEGACY_FAILURES];
 type LegacyQuestion = { question: string; header: string; options: LegacyOption[]; multiSelect?: boolean };
 type LegacyOption = { label: string; description: string; preview?: string };
 
+const DEFAULT_TOOL_DESCRIPTION =
+	"Use ask_user_question when requirements are underspecified and the user needs a concrete decision about preferences or trade-offs. It supports 1-4 questions with 2-4 distinct authored options per question, each with a description, in TUI and RPC, with custom free-response and cancellation available automatically.";
+const DEFAULT_PROMPT_SNIPPET = "Ask before guessing about requirements, preferences, or trade-offs";
+const DEFAULT_PROMPT_GUIDELINES = [
+	"Use ask_user_question when requirements are underspecified and the user needs a concrete decision about preferences or trade-offs; do not guess.",
+	"Use ask_user_question for 1-4 questions with 2-4 distinct authored options per question, each with a description; keep each header within 16 characters and each label within 60 characters.",
+	"Use ask_user_question for custom free-response when fixed options are insufficient; custom free-response and cancellation are available automatically.",
+	"Use ask_user_question with multiSelect true only when multiple options are valid choices; leave it false for single-select questions.",
+	"Use ask_user_question with a preview only for Markdown artifact comparisons in single-select questions; do not use previews for multi-select.",
+	"Use ask_user_question to put the appropriate choice first and append (Recommended) when a recommendation is appropriate.",
+	"Use ask_user_question; do not force batching over the user's preferences when separate questions are clearer.",
+	"Use ask_user_question; never author the reserved labels Other, Type something., or Next.",
+] as const;
+
 const OptionSchema = Type.Object({
-	label: Type.String({ maxLength: 60 }),
-	description: Type.String(),
-	preview: Type.Optional(Type.String()),
+	label: Type.String({ maxLength: 60, description: "User-facing label for this option." }),
+	description: Type.String({ description: "Brief user-facing explanation of this option." }),
+	preview: Type.Optional(Type.String({ description: "Optional Markdown preview for a single-select artifact comparison." })),
 }, { additionalProperties: false });
 
 const QuestionSchema = Type.Object({
-	question: Type.String(),
-	header: Type.String({ maxLength: 16 }),
-	options: Type.Array(OptionSchema, { minItems: 2, maxItems: 4 }),
-	multiSelect: Type.Optional(Type.Boolean()),
+	question: Type.String({ description: "Question text for the user to answer." }),
+	header: Type.String({ maxLength: 16, description: "Short header shown with the question." }),
+	options: Type.Array(OptionSchema, { minItems: 2, maxItems: 4, description: "Ordered authored options for this question." }),
+	multiSelect: Type.Optional(Type.Boolean({ description: "Whether multiple options may be valid choices." })),
 }, { additionalProperties: false });
 
 const ParametersSchema = Type.Object({
-	questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: 4 }),
+	questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: 4, description: "Structured questions to clarify user requirements and preferences." }),
 }, { additionalProperties: false });
 
 type QuestionnaireUi = Pick<ExtensionUIContext, "custom"> & RpcQuestionPresentationUi;
@@ -151,9 +165,9 @@ function questionnaireTool(
 	return {
 		name: TOOL_NAME,
 		label: "Ask User Question",
-		description: guidance.description ?? "Ask the user one to four structured questions in the interactive TUI.",
-		...(guidance.promptSnippet === undefined ? {} : { promptSnippet: guidance.promptSnippet }),
-		...(guidance.promptGuidelines === undefined ? {} : { promptGuidelines: guidance.promptGuidelines }),
+		description: guidance.description ?? DEFAULT_TOOL_DESCRIPTION,
+		promptSnippet: guidance.promptSnippet ?? DEFAULT_PROMPT_SNIPPET,
+		promptGuidelines: guidance.promptGuidelines ?? [...DEFAULT_PROMPT_GUIDELINES],
 		parameters: ParametersSchema,
 		executionMode: "sequential",
 		async execute(toolCallId, params, signal, _onUpdate, ctx) {
