@@ -84,6 +84,13 @@ const defaultDependencies: AskUserQuestionDependencies = {
 		}, collapseKey),
 };
 
+function reconcileToolAvailability(pi: ExtensionAPI, eligible: boolean): void {
+	const active = pi.getActiveTools();
+	const isActive = active.includes(TOOL_NAME);
+	if (eligible === isActive) return;
+	pi.setActiveTools(eligible ? [...active, TOOL_NAME] : active.filter((name) => name !== TOOL_NAME));
+}
+
 /** Factory seam for owner-safe, host-free extension tests. */
 export function createAskUserQuestionExtension(
 	dependencies: AskUserQuestionDependencies = defaultDependencies,
@@ -93,7 +100,11 @@ export function createAskUserQuestionExtension(
 
 	return function askUserQuestion(pi: ExtensionAPI): void {
 		pi.on("session_start", async (_event, ctx) => {
-			if (registered || !supportedMode(ctx)) return;
+			if (registered) {
+				reconcileToolAvailability(pi, supportedMode(ctx));
+				return;
+			}
+			if (!supportedMode(ctx)) return;
 			let agentHome: string;
 			let owner: QuestionOwnerConfigResolution;
 			try {
@@ -120,6 +131,10 @@ export function createAskUserQuestionExtension(
 			pi.registerTool(questionnaireTool(pi, dependencies, guidance, localize, agentHome, () => busy, (value) => { busy = value; }));
 			registered = true;
 			// Pi exposes no atomic reserve operation; a later dynamic collision remains host-owned.
+		});
+		pi.on("before_agent_start", (_event, ctx) => {
+			if (!registered) return;
+			reconcileToolAvailability(pi, supportedMode(ctx));
 		});
 	};
 }
@@ -176,8 +191,9 @@ function questionnaireTool(
 }
 
 function supportedMode(ctx: { mode: string; hasUI?: boolean; ui: QuestionnaireUi }): ctx is { mode: QuestionnaireMode; hasUI?: boolean; ui: QuestionnaireUi } {
-	return ctx.mode === "tui" || ctx.mode === "rpc" && ctx.hasUI === true
-		&& typeof ctx.ui.select === "function" && typeof ctx.ui.editor === "function";
+	return (ctx.mode === "tui" && ctx.hasUI !== false)
+		|| (ctx.mode === "rpc" && ctx.hasUI === true
+			&& typeof ctx.ui.select === "function" && typeof ctx.ui.editor === "function");
 }
 
 function legacyInputFailure(input: unknown, fallback: QuestionnaireFailure): QuestionnaireToolResult {
