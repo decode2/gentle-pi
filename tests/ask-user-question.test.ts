@@ -233,6 +233,13 @@ async function start(subject: ReturnType<typeof host>, mode: string, ui: TestUi 
 	await subject.sessionStarts[0]!({ type: "session_start", reason: "startup" }, { mode, hasUI, ui });
 }
 
+async function registeredWithGuidance(session: { mode: string; ui: TestUi; hasUI: boolean }, guidance: QuestionnaireGuidance): Promise<RegisteredTool> {
+	const subject = host();
+	createAskUserQuestionExtension(guidanceDependencies(owner("gentle-pi"), async () => guidance))(subject.pi as never);
+	await start(subject, session.mode, session.ui, session.hasUI);
+	return subject.tools[0]!;
+}
+
 async function startWithoutHasUI(subject: ReturnType<typeof host>, mode = "tui", ui: TestUi = { custom: async () => undefined }): Promise<void> {
 	assert.equal(subject.sessionStarts.length, 1, "the factory registers one session_start handler");
 	await subject.sessionStarts[0]!({ type: "session_start", reason: "startup" }, { mode, ui });
@@ -1015,24 +1022,16 @@ test("preserves explicitly injected empty guidance fields instead of replacing t
 test("applies guidance overrides per field while filling only missing metadata", async (t) => {
 	for (const session of supportedQuestionnaireSessions) {
 		await t.test(session.name, async () => {
-			const partial = host();
-			createAskUserQuestionExtension(guidanceDependencies(owner("gentle-pi"), async () => ({
+			const partialTool = await registeredWithGuidance(session, {
 				description: "Configured description",
 				promptSnippet: "",
-			})))(partial.pi as never);
-			await start(partial, session.mode, session.ui, session.hasUI);
-			const partialTool = partial.tools[0]!;
+			});
 			assert.equal(partialTool.description, "Configured description");
 			assert.equal(partialTool.promptSnippet, "");
 			assert.ok(partialTool.promptGuidelines && partialTool.promptGuidelines.length > 0);
 			assert.ok(partialTool.promptGuidelines?.every((guideline) => guideline.includes("ask_user_question")));
 
-			const emptyGuidelines = host();
-			createAskUserQuestionExtension(guidanceDependencies(owner("gentle-pi"), async () => ({
-				promptGuidelines: [],
-			})))(emptyGuidelines.pi as never);
-			await start(emptyGuidelines, session.mode, session.ui, session.hasUI);
-			const emptyGuidelinesTool = emptyGuidelines.tools[0]!;
+			const emptyGuidelinesTool = await registeredWithGuidance(session, { promptGuidelines: [] });
 			for (const pattern of [/\b(?:requirements|decision|preferences)\b/, /\btrade[- ]?offs?\b/]) {
 				assert.match(requiredText(emptyGuidelinesTool.description, "default description"), pattern);
 			}
