@@ -14,9 +14,15 @@ const ABORTED = Symbol("rpc-presentation-aborted");
 type AbortResult = typeof ABORTED;
 const english: QuestionnaireLocalizer = (_key, fallback) => fallback;
 
+type RpcQuestionPresentationWithEditor = Pick<ExtensionUIContext, "select" | "editor">
+	& Partial<Pick<ExtensionUIContext, "input">>;
+type RpcQuestionPresentationWithInput = Pick<ExtensionUIContext, "select" | "input">
+	& Partial<Pick<ExtensionUIContext, "editor">>;
+export type RpcQuestionPresentationUi = RpcQuestionPresentationWithEditor | RpcQuestionPresentationWithInput;
+
 /** Sequential RPC presentation with cancellation guarded around each native dialog. */
 export function createRpcQuestionPresentationDriver(
-	ui: Pick<ExtensionUIContext, "select" | "editor">,
+	ui: RpcQuestionPresentationUi,
 	localize: QuestionnaireLocalizer = english,
 ): QuestionPresentationDriver {
 	return { async present(request, signal) {
@@ -31,7 +37,7 @@ export function createRpcQuestionPresentationDriver(
 }
 
 async function presentQuestion(
-	ui: Pick<ExtensionUIContext, "select" | "editor">,
+	ui: RpcQuestionPresentationUi,
 	state: QuestionnairePresentationState,
 	localize: QuestionnaireLocalizer,
 	signal?: AbortSignal,
@@ -80,7 +86,7 @@ function actionLabels(
 }
 
 async function chooseOption(
-	ui: Pick<ExtensionUIContext, "select" | "editor">,
+	ui: RpcQuestionPresentationUi,
 	state: QuestionnairePresentationState,
 	question: FrozenQuestion,
 	index: number,
@@ -102,13 +108,20 @@ async function chooseOption(
 }
 
 async function editCustom(
-	ui: Pick<ExtensionUIContext, "select" | "editor">,
+	ui: RpcQuestionPresentationUi,
 	state: QuestionnairePresentationState,
 	index: number,
 	localize: QuestionnaireLocalizer,
 	signal?: AbortSignal,
 ): Promise<QuestionnairePresentationState | AbortResult> {
-	const value = await withAbort(() => ui.editor(localize("rpc.editor.custom", "Custom response"), state.customDrafts[index]), signal);
+	const title = localize("rpc.editor.custom", "Custom response");
+	const editor = ui.editor;
+	const input = ui.input;
+	const value = typeof editor === "function"
+		? await withAbort(() => editor.call(ui, title, state.customDrafts[index]), signal)
+		: typeof input === "function"
+			? await withAbort(() => input.call(ui, title, "", signal === undefined ? undefined : { signal }), signal)
+			: undefined;
 	if (value === ABORTED) return ABORTED;
 	if (value === undefined) return cancel(state);
 	const custom = reduceQuestionnairePresentation(state, { type: "set-custom-draft", questionIndex: index, value });

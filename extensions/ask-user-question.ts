@@ -4,7 +4,7 @@ import { resolveGentlePiAgentHome } from "../lib/agent-home.ts";
 import { readQuestionOwnerConfig, type QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
 import { readQuestionnaireGuidanceConfig, type QuestionnaireGuidance } from "../lib/questions/guidance-config.ts";
 import { createQuestionnaireLocalizer, type QuestionnaireLocalizer } from "../lib/questions/localization.ts";
-import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
+import { createRpcQuestionPresentationDriver, type RpcQuestionPresentationUi } from "../lib/questions/rpc-presentation-driver.ts";
 import { createTuiQuestionPresentationDriver } from "../lib/questions/tui-presentation-driver.ts";
 import { createQuestionnaireExternalEditorRuntime, type QuestionnaireExternalEditorRuntimeContext } from "../lib/questions/external-editor-runtime.ts";
 import {
@@ -51,7 +51,7 @@ const ParametersSchema = Type.Object({
 	questions: Type.Array(QuestionSchema, { minItems: 1, maxItems: 4 }),
 }, { additionalProperties: false });
 
-type QuestionnaireUi = Pick<ExtensionUIContext, "custom" | "select" | "editor">;
+type QuestionnaireUi = Pick<ExtensionUIContext, "custom"> & RpcQuestionPresentationUi;
 type QuestionnaireMode = "tui" | "rpc";
 type QuestionnairePresentationContext = QuestionnaireExternalEditorRuntimeContext;
 
@@ -193,7 +193,8 @@ function questionnaireTool(
 function supportedMode(ctx: { mode: string; hasUI?: boolean; ui: QuestionnaireUi }): ctx is { mode: QuestionnaireMode; hasUI?: boolean; ui: QuestionnaireUi } {
 	return (ctx.mode === "tui" && ctx.hasUI !== false)
 		|| (ctx.mode === "rpc" && ctx.hasUI === true
-			&& typeof ctx.ui.select === "function" && typeof ctx.ui.editor === "function");
+			&& typeof ctx.ui.select === "function"
+			&& (typeof ctx.ui.editor === "function" || typeof ctx.ui.input === "function"));
 }
 
 function legacyInputFailure(input: unknown, fallback: QuestionnaireFailure): QuestionnaireToolResult {
