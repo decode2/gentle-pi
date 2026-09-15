@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { KeybindingsManager, TUI_KEYBINDINGS, getKeybindings, matchesKey, StdinBuffer, stripTerminalSequences, type KeybindingsConfig, type KeyId, type TUI, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
+import { KeybindingsManager, TUI_KEYBINDINGS, getKeybindings, matchesKey, setKeybindings, StdinBuffer, stripTerminalSequences, type KeybindingsConfig, type KeyId, type TUI, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import type { QuestionnaireExternalEditor } from "../lib/questions/external-editor.ts";
 import { QuestionnaireTuiPresentation } from "../lib/questions/tui-presentation-view.ts";
 import { validateAndFormat } from "../lib/questions/response.ts";
@@ -47,6 +47,24 @@ function injectedKeybindings(userBindings: TestUserBindings = {}): KeybindingsMa
 /** Uses the public Pi manager for cancellation-only coverage; Editor binding claims stay in the proxy fixture above. */
 function publicKeybindings(userBindings: KeybindingsConfig = {}): KeybindingsManager {
 	return new KeybindingsManager(TUI_KEYBINDINGS, userBindings);
+}
+
+/**
+ * The public SDK Editor resolves bindings through pi-tui's process-global manager,
+ * while this view receives its manager as an injected argument. Keep those identities
+ * aligned for hosted integration coverage and restore the exact prior manager afterward.
+ */
+function withInstalledPublicKeybindings(userBindings: KeybindingsConfig, exercise: (keybindings: KeybindingsManager) => void): void {
+	const previous = getKeybindings();
+	const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, userBindings);
+	try {
+		setKeybindings(keybindings);
+		assert.strictEqual(getKeybindings(), keybindings, "the hosted SDK global is the same in-memory manager injected into the view");
+		exercise(keybindings);
+	} finally {
+		setKeybindings(previous);
+	}
+	assert.strictEqual(getKeybindings(), previous, "the exact prior SDK global manager is restored after the integration case");
 }
 
 function request() {
@@ -134,7 +152,10 @@ const ENTER = "\r";
 const ESCAPE = "\u001b";
 const SHIFT_TAB = "\u001b[Z";
 const SHIFT_ENTER = "\u001b\r";
+const KITTY_SHIFT_ENTER = "\u001b[13;2u";
 const CTRL_J = "\n";
+const KITTY_CTRL_Q = "\u001b[113;5u";
+const LEGACY_ESC_CR = "\u001b\r";
 const CTRL_O = "\u000f";
 const CTRL_C = "\u0003";
 const CTRL_Q = "\u0011";
@@ -566,6 +587,109 @@ test("explicit input.submit confirms custom answers before the vertical primary 
 	assert.deepEqual(disabledOutcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
 		questionIndex: 0, question: "Choose a route", kind: "custom", answer: "draft",
 	}] }], "disabling submit preserves the exact draft without falling back to a newline");
+});
+
+test("hosted public manager drives the real view and SDK Editor across input binding configurations", { concurrency: false }, () => {
+	withInstalledPublicKeybindings({}, (keybindings) => {
+		const outcomes: unknown[] = [];
+		const component = view((outcome) => outcomes.push(outcome), keyboardRequest(), keybindings).component;
+		focusCustomForKeyboard(component);
+		component.handleInput("first");
+		component.handleInput(ENTER);
+		component.handleInput("second");
+		component.handleInput(KITTY_SHIFT_ENTER);
+		component.handleInput("third");
+		component.handleInput(ESCAPE);
+		component.handleInput("s");
+		assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+			questionIndex: 0, question: "Choose a route", kind: "custom", answer: "first\nsecond\nthird",
+		}] }], "unconfigured Enter and default newline bindings preserve the owned multiline draft");
+	});
+
+	withInstalledPublicKeybindings({ "tui.input.newLine": "ctrl+q" }, (keybindings) => {
+		const outcomes: unknown[] = [];
+		const component = view((outcome) => outcomes.push(outcome), keyboardRequest(), keybindings).component;
+		focusCustomForKeyboard(component);
+		component.handleInput("before");
+		component.handleInput(KITTY_CTRL_Q);
+		component.handleInput("after");
+		component.handleInput(ENTER);
+		assert.equal(outcomes.length, 0, "the resolved default submit confirms a newline-only custom editor without finishing");
+		focusedControl(renderedText(component), "Submit");
+		component.handleInput("s");
+		assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+			questionIndex: 0, question: "Choose a route", kind: "custom", answer: "before\nafter",
+		}] }], "newline-only remapping keeps the resolved submit confirmation separate from the primary action");
+	});
+
+	withInstalledPublicKeybindings({ "tui.input.submit": "ctrl+q" }, (keybindings) => {
+		const outcomes: unknown[] = [];
+		const component = view((outcome) => outcomes.push(outcome), keyboardRequest(), keybindings).component;
+		focusCustomForKeyboard(component);
+		component.handleInput("before");
+		component.handleInput(ENTER);
+		component.handleInput("after");
+		component.handleInput(KITTY_CTRL_Q);
+		assert.equal(outcomes.length, 0, "an explicit submit remap confirms the editor before the vertical primary submits");
+		focusedControl(renderedText(component), "Submit");
+		component.handleInput("s");
+		assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+			questionIndex: 0, question: "Choose a route", kind: "custom", answer: "beforeafter",
+		}] }], "the old Enter is not an implicit newline when submit is explicitly remapped");
+	});
+
+	withInstalledPublicKeybindings({ "tui.input.newLine": "ctrl+q", "tui.input.submit": "ctrl+q" }, (keybindings) => {
+		const outcomes: unknown[] = [];
+		const component = view((outcome) => outcomes.push(outcome), keyboardRequest(), keybindings).component;
+		focusCustomForKeyboard(component);
+		component.handleInput("before");
+		component.handleInput(KITTY_CTRL_Q);
+		assert.equal(outcomes.length, 0, "a newline/submit collision remains inside the editor");
+		assert.match(renderedText(component).join("\n"), /Custom response/, "newline wins the colliding action before editor confirmation");
+		component.handleInput("after");
+		component.handleInput(ESCAPE);
+		component.handleInput("s");
+		assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+			questionIndex: 0, question: "Choose a route", kind: "custom", answer: "before\nafter",
+		}] }], "the colliding key inserts a newline instead of confirming or finishing");
+	});
+
+	withInstalledPublicKeybindings({ "tui.input.newLine": [] }, (keybindings) => {
+		const outcomes: unknown[] = [];
+		const component = view((outcome) => outcomes.push(outcome), keyboardRequest(), keybindings).component;
+		focusCustomForKeyboard(component);
+		component.handleInput("before");
+		component.handleInput(KITTY_SHIFT_ENTER);
+		component.handleInput("after");
+		component.handleInput(ENTER);
+		assert.equal(outcomes.length, 0, "the resolved submit still confirms after an unambiguous newline binding is disabled");
+		focusedControl(renderedText(component), "Submit");
+		component.handleInput("s");
+		assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+			questionIndex: 0, question: "Choose a route", kind: "custom", answer: "beforeafter",
+		}] }], "CSI-u Shift+Enter does not become a newline through the native Editor after newLine:[]");
+	});
+});
+
+test("characterizes native Editor legacy LF and ESC-CR aliases after tui.input.newLine is disabled", { concurrency: false }, () => {
+	withInstalledPublicKeybindings({ "tui.input.newLine": [], "tui.input.submit": "ctrl+q" }, (keybindings) => {
+		// Move submit off Enter so the view routes these raw legacy bytes to the
+		// native Editor. With default submit, raw LF is also legacy Enter and the
+		// resolved submit check wins first; this is not a semantic Ctrl+J claim.
+		const outcomes: unknown[] = [];
+		const component = view((outcome) => outcomes.push(outcome), keyboardRequest(), keybindings).component;
+		focusCustomForKeyboard(component);
+		component.handleInput("before");
+		component.handleInput(CTRL_J);
+		component.handleInput("after");
+		component.handleInput(LEGACY_ESC_CR);
+		component.handleInput("tail");
+		component.handleInput(ESCAPE);
+		component.handleInput("s");
+		assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: false, answers: [{
+			questionIndex: 0, question: "Choose a route", kind: "custom", answer: "before\nafter\ntail",
+		}] }], "the installed native Editor retains its source-defined unconditional LF and ESC-CR newline aliases");
+	});
 });
 
 test("configured input.tab moves forward in and out of editors, while Shift+Tab stays reverse and [] disables old Tab", () => {
