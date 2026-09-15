@@ -71,6 +71,69 @@ function schemaObject(value: unknown, label: string): Record<string, unknown> {
 	return value as Record<string, unknown>;
 }
 
+function schemaDescription(value: unknown, label: string): string {
+	const description = schemaObject(value, label).description;
+	if (typeof description !== "string") assert.fail(`${label} must have a description`);
+	assert.ok(description.trim().length > 0, `${label} description must not be empty`);
+	return description.toLowerCase();
+}
+
+function requiredText(value: string | undefined, label: string): string {
+	if (typeof value !== "string") assert.fail(`${label} must be a string`);
+	assert.ok(value.trim().length > 0, `${label} must not be empty`);
+	return value;
+}
+
+function assertDefaultModelMetadata(tool: RegisteredTool): void {
+	const description = requiredText(tool.description, "default description");
+	const snippet = requiredText(tool.promptSnippet, "default prompt snippet");
+	const guidelines = tool.promptGuidelines;
+	if (guidelines === undefined || guidelines.length === 0) assert.fail("default prompt guidelines must be non-empty");
+	for (const [index, guideline] of guidelines.entries()) {
+		assert.ok(guideline.trim().length > 0, `default guideline ${index} must not be empty`);
+		assert.ok(guideline.includes("ask_user_question"), `default guideline ${index} names the SDK tool`);
+	}
+
+	const metadata = [description, snippet, ...guidelines].join("\n").toLowerCase();
+	for (const concept of ["requirements", "decision", "preferences"]) assert.match(metadata, new RegExp(`\\b${concept}\\b`));
+	assert.match(metadata, /\btrade[- ]?offs?\b/);
+	for (const pattern of [
+		/\b(?:1|one)\s*(?:-|–|to|through)\s*(?:4|four)\b|\bup to (?:4|four)\b/,
+		/\b(?:2|two)\s*(?:-|–|to|through)\s*(?:4|four)\b/,
+		/\b(?:automatic(?:ally)?|built[- ]in)\b/,
+		/\bcustom\b/,
+		/\b(?:free[- ]?(?:response|form)|custom text)\b/,
+		/\bcancell?ation\b|\bcancel\b/,
+	]) assert.match(metadata, pattern);
+	if (/\b(?:tui|terminal)\b/.test(metadata)) {
+		assert.match(metadata, /\brpc\b/, "TUI/terminal metadata must also cover RPC");
+		assert.doesNotMatch(metadata, /\b(?:tui|terminal)\b[^.!?\n]{0,80}\b(?:only|exclusive(?:ly)?)\b|\b(?:only|exclusive(?:ly)?)\b[^.!?\n]{0,80}\b(?:tui|terminal)\b/);
+	}
+	assert.doesNotMatch(metadata, /\b(?:default\s+key|default\s+shortcut|collapsekey)\b/);
+	assert.doesNotMatch(metadata, /\b(?:always|guarantee(?:d)?|must|required)\b[^.!?\n]{0,100}\bside[- ]by[- ]side\b|\bside[- ]by[- ]side\b[^.!?\n]{0,100}\b(?:always|guarantee(?:d)?|must|required)\b/);
+	assert.doesNotMatch(metadata, /\b(?:ask\s+)?exactly\s+(?:4|four)\s+questions?\b|\b(?:must|always|required to)\s+ask\s+(?:4|four)\s+questions?\b/);
+
+	for (const pattern of [/\bask\b/, /\bbefore\b/, /\bguess/]) assert.match(snippet.toLowerCase(), pattern);
+	assert.ok(snippet.trim().split(/\s+/).length <= 12, "default prompt snippet stays concise");
+	for (const term of ["distinct", "descriptions?", "header", "label", "16", "60", "multiselect", "multiple", "valid"]) {
+		assert.match(metadata, new RegExp(`\\b${term}\\b`));
+	}
+	for (const reserved of ["other", "type something.", "next"]) assert.ok(metadata.includes(reserved), `default guidance names reserved label ${reserved}`);
+	assert.match(metadata, /\b(?:never|do not|don't)\b/);
+	assert.match(metadata, /\bauthor/);
+
+	const previewGuideline = requiredText(guidelines.find((guideline) => /\bpreview\b/i.test(guideline)), "preview guidance").toLowerCase();
+	for (const pattern of [/markdown/, /\bsingle[- ]select\b/, /artifact/, /comparison/]) assert.match(previewGuideline, pattern);
+	assert.match(previewGuideline, /\bonly\b/);
+	const recommendationGuideline = requiredText(guidelines.find((guideline) => /recommended/i.test(guideline)), "recommendation guidance").toLowerCase();
+	for (const pattern of [/\bfirst\b/, /\(recommended\)/, /\b(?:appropriate|when it makes sense)\b/]) assert.match(recommendationGuideline, pattern);
+	const batchingGuideline = guidelines.find((guideline) => /\bbatch/i.test(guideline));
+	if (batchingGuideline !== undefined) {
+		const batchingText = batchingGuideline.toLowerCase();
+		for (const pattern of [/\bpreference/, /\b(?:don't|do not|avoid|never)\b/]) assert.match(batchingText, pattern);
+	}
+}
+
 function owner(ownerName: "gentle-pi" | "legacy-external" | "disabled"): QuestionOwnerConfigResolution {
 	return ownerName === "gentle-pi"
 		? { allowRegistration: true, owner: "gentle-pi", reason: "configured_gentle_pi", path: "/profiles/test/gentle-ai/question-owner.json" }
@@ -160,6 +223,11 @@ function guidanceDependencies(
 	};
 }
 
+const supportedQuestionnaireSessions = [
+	{ name: "TUI", mode: "tui", ui: { custom: async () => undefined }, hasUI: true },
+	{ name: "RPC", mode: "rpc", ui: { select: async () => undefined, editor: async () => undefined }, hasUI: true },
+];
+
 async function start(subject: ReturnType<typeof host>, mode: string, ui: TestUi = { custom: async () => undefined }, hasUI = mode === "tui"): Promise<void> {
 	assert.equal(subject.sessionStarts.length, 1, "the factory registers one session_start handler");
 	await subject.sessionStarts[0]!({ type: "session_start", reason: "startup" }, { mode, hasUI, ui });
@@ -218,24 +286,48 @@ test("does not register the questionnaire for legacy or disabled owners", async 
 	}
 });
 
-test("registers the exact bounded questionnaire schema only in a TUI session", async () => {
+test("registers the exact bounded questionnaire schema with model-facing field descriptions", async () => {
 	const subject = host();
 	createAskUserQuestionExtension(dependencies(owner("gentle-pi")))(subject.pi as never);
 	await start(subject, "tui");
 	assert.equal(subject.tools.length, 1);
 	const tool = subject.tools[0]!;
 	assert.equal(tool.name, "ask_user_question");
-	assert.deepEqual(Object.keys(tool.parameters.properties ?? {}).sort(), ["questions"]);
-	const questions = schemaObject(tool.parameters.properties?.questions, "questions");
+	const parameters = schemaObject(tool.parameters, "parameters");
+	assert.equal(parameters.additionalProperties, false);
+	assert.deepEqual(parameters.required, ["questions"]);
+	const parameterProperties = schemaObject(parameters.properties, "parameter properties");
+	assert.deepEqual(Object.keys(parameterProperties).sort(), ["questions"]);
+	const questions = schemaObject(parameterProperties.questions, "questions");
 	assert.equal(questions.minItems, 1);
 	assert.equal(questions.maxItems, 4);
-	const questionProperties = schemaObject(schemaObject(questions.items, "question items").properties, "question properties");
+	schemaDescription(questions, "questions");
+
+	const questionSchema = schemaObject(questions.items, "question items");
+	assert.equal(questionSchema.additionalProperties, false);
+	assert.deepEqual(questionSchema.required, ["question", "header", "options"]);
+	const questionProperties = schemaObject(questionSchema.properties, "question properties");
+	assert.deepEqual(Object.keys(questionProperties).sort(), ["header", "multiSelect", "options", "question"]);
+	schemaDescription(questionProperties.question, "question");
+	assert.match(schemaDescription(questionProperties.header, "header"), /\b(?:header|title)\b/);
 	assert.equal(schemaObject(questionProperties.header, "header").maxLength, 16);
+	schemaDescription(questionProperties.options, "options");
 	const options = schemaObject(questionProperties.options, "options");
 	assert.equal(options.maxItems, 4);
 	assert.equal(options.minItems, 2);
-	const optionProperties = schemaObject(schemaObject(options.items, "option items").properties, "option properties");
+
+	const optionSchema = schemaObject(options.items, "option items");
+	assert.equal(optionSchema.additionalProperties, false);
+	assert.deepEqual(optionSchema.required, ["label", "description"]);
+	const optionProperties = schemaObject(optionSchema.properties, "option properties");
+	assert.deepEqual(Object.keys(optionProperties).sort(), ["description", "label", "preview"]);
+	schemaDescription(optionProperties.label, "label");
 	assert.equal(schemaObject(optionProperties.label, "label").maxLength, 60);
+	schemaDescription(optionProperties.description, "description");
+	const previewDescription = schemaDescription(optionProperties.preview, "preview");
+	for (const pattern of [/\bmarkdown\b/, /\bpreview\b/, /\b(?:single[- ]select)\b/, /\bartifact\b/, /\bcomparison\b/]) assert.match(previewDescription, pattern);
+	const multiSelectDescription = schemaDescription(questionProperties.multiSelect, "multiSelect");
+	for (const pattern of [/\bmultiple\b/, /\bvalid\b/]) assert.match(multiSelectDescription, pattern);
 });
 
 test("default admitted TUI registration forwards an external-editor callback to the real driver", { concurrency: false }, async () => {
@@ -851,10 +943,7 @@ test("makes repeated eligible RPC session starts idempotent", async () => {
 });
 
 test("reads first-party guidance after owner admission and incumbent inventory, preserving configured metadata in TUI and RPC", async (t) => {
-	for (const session of [
-		{ name: "TUI", mode: "tui", ui: { custom: async () => undefined }, hasUI: true },
-		{ name: "RPC", mode: "rpc", ui: { select: async () => undefined, editor: async () => undefined }, hasUI: true },
-	]) {
+	for (const session of supportedQuestionnaireSessions) {
 		await t.test(session.name, async () => {
 			const order: string[] = [];
 			const subject = host();
@@ -883,25 +972,74 @@ test("reads first-party guidance after owner admission and incumbent inventory, 
 	}
 });
 
-test("uses incumbent metadata when optional first-party guidance is absent or unreadable", async (t) => {
-	for (const scenario of [
-		{ name: "absent", readGuidanceConfig: async () => ({}) },
-		{ name: "reader throws", readGuidanceConfig: async () => { throw new Error("optional guidance is unreadable"); } },
-	]) {
-		await t.test(scenario.name, async () => {
-			let reads = 0;
+test("uses built-in model metadata when optional first-party guidance is absent or unreadable in TUI and RPC", async (t) => {
+	for (const session of supportedQuestionnaireSessions) {
+		for (const scenario of [
+			{ name: "absent", readGuidanceConfig: async () => ({}) },
+			{ name: "reader throws", readGuidanceConfig: async () => { throw new Error("optional guidance is unreadable"); } },
+		]) {
+			await t.test(`${session.name} ${scenario.name}`, async () => {
+				let reads = 0;
+				const subject = host();
+				createAskUserQuestionExtension(guidanceDependencies(owner("gentle-pi"), async (agentHome) => {
+					reads++;
+					assert.equal(agentHome, "/profiles/test");
+					return scenario.readGuidanceConfig();
+				}))(subject.pi as never);
+				await start(subject, session.mode, session.ui, session.hasUI);
+				assert.equal(reads, 1);
+				assertDefaultModelMetadata(subject.tools[0]!);
+			});
+		}
+	}
+});
+
+test("preserves explicitly injected empty guidance fields instead of replacing them with defaults", async (t) => {
+	for (const session of supportedQuestionnaireSessions) {
+		await t.test(session.name, async () => {
 			const subject = host();
-			createAskUserQuestionExtension(guidanceDependencies(owner("gentle-pi"), async (agentHome) => {
-				reads++;
-				assert.equal(agentHome, "/profiles/test");
-				return scenario.readGuidanceConfig();
-			}))(subject.pi as never);
-			await start(subject, "tui");
-			assert.equal(reads, 1);
+			createAskUserQuestionExtension(guidanceDependencies(owner("gentle-pi"), async () => ({
+				description: "",
+				promptSnippet: "",
+				promptGuidelines: [],
+			})))(subject.pi as never);
+			await start(subject, session.mode, session.ui, session.hasUI);
 			const tool = subject.tools[0]!;
-			assert.equal(tool.description, "Ask the user one to four structured questions in the interactive TUI.");
-			assert.equal(Object.hasOwn(tool, "promptSnippet"), false);
-			assert.equal(Object.hasOwn(tool, "promptGuidelines"), false);
+			assert.equal(tool.description, "");
+			assert.equal(tool.promptSnippet, "");
+			assert.deepEqual(tool.promptGuidelines, []);
+		});
+	}
+});
+
+test("applies guidance overrides per field while filling only missing metadata", async (t) => {
+	for (const session of supportedQuestionnaireSessions) {
+		await t.test(session.name, async () => {
+			const partial = host();
+			createAskUserQuestionExtension(guidanceDependencies(owner("gentle-pi"), async () => ({
+				description: "Configured description",
+				promptSnippet: "",
+			})))(partial.pi as never);
+			await start(partial, session.mode, session.ui, session.hasUI);
+			const partialTool = partial.tools[0]!;
+			assert.equal(partialTool.description, "Configured description");
+			assert.equal(partialTool.promptSnippet, "");
+			assert.ok(partialTool.promptGuidelines && partialTool.promptGuidelines.length > 0);
+			assert.ok(partialTool.promptGuidelines?.every((guideline) => guideline.includes("ask_user_question")));
+
+			const emptyGuidelines = host();
+			createAskUserQuestionExtension(guidanceDependencies(owner("gentle-pi"), async () => ({
+				promptGuidelines: [],
+			})))(emptyGuidelines.pi as never);
+			await start(emptyGuidelines, session.mode, session.ui, session.hasUI);
+			const emptyGuidelinesTool = emptyGuidelines.tools[0]!;
+			for (const pattern of [/\b(?:requirements|decision|preferences)\b/, /\btrade[- ]?offs?\b/]) {
+				assert.match(requiredText(emptyGuidelinesTool.description, "default description"), pattern);
+			}
+			for (const pattern of [/\bask\b/, /\bbefore\b/, /\bguess/]) {
+				assert.match(requiredText(emptyGuidelinesTool.promptSnippet, "default prompt snippet"), pattern);
+			}
+			assert.deepEqual(emptyGuidelinesTool.promptGuidelines, []);
 		});
 	}
 });
