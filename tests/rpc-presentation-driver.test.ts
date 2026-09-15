@@ -75,10 +75,12 @@ class FakeUi implements Pick<ExtensionUIContext, "select" | "editor"> {
 class InputOnlyUi implements Pick<ExtensionUIContext, "select" | "input"> {
 	readonly calls: Call[] = [];
 	private position = 0;
-	constructor(
-		private readonly replies: Reply[],
-		private readonly onCall: (call: Call) => void = () => {},
-	) {}
+	private readonly replies: Reply[];
+	private readonly onCall: (call: Call) => void;
+	constructor(replies: Reply[], onCall: (call: Call) => void = () => {}) {
+		this.replies = replies;
+		this.onCall = onCall;
+	}
 	async select(title: string, values: string[], options?: ExtensionUIDialogOptions): Promise<string | undefined> {
 		return this.ask({ kind: "select", title, values: [...values], signal: options?.signal });
 	}
