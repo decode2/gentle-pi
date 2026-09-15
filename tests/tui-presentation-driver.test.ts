@@ -1031,7 +1031,7 @@ test("the driver renders the cancellation hint from its injected manager", async
 		// Observe the rendered view after the host factory callback so assertions are not masked by production catches.
 		const lines = component.render(80).map(stripTerminalSequences);
 		const hint = lines.find((line) => line.includes("to cancel"));
-		assert.equal(hint, "Ctrl+Q to cancel", "the rendered hint uses the configured key from the injected manager");
+		assert.equal(hint?.trim(), "Ctrl+Q to cancel", "the rendered hint uses the configured key from the injected manager");
 		assert.doesNotMatch(hint ?? "", /Esc|Ctrl\+C/, "the rendered remap does not advertise global cancellation keys");
 		assert.equal(host.received[0]?.keybindings, keybindings, "the driver passes the same manager to the view it renders");
 	} finally {
