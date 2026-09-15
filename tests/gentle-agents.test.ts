@@ -2197,8 +2197,9 @@ test("default session transport selects Windows or POSIX classes without mutatin
 	const registry = {} as never;
 	const onNotification = async () => {};
 	const windows = createDefaultSessionTransport("win32");
-	assert.ok(windows.createListener(registry, "s1", onNotification) instanceof WindowsActiveSessionListener);
-	assert.ok(windows.createClient(registry, "s1") instanceof WindowsActiveSessionClient);
+	assert.ok(windows.createListener(registry, "s1", onNotification) instanceof ActiveSessionListener);
+	assert.equal((windows.createListener(registry, "s1", onNotification) as { closesRegistry?: boolean }).closesRegistry, false);
+	assert.ok(windows.createClient(registry, "s1") instanceof ActiveSessionClient);
 	const posix = createDefaultSessionTransport("linux");
 	assert.ok(posix.createListener(registry, "s1", onNotification) instanceof ActiveSessionListener);
 	assert.ok(posix.createClient(registry, "s1") instanceof ActiveSessionClient);

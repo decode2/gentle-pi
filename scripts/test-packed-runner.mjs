@@ -57,15 +57,11 @@ const WINDOWS_STARTUP_TIMING_OUTCOMES = new Set(["not-attempted", "valid-reply",
 const WINDOWS_STARTUP_TIMING_CLEANUP_OUTCOMES = new Set(["not-attempted", "close-observed", "close-unconfirmed", "blocked"]);
 const SDK_LIFECYCLE_ERROR_CODES = new Set(["spawn-failed", "timed-out", "unconfirmed-close", "output-limit", "nonzero-exit", "invalid-result", "assertion-failed", "cleanup-failed", "unknown"]);
 const SDK_LIFECYCLE_EXTENSION_ERROR_PHASES = new Set(["unobserved", "none", "startup", "shutdown"]);
-const SDK_LIFECYCLE_WINDOWS_OBSERVATION_AVAILABILITY = new Set(["not-applicable", "unavailable", "observed"]);
+const SDK_LIFECYCLE_WINDOWS_OBSERVATION_BACKENDS = new Set(["native-node", "posix", "legacy-powershell"]);
+    const SDK_LIFECYCLE_WINDOWS_OBSERVATION_CLOSE_STATUSES = new Set(["observed", "not-required", "failed"]);
+    const SDK_LIFECYCLE_WINDOWS_OBSERVATION_AVAILABILITY = new Set(["unavailable", "observed"]);
 const SDK_LIFECYCLE_WINDOWS_OBSERVATION_PROVENANCE = new Set(["not-applicable", "unavailable", "ambiguous", "owned-instance"]);
 const SDK_LIFECYCLE_WINDOWS_OBSERVATION_RESTORATION = new Set(["not-applicable", "not-required", "not-attempted"]);
-const SDK_LIFECYCLE_WINDOWS_OBSERVATION_PHASES = new Set(["start", "initialize", "cleanup"]);
-const SDK_LIFECYCLE_WINDOWS_OBSERVATION_FAILURE_CLASSES = new Set(["timed-out", "rejected", "unknown"]);
-const SDK_LIFECYCLE_WINDOWS_STARTUP_MARKERS = new Set(["script-entered", "native-ready"]);
-// This is the complete source-defined diagnostic vocabulary. The receipt never accepts
-// a native error code, message, property, or process output as rejection evidence.
-const SDK_LIFECYCLE_WINDOWS_OBSERVATION_ERROR_CODES = new Set(["spawn", "stream", "process", "exit", "write", "deadline", "protocol", "start-reply", "stopped", "unwritable", "unknown"]);
 const SDK_LIFECYCLE_CHILD_STAGES = new Set(["bootstrap", "sdk-load", "jiti-load", "agents-module-load", "model-runtime", "services", "extensions-validate", "model-availability", "session-create", "session-bind", "presence-two", "dispose-first", "presence-one", "dispose-second", "presence-none", "cleanup"]);
 const SDK_LIFECYCLE_CHILD_CHECK_IDS = new Set(["bootstrap-builtins", "bootstrap-agent-home", "bootstrap-directories", "sdk-import", "sdk-exports", "jiti-import", "agents-module-import", "agents-module-export", "settings-untrusted", "settings-default-provider", "settings-default-model", "model-runtime-create", "services-create", "services-settings-manager", "services-project-trusted", "extensions-errors", "extensions-paths", "extensions-hooks", "services-diagnostics", "ambient-skills", "ambient-prompts", "ambient-themes", "ambient-context-files", "model-availability-empty", "session-create", "session-model-unbound", "session-model-invocation-guard", "session-bind", "session-bind-extension-errors", "session-model-bound", "session-ids-distinct", "presence-observer-create", "presence-two-records", "presence-first-model-unbound", "presence-second-model-unbound", "presence-two-extension-errors", "dispose-first", "dispose-first-extension-errors", "presence-one-record", "presence-one-model-unbound", "presence-one-extension-errors", "dispose-second", "dispose-second-extension-errors", "presence-no-records", "presence-none-extension-errors", "cleanup-runtime", "cleanup-observer", "cleanup-extension-errors"]);
 const SDK_LIFECYCLE_CHILD_ERROR_CODES = new Set(["assertion-failed", "forbidden-model-invocation", "load-failed", "timed-out", "cleanup-failed", "observation-invalid", "unknown"]);
@@ -80,6 +76,7 @@ const UNHOOKED_CHECK_IDS = new Set([
 	"not-attempted", "runner-temp", "temporary-root", "project-sdk-version", "pack-command", "pack-metadata", "pack-integrity", "install-command", "import-probe-command", "import-probe-result", "unhooked-imports-complete", "cleanup-owned-root-removal",
 	"asset-runtime-windows-session-transport-owned", "asset-runtime-windows-session-transport-hash",
 	"asset-lib-windows-session-transport-owned", "asset-lib-windows-session-transport-hash",
+	"asset-lib-windows-node-session-transport-owned", "asset-lib-windows-node-session-transport-hash",
 	"asset-lib-agents-session-transport-owned", "asset-lib-agents-session-transport-hash",
 	"asset-extension-gentle-agents-owned", "asset-extension-gentle-agents-hash",
 	"asset-extension-gentle-ai-owned", "asset-extension-gentle-ai-hash",
@@ -817,6 +814,7 @@ function assertPackResult(packed, packDirectory, receipt) {
 const HASHED_PACKED_ASSETS = [
 	{ ownedCheckId: "asset-runtime-windows-session-transport-owned", hashCheckId: "asset-runtime-windows-session-transport-hash", relativePath: "runtime/windows-session-transport.ps1" },
 	{ ownedCheckId: "asset-lib-windows-session-transport-owned", hashCheckId: "asset-lib-windows-session-transport-hash", relativePath: "lib/windows-session-transport.ts" },
+	{ ownedCheckId: "asset-lib-windows-node-session-transport-owned", hashCheckId: "asset-lib-windows-node-session-transport-hash", relativePath: "lib/windows-node-session-transport.ts" },
 	{ ownedCheckId: "asset-lib-agents-session-transport-owned", hashCheckId: "asset-lib-agents-session-transport-hash", relativePath: "lib/agents-session-transport.ts" },
 	{ ownedCheckId: "asset-extension-gentle-agents-owned", hashCheckId: "asset-extension-gentle-agents-hash", relativePath: "extensions/gentle-agents.ts" },
 	{ ownedCheckId: "asset-extension-gentle-ai-owned", hashCheckId: "asset-extension-gentle-ai-hash", relativePath: "extensions/gentle-ai.ts" },
@@ -925,24 +923,14 @@ function isSdkLifecycleChildStageCheck(stage, checkId) {
 }
 
 function parseWindowsRegistryObservation(value) {
-	if (value === null) return null;
 	if (!value || typeof value !== "object" || Array.isArray(value) || Object.getPrototypeOf(value) !== Object.prototype) return undefined;
-	const keys = ["availability", "provenance", "restoration", "startCalls", "initializeCalls", "cleanupCalls", "firstFailurePhase", "firstFailureClass", "firstFailureCode", "lastStartupMarker"];
+	const keys = ["backend", "availability", "provenance", "restoration", "startupReady", "cleanupComplete", "closeStatus", "startCalls", "initializeCalls", "cleanupCalls", "firstFailurePhase", "firstFailureClass", "firstFailureCode", "lastStartupMarker"];
 	if (Object.keys(value).length !== keys.length || keys.some((key) => !Object.prototype.hasOwnProperty.call(value, key))) return undefined;
 	const observation = value;
-	if (observation.lastStartupMarker !== null && !SDK_LIFECYCLE_WINDOWS_STARTUP_MARKERS.has(observation.lastStartupMarker)) return undefined;
-	if (!SDK_LIFECYCLE_WINDOWS_OBSERVATION_AVAILABILITY.has(observation.availability) || !SDK_LIFECYCLE_WINDOWS_OBSERVATION_PROVENANCE.has(observation.provenance) || !SDK_LIFECYCLE_WINDOWS_OBSERVATION_RESTORATION.has(observation.restoration)) return undefined;
-	const nullDetails = ["startCalls", "initializeCalls", "cleanupCalls", "firstFailurePhase", "firstFailureClass", "firstFailureCode", "lastStartupMarker"];
-	if (observation.availability !== "observed") {
-		if ((observation.availability === "not-applicable" && (observation.provenance !== "not-applicable" || observation.restoration !== "not-applicable")) || (observation.availability === "unavailable" && (!["unavailable", "ambiguous"].includes(observation.provenance) || !["not-required", "not-attempted"].includes(observation.restoration))) || nullDetails.some((key) => observation[key] !== null)) return undefined;
-		return Object.freeze({ ...observation });
-	}
-	if (observation.provenance !== "owned-instance" || observation.restoration !== "not-required") return undefined;
-	for (const key of ["startCalls", "initializeCalls", "cleanupCalls"]) if (!Number.isInteger(observation[key]) || observation[key] < 0 || observation[key] > 1) return undefined;
-	if (observation.startCalls !== 1 || observation.cleanupCalls !== 1 || (observation.initializeCalls !== 0 && observation.initializeCalls !== 1)) return undefined;
-	const failureFields = [observation.firstFailurePhase, observation.firstFailureClass, observation.firstFailureCode];
-	if (failureFields.every((field) => field === null)) return observation.initializeCalls === 1 ? Object.freeze({ ...observation }) : undefined;
-	if (!SDK_LIFECYCLE_WINDOWS_OBSERVATION_PHASES.has(observation.firstFailurePhase) || !SDK_LIFECYCLE_WINDOWS_OBSERVATION_FAILURE_CLASSES.has(observation.firstFailureClass) || !SDK_LIFECYCLE_WINDOWS_OBSERVATION_ERROR_CODES.has(observation.firstFailureCode) || ((observation.firstFailureClass === "timed-out") !== (observation.firstFailureCode === "deadline"))) return undefined;
+	if (!SDK_LIFECYCLE_WINDOWS_OBSERVATION_BACKENDS.has(observation.backend) || !SDK_LIFECYCLE_WINDOWS_OBSERVATION_AVAILABILITY.has(observation.availability) || !SDK_LIFECYCLE_WINDOWS_OBSERVATION_PROVENANCE.has(observation.provenance) || !SDK_LIFECYCLE_WINDOWS_OBSERVATION_RESTORATION.has(observation.restoration) || !SDK_LIFECYCLE_WINDOWS_OBSERVATION_CLOSE_STATUSES.has(observation.closeStatus)) return undefined;
+	if (!["startupReady", "cleanupComplete"].every((key) => typeof observation[key] === "boolean")) return undefined;
+	if (observation.availability !== "observed" || observation.provenance !== "owned-instance" || observation.restoration !== "not-required") return undefined;
+	if (!["startCalls", "initializeCalls", "cleanupCalls", "firstFailurePhase", "firstFailureClass", "firstFailureCode", "lastStartupMarker"].every((key) => observation[key] === null)) return undefined;
 	return Object.freeze({ ...observation });
 }
 
@@ -970,7 +958,7 @@ function parseSdkLifecycleChildReceipt(stdout, stderr) {
 	if (parsed.status === "failed" && parsed.code === "forbidden-model-invocation" && (!invocationObserved || parsed.modelInvocationCount === 0)) return undefined;
 	const windowsRegistryObservation = has("windowsRegistryObservation") ? parseWindowsRegistryObservation(parsed.windowsRegistryObservation) : undefined;
 	if (has("windowsRegistryObservation") && windowsRegistryObservation === undefined) return undefined;
-	if (parsed.status === "complete" && (windowsRegistryObservation === undefined || windowsRegistryObservation === null || !((windowsRegistryObservation.availability === "not-applicable" && windowsRegistryObservation.restoration === "not-applicable") || (windowsRegistryObservation.availability === "observed" && windowsRegistryObservation.provenance === "owned-instance" && windowsRegistryObservation.restoration === "not-required" && windowsRegistryObservation.startCalls === 1 && windowsRegistryObservation.initializeCalls === 1 && windowsRegistryObservation.cleanupCalls === 1 && windowsRegistryObservation.firstFailurePhase === null && windowsRegistryObservation.firstFailureClass === null && windowsRegistryObservation.firstFailureCode === null && windowsRegistryObservation.lastStartupMarker === "native-ready")))) return undefined;
+	if (parsed.status === "complete" && (windowsRegistryObservation === undefined || !windowsRegistryObservation.startupReady || !windowsRegistryObservation.cleanupComplete || !["observed", "not-required"].includes(windowsRegistryObservation.closeStatus) || (windowsRegistryObservation.closeStatus === "not-required" && !["native-node", "posix"].includes(windowsRegistryObservation.backend)) || !["native-node", "posix"].includes(windowsRegistryObservation.backend))) return undefined;
 	for (const key of ["sessionsStarted", "presenceAfterStart", "presenceAfterFirstDispose", "presenceAfterSecondDispose", "disposedSessions"]) {
 		if (has(key) && (!Number.isInteger(parsed[key]) || parsed[key] < 0 || parsed[key] > 2)) return undefined;
 	}
@@ -1063,10 +1051,20 @@ const within = async (operation, milliseconds) => {
     if (timer) clearTimeout(timer);
   }
 };
-const newWindowsRegistryObservation = (availability, provenance, restoration) => ({ availability, provenance, restoration, startCalls: null, initializeCalls: null, cleanupCalls: null, firstFailurePhase: null, firstFailureClass: null, firstFailureCode: null, lastStartupMarker: null });
-    const createWindowsRegistryObservation = (PhaseSequence) => {
-      if (process.platform === "win32") return new PhaseSequence();
-      return { observe() { return undefined; }, startupSucceeded: true, cleanupComplete: true, admitsFullSuccess: true, snapshot: () => newWindowsRegistryObservation("not-applicable", "not-applicable", "not-applicable") };
+const newWindowsRegistryObservation = (backend, startupReady = false, cleanupComplete = false, closeStatus = "not-required") => ({ backend, availability: "observed", provenance: "owned-instance", restoration: "not-required", startupReady, cleanupComplete, closeStatus, startCalls: null, initializeCalls: null, cleanupCalls: null, firstFailurePhase: null, firstFailureClass: null, firstFailureCode: null, lastStartupMarker: null });
+    const waitForPresence = async (registry, expectedIds) => {
+      const expected = [...expectedIds].sort(), deadline = performance.now() + SDK_LIFECYCLE_WINDOWS_LIST_DEADLINE_MS;
+      for (;;) {
+        const remaining = deadline - performance.now();
+        if (remaining <= 0) throw { childReceiptCode: "timed-out" };
+        const records = await within(registry.listActivations(), remaining);
+        if (performance.now() > deadline) throw { childReceiptCode: "timed-out" };
+        const actual = records.map((record) => record.sessionId).sort();
+        if (actual.length === expected.length && actual.every((id, index) => id === expected[index])) return records;
+        const pause = deadline - performance.now();
+        if (pause <= 0) throw { childReceiptCode: "timed-out" };
+        await new Promise((resolve) => setTimeout(resolve, Math.min(50, pause)));
+      }
     };
     const recordExtensionError = () => {
   if (!extensionErrorsActive) return;
@@ -1214,8 +1212,10 @@ try {
   const { createDefaultSessionTransport } = await within(load(jiti.import(pathToFileURL(agentsExtensionPath).href)), 30000);
   checkpoint("agents-module-load", "agents-module-export");
   assert.equal(typeof createDefaultSessionTransport, "function", "packaged agents transport export is unavailable");
-      const { WindowsSessionRegistryPhaseSequence } = await within(load(jiti.import(pathToFileURL(join(${JSON.stringify(packageRoot)}, "lib", "windows-session-transport.ts")).href)), 30000);
-      assert.equal(typeof WindowsSessionRegistryPhaseSequence, "function", "packaged Windows phase sequence export is unavailable");
+      const { SessionPresenceRegistry } = await within(load(jiti.import(pathToFileURL(join(${JSON.stringify(packageRoot)}, "lib", "agents-session-transport.ts")).href)), 30000);
+      const { WindowsNodeSessionPresenceRegistry } = await within(load(jiti.import(pathToFileURL(join(${JSON.stringify(packageRoot)}, "lib", "windows-node-session-transport.ts")).href)), 30000);
+      assert.equal(typeof SessionPresenceRegistry, "function", "packaged POSIX registry export is unavailable");
+      assert.equal(typeof WindowsNodeSessionPresenceRegistry, "function", "packaged Node registry export is unavailable");
   const expectedExtensionPaths = [agentsExtensionPath, gentleAiExtensionPath];
   checkpoint("services", "settings-untrusted");
   settingsManager = SettingsManager.inMemory({}, { projectTrusted: false });
@@ -1303,21 +1303,23 @@ try {
   const secondId = secondRuntime.session.sessionId;
   assert.notEqual(firstId, secondId, "SDK must create distinct real session IDs");
   checkpoint("presence-two", "presence-observer-create");
-  windowsRegistryObservation = createWindowsRegistryObservation(WindowsSessionRegistryPhaseSequence);
-      let windowsRegistryFailure;
+  let windowsRegistryFailure;
       try {
-        observer = await within(createDefaultSessionTransport(process.platform).createRegistry(agentHome, (event) => windowsRegistryObservation.observe(event)), SDK_LIFECYCLE_WINDOWS_REGISTRY_DEADLINE_MS);
-          } catch (error) {
-            windowsRegistryFailure = error;
-      } finally {
-        progress.windowsRegistryObservation = windowsRegistryObservation.snapshot();
+        observer = await within(createDefaultSessionTransport(process.platform).createRegistry(agentHome), SDK_LIFECYCLE_WINDOWS_REGISTRY_DEADLINE_MS);
+        const nativeNode = observer instanceof WindowsNodeSessionPresenceRegistry;
+        const posix = observer instanceof SessionPresenceRegistry;
+        assert.equal(nativeNode || posix, true, "default registry must be an installed transport registry");
+        assert.equal(process.platform === "win32" ? nativeNode : posix, true, "default registry backend does not match the host transport");
+        const backend = nativeNode ? "native-node" : "posix";
+        windowsRegistryObservation = newWindowsRegistryObservation(backend);
+      } catch (error) {
+        windowsRegistryFailure = error;
       }
-  if (windowsRegistryFailure !== undefined) throw windowsRegistryFailure;
-      if (!windowsRegistryObservation.startupSucceeded) throw { childReceiptCode: OBSERVATION_INVALID };
+      if (windowsRegistryFailure !== undefined) throw windowsRegistryFailure;
       checkpoint("presence-two", "presence-two-records");
-  const started = await within(observer.listActivations(), SDK_LIFECYCLE_WINDOWS_LIST_DEADLINE_MS);
-  assert.deepEqual(started.map((record) => record.sessionId).sort(), [firstId, secondId].sort(), "default transport must advertise both SDK sessions");
-  progress.presenceAfterStart = started.length;
+      const started = await waitForPresence(observer, [firstId, secondId]);
+      windowsRegistryObservation.startupReady = true;
+      progress.presenceAfterStart = started.length;
   checkpoint("presence-two", "presence-first-model-unbound");
   assertNoConfiguredModel(firstRuntime, settingsManager, "first session must remain unconfigured through presence lifecycle");
       firstInvocationGuard.assertNotInvoked("session-bind", "session-model-invocation-guard");
@@ -1330,7 +1332,7 @@ try {
   await disposeRuntime(firstRuntime, settingsManager, firstInvocationGuard, "dispose-first", "dispose-first", "dispose-first-extension-errors");
   firstRuntime = undefined;
   checkpoint("presence-one", "presence-one-record");
-  const afterFirstDispose = await within(observer.listActivations(), SDK_LIFECYCLE_WINDOWS_LIST_DEADLINE_MS);
+  const afterFirstDispose = await waitForPresence(observer, [secondId]);
   assert.deepEqual(afterFirstDispose.map((record) => record.sessionId), [secondId], "disposing one runtime must withdraw only its presence");
   progress.presenceAfterFirstDispose = afterFirstDispose.length;
   checkpoint("presence-one", "presence-one-model-unbound");
@@ -1342,7 +1344,7 @@ try {
   await disposeRuntime(secondRuntime, settingsManager, secondInvocationGuard, "dispose-second", "dispose-second", "dispose-second-extension-errors");
   secondRuntime = undefined;
   checkpoint("presence-none", "presence-no-records");
-  const afterSecondDispose = await within(observer.listActivations(), SDK_LIFECYCLE_WINDOWS_LIST_DEADLINE_MS);
+  const afterSecondDispose = await waitForPresence(observer, []);
   assert.deepEqual(afterSecondDispose, [], "disposing both runtimes must withdraw both presence records");
   progress.presenceAfterSecondDispose = afterSecondDispose.length;
   checkpoint("presence-none", "presence-none-extension-errors");
@@ -1355,13 +1357,24 @@ try {
   try { await disposeRuntime(firstRuntime, settingsManager, firstInvocationGuard, "cleanup", "cleanup-runtime", "cleanup-runtime"); } catch { recordCleanupFailure("cleanup-runtime"); }
   try { await disposeRuntime(secondRuntime, settingsManager, secondInvocationGuard, "cleanup", "cleanup-runtime", "cleanup-runtime"); } catch { recordCleanupFailure("cleanup-runtime"); }
   checkpoint("cleanup", "cleanup-observer");
-  try { await within(Promise.resolve(observer?.close?.()), 15000); } catch { recordCleanupFailure("cleanup-observer"); }
-      try {
-        if (windowsRegistryObservation !== undefined) {
-          progress.windowsRegistryObservation = windowsRegistryObservation.snapshot();
-          if (!windowsRegistryObservation.cleanupComplete || (primaryFailure === undefined && !windowsRegistryObservation.admitsFullSuccess)) recordCleanupFailure("cleanup-observer");
-        }
-      } catch { recordCleanupFailure("cleanup-observer"); }
+  try {
+    const close = observer?.close;
+    let closeStatus = typeof close === "function" ? "failed" : "not-required";
+    if (windowsRegistryObservation !== undefined) windowsRegistryObservation.closeStatus = closeStatus;
+    if (typeof close === "function") {
+      await within(Promise.resolve(close.call(observer)), 15000);
+      closeStatus = "observed";
+    }
+    if (windowsRegistryObservation !== undefined) {
+      windowsRegistryObservation.closeStatus = closeStatus;
+      await waitForPresence(observer, []);
+      windowsRegistryObservation.cleanupComplete = true;
+      progress.windowsRegistryObservation = windowsRegistryObservation;
+    }
+  } catch {
+    recordCleanupFailure("cleanup-observer");
+    if (windowsRegistryObservation !== undefined) progress.windowsRegistryObservation = windowsRegistryObservation;
+  }
   checkpoint("cleanup", "cleanup-extension-errors");
   try { assertNoExtensionErrors(); } catch { recordCleanupFailure("cleanup-extension-errors"); }
   extensionErrorsActive = false;

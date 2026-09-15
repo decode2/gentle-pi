@@ -153,6 +153,9 @@ jobs:
       - name: Install pinned dependencies without lifecycle scripts
         shell: pwsh
         run: pnpm install --frozen-lockfile --ignore-scripts --store-dir "$env:RUNNER_TEMP\pnpm-store"
-      - name: Run native Node transport pilot (RED baseline)
+      - name: Run native Node transport pilot
         shell: pwsh
         run: node --experimental-strip-types --test tests/windows-node-session-transport.test.ts tests/agents-session-transport.test.ts
+      - name: Prove packed real SDK Node transport lifecycle
+        shell: pwsh
+        run: node scripts/test-packed-runner.mjs --sdk-lifecycle

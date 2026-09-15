@@ -9,6 +9,7 @@ import test from "node:test";
 import { fileURLToPath } from "node:url";
 import { FIXED_WINDOWS_POWERSHELL, WindowsActiveSessionClient, WindowsActiveSessionListener, WindowsSessionPresenceRegistry, WindowsSessionRegistryPhaseSequence, type WindowsSessionRegistryPhaseEvent, parseWindowsHostFrame } from "../lib/windows-session-transport.ts";
 import { createDefaultSessionTransport } from "../extensions/gentle-agents.ts";
+import { WindowsNodeSessionPresenceRegistry } from "../lib/windows-node-session-transport.ts";
 import { ActiveSessionClientError, FrameDecoder, encodeNotificationFrame, type AckFrame } from "../lib/agents-session-transport.ts";
 import { decidePackedRunnerEntrypoint, deriveWindowsStartupTimingPathDelta, validateWindowsStartupTimingMachinePaths, WINDOWS_STARTUP_TIMING_WINDOWS_PATH_KEYS } from "../scripts/test-packed-runner.mjs";
 
@@ -1323,11 +1324,12 @@ test("Windows native listener setup closes the first acquired registry when the 
 	assert.equal(closes, 1);
 });
 
-test("Windows default transport creates a registry without an observer", { skip: process.platform !== "win32", timeout: 20_000 }, async () => {
+test("Windows default transport uses the Node registry without an observer", { skip: process.platform !== "win32", timeout: 20_000 }, async () => {
 	const root = await mkdtemp(join(os.tmpdir(), "gentle-pi-observer-"));
 	const agentHome = join(root, "profile", "agent");
 	await mkdir(join(agentHome, "gentle-agents"), { recursive: true });
 	const registry = await createDefaultSessionTransport("win32").createRegistry(agentHome);
+	assert.ok(registry instanceof WindowsNodeSessionPresenceRegistry);
 	try {
 		assert.deepEqual(await registry.listActivations(), []);
 	} finally {
@@ -1335,13 +1337,13 @@ test("Windows default transport creates a registry without an observer", { skip:
 	}
 });
 
-test("Windows default transport emits fixed ordered phase events for its own registry", { skip: process.platform !== "win32", timeout: 20_000 }, async () => {
+test("Windows legacy transport emits fixed ordered phase events for its own registry", { skip: process.platform !== "win32", timeout: 20_000 }, async () => {
 	const root = await mkdtemp(join(os.tmpdir(), "gentle-pi-observer-"));
 	const agentHome = join(root, "profile", "agent");
 	await mkdir(join(agentHome, "gentle-agents"), { recursive: true });
 	const events: WindowsSessionRegistryPhaseEvent[] = [];
 	const sequence = new WindowsSessionRegistryPhaseSequence();
-	const registry = await createDefaultSessionTransport("win32").createRegistry(agentHome, (event) => {
+	const registry = await WindowsSessionPresenceRegistry.create(agentHome, (event) => {
 		events.push(event);
 		return sequence.observe(event);
 	});
@@ -1362,13 +1364,13 @@ test("Windows default transport emits fixed ordered phase events for its own reg
 	assert.equal(sequence.admitsFullSuccess, true, "the seam callback retains the reducer receiver through its wrapper");
 });
 
-test("Windows default transport rejects asynchronous observer setup without awaiting it", { skip: process.platform !== "win32", timeout: 20_000 }, async () => {
+test("Windows legacy transport rejects asynchronous observer setup without awaiting it", { skip: process.platform !== "win32", timeout: 20_000 }, async () => {
 	const root = await mkdtemp(join(os.tmpdir(), "gentle-pi-observer-"));
 	const agentHome = join(root, "profile", "agent");
 	await mkdir(join(agentHome, "gentle-agents"), { recursive: true });
-	await assert.rejects(createDefaultSessionTransport("win32").createRegistry(agentHome, () => Promise.reject(new Error("observer rejected")) as never));
+	await assert.rejects(WindowsSessionPresenceRegistry.create(agentHome, () => Promise.reject(new Error("observer rejected")) as never));
 	await new Promise<void>((resolve) => setImmediate(resolve));
-	const recovered = await createDefaultSessionTransport("win32").createRegistry(agentHome);
+	const recovered = await WindowsSessionPresenceRegistry.create(agentHome);
 	await recovered.close();
 });
 
@@ -1475,24 +1477,38 @@ test("Windows registry source guard preserves operation failure through observer
 	assert.doesNotMatch(source, /WindowsSessionTransportHostObserver|observeHost\?\.\(host\)|Object\.defineProperty\(candidate/);
 });
 
-test("packed lifecycle source uses the exported phase sequence", async (t) => {
+test("packed lifecycle source validates the observed default backend and bounded readiness", async (t) => {
 	t.diagnostic("source guard, not packed lifecycle proof");
 	const source = await readFile(fileURLToPath(new URL("../scripts/test-packed-runner.mjs", import.meta.url)), "utf8");
-	assert.match(source, /const \{ WindowsSessionRegistryPhaseSequence \} = await within\(load\(jiti\.import/);
-	assert.match(source, /const createWindowsRegistryObservation = \(PhaseSequence\) => \{\s*if \(process\.platform === "win32"\) return new PhaseSequence\(\);/);
-	assert.match(source, /createWindowsRegistryObservation\(WindowsSessionRegistryPhaseSequence\)/);
-	assert.match(source, /windowsRegistryObservation\.startupSucceeded/);
+	assert.doesNotMatch(source, /WindowsSessionRegistryPhaseSequence/);
+	assert.match(source, /WindowsNodeSessionPresenceRegistry/);
+	assert.match(source, /observer instanceof WindowsNodeSessionPresenceRegistry/);
+	assert.match(source, /observer instanceof SessionPresenceRegistry/);
+	assert.match(source, /newWindowsRegistryObservation\(backend\)/);
+	assert.match(source, /startupReady/);
+	assert.match(source, /closeStatus/);
+	assert.match(source, /"observed", "not-required", "failed"/);
+	assert.doesNotMatch(source, /createWindowsRegistryObservation/);
+	assert.match(source, /windowsRegistryObservation\.startupReady/);
 	assert.match(source, /windowsRegistryObservation\.cleanupComplete/);
-	assert.match(source, /windowsRegistryObservation\.admitsFullSuccess/);
+	assert.match(source, /windowsRegistryObservation\.closeStatus/);
 	assert.match(source, /lastStartupMarker: null/);
-	assert.match(source, /windowsRegistryObservation\.lastStartupMarker === "native-ready"/);
+	assert.doesNotMatch(source, /windowsRegistryObservation\.lastStartupMarker === "native-ready"/);
+	assert.match(source, /closeStatus === "not-required" && !\["native-node", "posix"\]/);
 	assert.match(source, /const SDK_LIFECYCLE_WINDOWS_BIND_DEADLINE_MS = 30_000 \+ 2_000 \+ 2_000 \+ 6_000;/);
 	assert.match(source, /const SDK_LIFECYCLE_WINDOWS_REGISTRY_DEADLINE_MS = 30_000 \+ 2_000 \+ 2_000 \+ 2 \* 500 \+ 5_000;/);
 	assert.match(source, /const SDK_LIFECYCLE_WINDOWS_LIST_DEADLINE_MS = 2_000;/);
 	assert.match(source, /const SDK_LIFECYCLE_PROBE_TIMEOUT_MS = 4 \* 30_000 \+ 2 \* 30_000 \+ 2 \* 40_000 \+ 40_000 \+ 3 \* 2_000 \+ 2 \* 15_000 \+ 15_000 \+ 4_000 \+ 5_000;/);
 	assert.match(source, /bindExtensions\(\{ mode: "json", onError: recordExtensionError \}\), SDK_LIFECYCLE_WINDOWS_BIND_DEADLINE_MS/);
-	assert.match(source, /createRegistry\(agentHome, \(event\) => windowsRegistryObservation\.observe\(event\)\), SDK_LIFECYCLE_WINDOWS_REGISTRY_DEADLINE_MS/);
-	assert.match(source, /within\(observer\.listActivations\(\), SDK_LIFECYCLE_WINDOWS_LIST_DEADLINE_MS\)/);
+	assert.match(source, /createRegistry\(agentHome\), SDK_LIFECYCLE_WINDOWS_REGISTRY_DEADLINE_MS/);
+	assert.match(source, /waitForPresence\(observer, \[firstId, secondId\]\)/);
+	assert.match(source, /waitForPresence\(observer, \[secondId\]\)/);
+	assert.match(source, /waitForPresence\(observer, \[\]\)/);
+	assert.match(source, /const expected = \[\.\.\.expectedIds\]\.sort\(\), deadline = performance\.now\(\) \+ SDK_LIFECYCLE_WINDOWS_LIST_DEADLINE_MS;/);
+	assert.match(source, /const remaining = deadline - performance\.now\(\);/);
+	assert.match(source, /within\(registry\.listActivations\(\), remaining\)/);
+	assert.match(source, /if \(performance\.now\(\) > deadline\) throw/);
+	assert.match(source, /const pause = deadline - performance\.now\(\);/);
 	assert.match(source, /setTimeout\(\(\) => requestStop\(new SdkLifecycleFailure\("lifecycle-probe", "timed-out"\)\), SDK_LIFECYCLE_PROBE_TIMEOUT_MS\)/);
 	assert.doesNotMatch(source, /createRegistry\(agentHome,[\s\S]{0,160}(?:startupDeadlineMs|rpcDeadlineMs)/);
 	assert.doesNotMatch(source, /Object\.defineProperty\(candidate|Host\.prototype|windowsRegistryObservation\.restore|let expected = "start"/);

@@ -20,6 +20,7 @@ import { AgentRunner, piCommand, abortReasonText, plannedCommands, type Remediat
 import { ChildMessenger, type IpcEndpoint } from "../lib/agents-messaging.ts";
 import { ActiveSessionClient, ActiveSessionListener, SessionPresenceRegistry, type PresenceRecord, type ReceivedNotification, type SentNotification, type SessionPresenceCandidate } from "../lib/agents-session-transport.ts";
 import { WindowsActiveSessionClient, WindowsActiveSessionListener, WindowsSessionPresenceRegistry, type WindowsSessionRegistryPhaseObserver } from "../lib/windows-session-transport.ts";
+import { WindowsNodeSessionPresenceRegistry } from "../lib/windows-node-session-transport.ts";
 import { hasReviewSessionPermission, resolveCanonicalGitRepositoryIdentitySync, type ReviewSessionManager } from "../lib/review-session-standing-permission.ts";
 import { historyDir, remediationUnresolved, loadHistory, loadStoredTask, pruneHistory, saveTask } from "../lib/agents-history.ts";
 import { sessionToMarkdown } from "../lib/agents-transcript.ts";
@@ -386,6 +387,12 @@ const posixSessionTransport: SessionTransportFactory = {
 	createClient(registry: SessionPresenceRegistry, sessionId) { return new ActiveSessionClient(registry, sessionId); },
 };
 
+const windowsNodeSessionTransport: SessionTransportFactory = {
+	createRegistry(agentHome) { return WindowsNodeSessionPresenceRegistry.create(agentHome); },
+	createListener(registry: WindowsNodeSessionPresenceRegistry, sessionId, onNotification) { return Object.assign(new ActiveSessionListener(registry, sessionId, onNotification), { closesRegistry: false }); },
+	createClient(registry: WindowsNodeSessionPresenceRegistry, sessionId) { return new ActiveSessionClient(registry, sessionId); },
+};
+
 const windowsSessionTransport: SessionTransportFactory = {
 	createRegistry(agentHome, observeWindowsPhase) { return WindowsSessionPresenceRegistry.create(agentHome, observeWindowsPhase); },
 	createListener(registry: WindowsSessionPresenceRegistry, sessionId, onNotification) { return Object.assign(new WindowsActiveSessionListener(registry, sessionId, onNotification), { closesRegistry: true }); },
@@ -393,7 +400,7 @@ const windowsSessionTransport: SessionTransportFactory = {
 };
 
 export function createDefaultSessionTransport(platform: NodeJS.Platform = process.platform): SessionTransportFactory {
-	return platform === "win32" ? windowsSessionTransport : posixSessionTransport;
+	return platform === "win32" ? windowsNodeSessionTransport : posixSessionTransport;
 }
 
 function text(value: string, details: Record<string, unknown> = {}, terminate = false): ToolText {
