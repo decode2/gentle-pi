@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Theme, type ExtensionUIContext, type TerminalInputHandler } from "@earendil-works/pi-coding-agent";
-import { KeybindingsManager, stripTerminalSequences, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
+import { KeybindingsManager, stripTerminalSequences, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth, type KeybindingsConfig } from "@earendil-works/pi-tui";
 import type {
 	Component,
 	OverlayHandle,
@@ -88,10 +88,22 @@ const testBackgroundColors = {
 };
 
 const theme = new Theme(testForegroundColors, testBackgroundColors, "truecolor");
-const testKeybindings = new KeybindingsManager({
+const testKeybindingDefinitions = {
 	...TUI_KEYBINDINGS,
 	"app.editor.external": { defaultKeys: "ctrl+g", description: "Open external editor" },
-});
+} satisfies ConstructorParameters<typeof KeybindingsManager>[0];
+const testKeybindings = new KeybindingsManager(testKeybindingDefinitions);
+
+function localKeybindings(userBindings: KeybindingsConfig = {}): KeybindingsManager {
+	return new KeybindingsManager(testKeybindingDefinitions, userBindings);
+}
+
+const ESCAPE = "\u001b";
+const CTRL_C = "\u0003";
+const CTRL_Q = "\u0011";
+const COLLAPSE = "\u001d";
+const KITTY_CTRL_Q_REPEAT = "\u001b[113;5:2u";
+const KITTY_CTRL_Q_RELEASE = "\u001b[113;5:3u";
 
 class FailingTheme extends Theme {
 	constructor() {
@@ -180,7 +192,7 @@ function owned(outcome: unknown) {
 
 class FakeCustomHost implements CustomHost {
 	readonly tui: TestTui;
-	readonly keybindings = testKeybindings;
+	readonly keybindings: KeybindingsManager;
 	readonly received: Array<{ tui: TUI; theme: Theme; keybindings: KeybindingsManager }> = [];
 	readonly receivedOptions: Array<CustomOptions | undefined> = [];
 	calls = 0;
@@ -192,8 +204,10 @@ class FakeCustomHost implements CustomHost {
 	private readonly run: (component: QuestionnaireTuiPresentation) => void;
 	private readonly hostError: Error | undefined;
 	private readonly factoryTheme: Theme;
-	constructor(run: (component: QuestionnaireTuiPresentation) => void, hostError?: Error, factoryTheme: Theme = theme) {
+	constructor(run: (component: QuestionnaireTuiPresentation) => void, hostError?: Error, factoryTheme: Theme = theme,
+		keybindings: KeybindingsManager = testKeybindings) {
 		this.tui = new TestTui();
+		this.keybindings = keybindings;
 		this.run = run;
 		this.hostError = hostError;
 		this.factoryTheme = factoryTheme;
@@ -815,7 +829,7 @@ class TestOverlayHandle implements OverlayHandle {
 
 class RawOverlayHost implements CustomHost, Pick<ExtensionUIContext, "onTerminalInput"> {
 	readonly tui = new TestTui();
-	readonly keybindings = testKeybindings;
+	readonly keybindings: KeybindingsManager;
 	readonly listeners = new Set<TerminalInputHandler>();
 	readonly handle = new TestOverlayHandle();
 	component: QuestionnaireTuiPresentation | undefined;
@@ -827,6 +841,10 @@ class RawOverlayHost implements CustomHost, Pick<ExtensionUIContext, "onTerminal
 	customError: Error | undefined;
 	deferHandle = false;
 	private pendingHandle: ((handle: OverlayHandle) => void) | undefined;
+
+	constructor(keybindings: KeybindingsManager = testKeybindings) {
+		this.keybindings = keybindings;
+	}
 
 	onTerminalInput(handler: TerminalInputHandler): () => void {
 		this.onTerminalInputCalls++;
@@ -999,6 +1017,68 @@ test("a late overlay handle after cancellation cannot revive hidden state or a r
 	assert.equal(host.onHandleCalls, 1);
 	assert.deepEqual(host.handle.setHiddenCalls, []);
 	assert.equal(host.listeners.size, 0);
+});
+
+test("visible focused overlays route cancellation through the same injected public manager", async () => {
+	const keybindings = localKeybindings({ "tui.select.cancel": "ctrl+q" });
+	let doneAfterEscape = -1;
+	const host = new FakeCustomHost((component) => {
+		component.focused = true;
+		component.handleInput(ESCAPE);
+		doneAfterEscape = host.doneCalls;
+		component.handleInput(CTRL_Q);
+	}, undefined, theme, keybindings);
+	const outcome = owned(await createTuiQuestionPresentationDriver(host).present(request()));
+	assert.equal(doneAfterEscape, 0, "visible Escape is not a global cancel after the remap");
+	assert.equal(host.received[0]?.keybindings, keybindings, "the factory and view share the injected manager instance");
+	assert.deepEqual(keybindings.getUserBindings(), { "tui.select.cancel": "ctrl+q" });
+	assert.deepEqual(testKeybindings.getUserBindings(), {}, "per-test overrides do not mutate the shared fixture manager");
+	assert.deepEqual(outcome, { correlationId: "tui-driver-correlation", cancelled: true, answers: [] });
+});
+
+test("a visible unfocused overlay leaves configured cancellation bytes untouched on the raw route", async () => {
+	const host = new RawOverlayHost(localKeybindings({ "tui.select.cancel": "ctrl+q" }));
+	const { cleanup } = await startRawOverlay(host);
+	try {
+		host.handle.focused = false;
+		assert.equal(host.raw(CTRL_Q), undefined, "raw input does not steal a visible unfocused overlay's key");
+		assert.equal(host.raw(ESCAPE), undefined, "the old Escape byte also remains outside the raw route");
+		assert.equal(host.doneCalls, 0);
+	} finally { await cleanup(); }
+});
+
+test("a hidden overlay consumes remapped cancellation once while preserving collapse recovery", async () => {
+	const host = new RawOverlayHost(localKeybindings({ "tui.select.cancel": "ctrl+q" }));
+	const { cleanup } = await startRawOverlay(host);
+	try {
+		assert.deepEqual(host.raw(COLLAPSE), { consume: true });
+		assert.equal(host.handle.isHidden(), true);
+		assert.equal(host.raw(ESCAPE), undefined, "old Escape does not cancel a hidden remapped questionnaire");
+		assert.equal(host.doneCalls, 0);
+		assert.deepEqual(host.raw(COLLAPSE), { consume: true }, "the raw collapse key still expands a hidden questionnaire");
+		assert.deepEqual(host.handle.setHiddenCalls, [true, false]);
+		assert.equal(host.handle.focusCalls, 1, "raw expansion still restores overlay focus");
+		assert.deepEqual(host.raw(COLLAPSE), { consume: true }, "collapse remains available after recovery");
+		assert.deepEqual(host.raw(KITTY_CTRL_Q_REPEAT), { consume: true });
+		assert.deepEqual(host.raw(KITTY_CTRL_Q_RELEASE), { consume: true });
+		assert.equal(host.doneCalls, 0, "repeat and release cannot settle the hidden questionnaire");
+		assert.deepEqual(host.raw(CTRL_Q), { consume: true }, "the configured cancel is consumed by the hidden overlay");
+		assert.equal(host.doneCalls, 1);
+		assert.equal(host.component!.render(48).length, 0, "hidden cancellation disposes the view without forwarding input");
+		assert.equal(host.raw(CTRL_Q), undefined, "a settled raw listener cannot cancel a second time");
+	} finally { await cleanup(); }
+});
+
+test("an empty cancellation binding leaves hidden Escape and Ctrl+C available to other input owners", async () => {
+	const host = new RawOverlayHost(localKeybindings({ "tui.select.cancel": [] }));
+	const { cleanup } = await startRawOverlay(host);
+	try {
+		assert.deepEqual(host.raw(COLLAPSE), { consume: true });
+		assert.equal(host.raw(ESCAPE), undefined);
+		assert.equal(host.raw(CTRL_C), undefined);
+		assert.equal(host.doneCalls, 0, "disabled global cancellation does not settle hidden input");
+		assert.deepEqual(host.raw(COLLAPSE), { consume: true }, "the hidden recovery key remains usable");
+	} finally { await cleanup(); }
 });
 
 test("a throwing raw-listener registration fails closed, retains the visible fallback, and leaks no listener", async () => {

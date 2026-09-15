@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, matchesKey, StdinBuffer, stripTerminalSequences, type KeybindingsConfig, type KeybindingsManager, type KeyId, type TUI, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
+import { KeybindingsManager, TUI_KEYBINDINGS, getKeybindings, matchesKey, StdinBuffer, stripTerminalSequences, type KeybindingsConfig, type KeyId, type TUI, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
 import type { QuestionnaireExternalEditor } from "../lib/questions/external-editor.ts";
 import { QuestionnaireTuiPresentation } from "../lib/questions/tui-presentation-view.ts";
 import { validateAndFormat } from "../lib/questions/response.ts";
@@ -42,6 +42,11 @@ function injectedKeybindings(userBindings: TestUserBindings = {}): KeybindingsMa
 			return Reflect.get(target, property, receiver);
 		},
 	});
+}
+
+/** Uses the public Pi manager for cancellation-only coverage; Editor binding claims stay in the proxy fixture above. */
+function publicKeybindings(userBindings: KeybindingsConfig = {}): KeybindingsManager {
+	return new KeybindingsManager(TUI_KEYBINDINGS, userBindings);
 }
 
 function request() {
@@ -131,7 +136,10 @@ const SHIFT_TAB = "\u001b[Z";
 const SHIFT_ENTER = "\u001b\r";
 const CTRL_J = "\n";
 const CTRL_O = "\u000f";
+const CTRL_C = "\u0003";
 const CTRL_Q = "\u0011";
+const KITTY_CTRL_Q_REPEAT = "\u001b[113;5:2u";
+const KITTY_CTRL_Q_RELEASE = "\u001b[113;5:3u";
 const CTRL_U = "\u0015";
 // Keyboard stops use the option control's existing visible arrow prefix: "→ ".
 const NEXT_FOCUS_ORDER = ["Direct", "Staged", "Custom answer", "Question note", "Next", "Cancel"];
@@ -1697,4 +1705,95 @@ test("an off collapse key leaves Ctrl+] and Ctrl+K to the current editor", () =>
 	const expanded = stripTerminalSequences(component.render(48).join("\n"));
 	assert.match(expanded, /Custom response/, "disabled collapse never enters hidden state");
 	assert.doesNotMatch(expanded, /to expand · Esc to cancel/);
+});
+
+test("configured tui.select.cancel remaps outside cancellation without using Escape or Ctrl+C", () => {
+	const outcomes: unknown[] = [];
+	const component = keyboardView((outcome) => outcomes.push(outcome), false,
+		publicKeybindings({ "tui.select.cancel": "ctrl+q" }));
+	component.handleInput(ESCAPE);
+	component.handleInput(CTRL_C);
+	assert.deepEqual(outcomes, [], "the old global cancellation keys stay inert after a remap");
+	component.handleInput(CTRL_Q);
+	assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: true, answers: [] }],
+		"the injected tui.select.cancel key cancels the questionnaire");
+});
+
+test("an empty tui.select.cancel keeps local Escape editor exit and pointer Cancel", () => {
+	const outcomes: unknown[] = [];
+	const component = keyboardView((outcome) => outcomes.push(outcome), false,
+		publicKeybindings({ "tui.select.cancel": [] }));
+	component.handleInput(ESCAPE);
+	component.handleInput(CTRL_C);
+	assert.deepEqual(outcomes, [], "disabling global cancellation leaves Escape and Ctrl+C inert outside editing");
+	focusCustomForKeyboard(component);
+	component.handleInput("draft");
+	component.handleInput(ESCAPE);
+	assert.equal(outcomes.length, 0, "explicit local Escape still closes the editor when global cancel is disabled");
+	assert.doesNotMatch(renderedText(component).join("\n"), /Custom response \(Esc/);
+	assert.match(renderedText(component).join("\n"), /draft/);
+	clickVisible(component, "Cancel");
+	assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: true, answers: [] }],
+		"the pointer Cancel action remains independently available");
+});
+
+test("default cancellation keeps Escape and Ctrl+C with or without an injected manager", () => {
+	for (const keybindings of [undefined, publicKeybindings()] as const) {
+		for (const key of [ESCAPE, CTRL_C] as const) {
+			const outcomes: unknown[] = [];
+			keyboardView((outcome) => outcomes.push(outcome), false, keybindings).handleInput(key);
+			assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: true, answers: [] }],
+				`default cancellation handles ${key === ESCAPE ? "Escape" : "Ctrl+C"} ${keybindings ? "with" : "without"} a manager`);
+		}
+	}
+});
+
+test("configured cancellation exits every editor row, and a held key cannot cancel after editor exit", () => {
+	const outcomes: unknown[] = [];
+	const component = keyboardView((outcome) => outcomes.push(outcome), false,
+		publicKeybindings({ "tui.select.cancel": "ctrl+q" }));
+	focusCustomForKeyboard(component);
+	component.handleInput("custom draft");
+	component.handleInput(CTRL_Q);
+	assert.equal(outcomes.length, 0, "configured cancellation first closes custom editing");
+	assert.match(renderedText(component).join("\n"), /custom draft/);
+
+	component.handleInput("\t");
+	component.handleInput(ENTER);
+	component.handleInput("question note");
+	component.handleInput(CTRL_Q);
+	assert.equal(outcomes.length, 0, "configured cancellation first closes question-note editing");
+	focusedControl(renderedText(component), "Question note");
+	assert.match(renderedText(component).join("\n"), /question note/);
+
+	component.handleInput("\t");
+	component.handleInput(ENTER);
+	component.handleInput("global note");
+	component.handleInput(CTRL_Q);
+	assert.equal(outcomes.length, 0, "configured cancellation first closes global-note editing");
+	focusedControl(renderedText(component), "Global note");
+	component.handleInput(KITTY_CTRL_Q_REPEAT);
+	component.handleInput(KITTY_CTRL_Q_RELEASE);
+	assert.equal(outcomes.length, 0, "repeat and release events cannot settle after the editor closes");
+	component.handleInput(CTRL_Q);
+	assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: true, answers: [], globalNote: "global note" }],
+		"only a fresh configured cancellation outside editing finishes the questionnaire");
+});
+
+test("configured cancellation bytes inside bracketed paste remain editor data", () => {
+	const outcomes: unknown[] = [];
+	const component = keyboardView((outcome) => outcomes.push(outcome), false,
+		publicKeybindings({ "tui.select.cancel": "ctrl+q" }));
+	focusCustomForKeyboard(component);
+	component.handleInput("\u001b[200~before");
+	component.handleInput(CTRL_Q);
+	component.handleInput("after\u001b[201~");
+	assert.equal(outcomes.length, 0, "a pasted cancel byte cannot finish the questionnaire");
+	assert.match(renderedText(component).join("\n"), /Custom response \(Esc/,
+		"the editor remains active while pasted bytes are inserted");
+	component.handleInput(ESCAPE);
+	assert.equal(outcomes.length, 0, "local Escape still exits the editor after the paste");
+	component.handleInput(CTRL_Q);
+	assert.deepEqual(outcomes, [{ correlationId: "keyboard-correlation", cancelled: true, answers: [] }],
+		"the configured key only cancels once it is a real outside-editor input");
 });
