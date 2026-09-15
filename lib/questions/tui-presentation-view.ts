@@ -199,7 +199,10 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 			this.renderedWidth = bounded;
 			this.renderedTerminalRows = terminalRows;
 			this.renderedHeight = 1;
-			const hint = this.localize("chrome.collapsed.hint", "{key} to expand · Esc to cancel").replaceAll("{key}", formatCollapseKey(this.collapseKey));
+			const cancelHint = this.cancellationHint();
+			const hint = this.localize("chrome.collapsed.hint", "{key} to expand{cancelHint}")
+				.replaceAll("{key}", formatCollapseKey(this.collapseKey))
+				.replaceAll("{cancelHint}", cancelHint.length > 0 ? ` · ${cancelHint}` : "");
 			return [truncateToWidth(this.presentationOptions.theme.fg("dim", hint), bounded)];
 		}
 		if (bounded !== this.renderedWidth || terminalRows !== this.renderedTerminalRows) {
@@ -455,6 +458,14 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 				this.finish({ type: "cancel" });
 				return;
 		}
+	}
+
+	private cancellationHint(): string {
+		const manager = this.presentationOptions.keybindings;
+		const keys = manager ? manager.getKeys("tui.select.cancel") : ["escape", "ctrl+c"];
+		if (keys.length === 0) return "";
+		const keyLabels = keys.map((key) => formatCollapseKey(key)).join(" / ");
+		return this.localize("chrome.navigation.escape", "{key} to cancel").replaceAll("{key}", keyLabels);
 	}
 
 	private matchesSelectKey(data: string, keybinding: SelectKeybinding): boolean {
@@ -864,7 +875,8 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 					if (note !== undefined && note.length > 0) this.addChild(new Text(`${globalNote}: ${display(note)}`, 1, 0));
 				}
 			}
-			if (!this.editing) this.addChild(new Text(this.presentationOptions.theme.fg("dim", this.localize("chrome.navigation.escape", "Esc to cancel")), 1, 0));
+			const cancelHint = this.cancellationHint();
+			if (!this.editing && cancelHint.length > 0) this.addChild(new Text(this.presentationOptions.theme.fg("dim", cancelHint), 1, 0));
 			const primary = this.isFinalQuestion()
 				? this.localize("chrome.primary.submit", "Submit") : this.localize("chrome.primary.next", "Next");
 			const cancel = this.localize("chrome.cancel", "Cancel");
@@ -1214,8 +1226,11 @@ function matchingKeyId(keyId: string | undefined): string | undefined {
 
 function formatCollapseKey(keyId: string | undefined): string {
 	if (keyId === undefined) return "";
-	const display: Record<string, string> = { pageup: "PageUp", pagedown: "PageDown" };
-	return keyId.split("+").map((part) => display[part] ?? (part.length === 1 ? part.toUpperCase() : part[0]!.toUpperCase() + part.slice(1))).join("+");
+	const display: Record<string, string> = { escape: "Esc", esc: "Esc", pageup: "PageUp", pagedown: "PageDown" };
+	return keyId.split("+").map((part) => {
+		const normalized = part.toLowerCase();
+		return display[normalized] ?? (part.length === 1 ? part.toUpperCase() : part[0]!.toUpperCase() + part.slice(1));
+	}).join("+");
 }
 
 function editorTheme(theme: QuestionnaireTuiPresentationTheme) {
