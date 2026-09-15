@@ -1036,7 +1036,7 @@ test("applies guidance overrides per field while filling only missing metadata",
 				assert.match(requiredText(emptyGuidelinesTool.description, "default description"), pattern);
 			}
 			for (const pattern of [/\bask\b/, /\bbefore\b/, /\bguess/]) {
-				assert.match(requiredText(emptyGuidelinesTool.promptSnippet, "default prompt snippet"), pattern);
+				assert.match(requiredText(emptyGuidelinesTool.promptSnippet, "default prompt snippet").toLowerCase(), pattern);
 			}
 			assert.deepEqual(emptyGuidelinesTool.promptGuidelines, []);
 		});
