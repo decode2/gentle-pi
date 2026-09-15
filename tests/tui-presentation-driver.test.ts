@@ -929,7 +929,7 @@ test("without raw input, Ctrl+] retains the visible one-line fallback and never 
 		assert.equal(host.onHandleCalls, 1, "the fallback still receives a public overlay handle without hiding it");
 		host.component!.handleInput("\u001d");
 		assert.deepEqual(host.handle.setHiddenCalls, [], "a handle alone must never make the collapsed view unrecoverable");
-		assert.deepEqual(host.component!.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
+		assert.deepEqual(host.component!.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc / Ctrl+C to cancel"]);
 	} finally { await cleanup(); }
 });
 
@@ -1017,6 +1017,27 @@ test("a late overlay handle after cancellation cannot revive hidden state or a r
 	assert.equal(host.onHandleCalls, 1);
 	assert.deepEqual(host.handle.setHiddenCalls, []);
 	assert.equal(host.listeners.size, 0);
+});
+
+test("the driver renders the cancellation hint from its injected manager", async () => {
+	const keybindings = localKeybindings({ "tui.select.cancel": "ctrl+q" });
+	const host = new FakeCustomHost(() => {}, undefined, theme, keybindings);
+	const presenting = asPromise(createTuiQuestionPresentationDriver(host).present(request()));
+	try {
+		await Promise.resolve();
+		const component = host.component;
+		if (!component) throw new Error("driver-created view is unavailable");
+
+		// Observe the rendered view after the host factory callback so assertions are not masked by production catches.
+		const lines = component.render(80).map(stripTerminalSequences);
+		const hint = lines.find((line) => line.includes("to cancel"));
+		assert.equal(hint, "Ctrl+Q to cancel", "the rendered hint uses the configured key from the injected manager");
+		assert.doesNotMatch(hint ?? "", /Esc|Ctrl\+C/, "the rendered remap does not advertise global cancellation keys");
+		assert.equal(host.received[0]?.keybindings, keybindings, "the driver passes the same manager to the view it renders");
+	} finally {
+		host.component?.cancel();
+		await presenting;
+	}
 });
 
 test("visible focused overlays route cancellation through the same injected public manager", async () => {

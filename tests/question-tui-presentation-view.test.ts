@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { readFile } from "node:fs/promises";
 import test from "node:test";
 import { initTheme } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager, TUI_KEYBINDINGS, getKeybindings, matchesKey, setKeybindings, StdinBuffer, stripTerminalSequences, type KeybindingsConfig, type KeyId, type TUI, type TuiMouseEvent, visibleWidth } from "@earendil-works/pi-tui";
@@ -162,7 +163,51 @@ const CTRL_Q = "\u0011";
 const KITTY_CTRL_Q_REPEAT = "\u001b[113;5:2u";
 const KITTY_CTRL_Q_RELEASE = "\u001b[113;5:3u";
 const CTRL_U = "\u0015";
+const COLLAPSE = "\u001d";
+const ACTUAL_LOCALES = ["de", "en", "es", "fr", "pt-BR", "pt", "ru", "uk", "zh"] as const;
 // Keyboard stops use the option control's existing visible arrow prefix: "→ ".
+
+type ActualLocale = typeof ACTUAL_LOCALES[number];
+type ActualLocaleTemplates = {
+	readonly locale: ActualLocale;
+	readonly navigation: string;
+	readonly collapsed: string;
+};
+
+function isStringRecord(value: unknown): value is Record<string, string> {
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	return Object.entries(value).every(([, entry]) => typeof entry === "string");
+}
+
+function requiredLocaleTemplate(resource: Record<string, string>, key: string, locale: string): string {
+	const value = resource[key];
+	if (typeof value !== "string" || value.trim().length === 0) {
+		throw new Error(`${locale} is missing non-empty ${key}`);
+	}
+	return value;
+}
+
+async function readActualLocaleTemplates(): Promise<ActualLocaleTemplates[]> {
+	return Promise.all(ACTUAL_LOCALES.map(async (locale) => {
+		const source = await readFile(new URL(`../extensions/locales/${locale}.json`, import.meta.url), "utf8");
+		let parsed: unknown;
+		try {
+			parsed = JSON.parse(source);
+		} catch {
+			throw new Error(`${locale}.json is not valid JSON`);
+		}
+		if (!isStringRecord(parsed)) throw new Error(`${locale}.json must contain only string-valued top-level entries`);
+		return {
+			locale,
+			navigation: requiredLocaleTemplate(parsed, "chrome.navigation.escape", locale),
+			collapsed: requiredLocaleTemplate(parsed, "chrome.collapsed.hint", locale),
+		};
+	}));
+}
+
+function placeholderCount(value: string, placeholder: string): number {
+	return value.split(placeholder).length - 1;
+}
 const NEXT_FOCUS_ORDER = ["Direct", "Staged", "Custom answer", "Question note", "Next", "Cancel"];
 const KEYBOARD_FOCUS_ORDER = ["Direct", "Staged", "Custom answer", "Question note", "Global note", "Submit", "Cancel"];
 
@@ -1638,11 +1683,11 @@ test("Kitty repeat events cannot collapse or cancel the questionnaire accidental
 	focusCustomForKeyboard(component);
 	component.handleInput("private draft");
 	component.handleInput(repeatCollapse);
-	assert.doesNotMatch(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc to cancel/);
+	assert.doesNotMatch(stripTerminalSequences(component.render(48).join("\n")), /to expand/);
 	component.handleInput("\u001d");
-	assert.match(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc to cancel/);
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc \/ Ctrl\+C to cancel/);
 	component.handleInput(repeatCollapse);
-	assert.match(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc to cancel/);
+	assert.match(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc \/ Ctrl\+C to cancel/);
 
 	const outcomes: unknown[] = [];
 	const cancelView = view((outcome) => outcomes.push(outcome)).component;
@@ -1661,7 +1706,7 @@ test("Ctrl+] collapses a custom draft to only the privacy hint, restores it, and
 	component.handleInput("\u001d");
 
 	const collapsed = component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean);
-	assert.deepEqual(collapsed, ["Ctrl+] to expand · Esc to cancel"]);
+	assert.deepEqual(collapsed, ["Ctrl+] to expand · Esc / Ctrl+C to cancel"]);
 	assert.equal(outcomes.length, 0, "collapsing never completes the questionnaire");
 
 	component.handleInput("\u001d");
@@ -1702,19 +1747,20 @@ test("active bracketed paste owns Ctrl+] until the paste closes", () => {
 	const { component } = view();
 	focusCustomForKeyboard(component);
 	component.handleInput("\u001b[200~paste\u001d");
-	assert.doesNotMatch(stripTerminalSequences(component.render(48).join("\n")), /to expand · Esc to cancel/, "a configured key inside an active paste is editor data");
+	assert.doesNotMatch(stripTerminalSequences(component.render(48).join("\n")), /to expand/, "a configured key inside an active paste is editor data");
 	component.handleInput("tail\u001b[201~");
 	component.handleInput("\u001d");
-	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc / Ctrl+C to cancel"]);
 });
 
 test("collapsed hint is localized and remains one width-safe line", () => {
 	const component = new QuestionnaireTuiPresentation({
 		request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme, onDone() {},
-		localize: (key, fallback) => key === "chrome.collapsed.hint" ? "{key} erweitern · Esc abbrechen" : fallback,
+		localize: (key, fallback) => key === "chrome.navigation.escape" ? "{key} abbrechen"
+			: key === "chrome.collapsed.hint" ? "{key} erweitern{cancelHint}" : fallback,
 	});
 	component.handleInput("\u001d");
-	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] erweitern · Esc abbrechen"]);
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] erweitern · Esc / Ctrl+C abbrechen"]);
 	const narrow = component.render(8);
 	assert.equal(narrow.length, 1, "collapsed output never leaves stale rows at narrow widths");
 	assert.ok(narrow.every((line) => visibleWidth(line) <= 8), "collapsed output is width-safe");
@@ -1726,7 +1772,7 @@ test("complete bracketed paste while collapsed cannot change a custom draft", ()
 	focusCustomForKeyboard(component);
 	component.handleInput("original");
 	component.handleInput("\u001d");
-	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc / Ctrl+C to cancel"]);
 	component.handleInput("\u001b[200~hidden\u001b[201~");
 	component.handleInput("\u001d");
 	const expanded = stripTerminalSequences(component.render(48).join("\n"));
@@ -1740,11 +1786,11 @@ test("Ctrl+] expands immediately instead of buffering unfinished collapsed paste
 	focusCustomForKeyboard(component);
 	component.handleInput("original");
 	component.handleInput("\u001d");
-	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc / Ctrl+C to cancel"]);
 	component.handleInput("\u001b[200~hidden");
 	component.handleInput("\u001d");
 	const expanded = stripTerminalSequences(component.render(48).join("\n"));
-	assert.doesNotMatch(expanded, /to expand · Esc to cancel/);
+	assert.doesNotMatch(expanded, /to expand/);
 	assert.match(expanded, /original/);
 	assert.doesNotMatch(expanded, /hidden/);
 });
@@ -1755,7 +1801,7 @@ test("Escape cancels once instead of buffering unfinished collapsed paste", () =
 	focusCustomForKeyboard(component);
 	component.handleInput("original");
 	component.handleInput("\u001d");
-	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc to cancel"]);
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+] to expand · Esc / Ctrl+C to cancel"]);
 	component.handleInput("\u001b[200~hidden");
 	component.handleInput("\u001b");
 	component.handleInput("\u001b");
@@ -1772,6 +1818,7 @@ test("renders only static questionnaire chrome through an injected localizer", (
 		"chrome.primary.next": "Weiter",
 		"chrome.primary.submit": "Absenden",
 		"chrome.cancel": "Abbrechen",
+		"chrome.navigation.escape": "{key} zum Abbrechen",
 		"chrome.preview.caption": "Vorschau:",
 	}[key] ?? fallback) : fallback;
 	const component = new QuestionnaireTuiPresentation({
@@ -1784,6 +1831,7 @@ test("renders only static questionnaire chrome through an injected localizer", (
 	assert.match(translated, /Vorschau:\nexact preview/);
 	assert.match(translated, /Weiter/);
 	assert.match(translated, /Abbrechen/);
+	assert.match(translated, /Esc \/ Ctrl\+C zum Abbrechen/, "the localized cancellation placeholder receives the joined key labels");
 	assert.doesNotMatch(translated, /(?:^|\n)Optionen(?:\n|$)/, "the obsolete Options tab is not localized or rendered");
 	assert.match(translated, /Route[\s\S]*Choose a route[\s\S]*Direct[\s\S]*Fast[\s\S]*exact preview/, "request content remains byte-preserved");
 
@@ -1804,6 +1852,48 @@ test("renders only static questionnaire chrome through an injected localizer", (
 	assert.doesNotMatch(rebuilt, /(?:^|\n)Options(?:\n|$)/);
 });
 
+test("loads every actual locale cancellation template and renders remapped and disabled hints", async () => {
+	const locales = await readActualLocaleTemplates();
+	for (const locale of locales) {
+		assert.equal(placeholderCount(locale.navigation, "{key}"), 1, `${locale.locale} navigation has one {key} placeholder`);
+		assert.equal(placeholderCount(locale.collapsed, "{key}"), 1, `${locale.locale} collapsed hint has one {key} placeholder`);
+		assert.equal(placeholderCount(locale.collapsed, "{cancelHint}"), 1, `${locale.locale} collapsed hint has one {cancelHint} placeholder`);
+		assert.doesNotMatch(locale.navigation, /Esc|Ctrl\+C/, `${locale.locale} navigation has no static global cancellation label`);
+		assert.doesNotMatch(locale.collapsed, /Esc|Ctrl\+C/, `${locale.locale} collapsed hint has no static global cancellation label`);
+
+		const localize = (key: string, fallback: string): string => key === "chrome.navigation.escape" ? locale.navigation
+			: key === "chrome.collapsed.hint" ? locale.collapsed : fallback;
+		const createView = (cancelKeys: KeyId | KeyId[]) => new QuestionnaireTuiPresentation({
+			request: request(), tui: { terminal: { rows: 24 }, requestRender() {} } as TUI, theme,
+			keybindings: publicKeybindings({ "tui.select.cancel": cancelKeys }), localize, onDone() {},
+		});
+		const expectedNavigation = locale.navigation.replaceAll("{key}", "Ctrl+Q");
+		const remapped = createView("ctrl+q");
+		const remappedExpanded = stripTerminalSequences(remapped.render(120).join("\n"));
+		assert.ok(remappedExpanded.includes(expectedNavigation), `${locale.locale} renders its remapped navigation template`);
+		assert.doesNotMatch(remappedExpanded, /\{key\}|\{cancelHint\}/, `${locale.locale} remapped output has no unresolved placeholders`);
+		assert.doesNotMatch(remappedExpanded, /Esc|Ctrl\+C/, `${locale.locale} remapped output has no false global cancellation hint`);
+		remapped.handleInput(COLLAPSE);
+		const expectedRemappedCollapsed = locale.collapsed.replaceAll("{key}", "Ctrl+]")
+			.replaceAll("{cancelHint}", ` · ${expectedNavigation}`);
+		const remappedCollapsed = remapped.render(120).map((line) => stripTerminalSequences(line).trim()).filter(Boolean);
+		assert.deepEqual(remappedCollapsed, [expectedRemappedCollapsed], `${locale.locale} remapped collapsed output formats each key once`);
+		assert.doesNotMatch(remappedCollapsed[0] ?? "", /\{key\}|\{cancelHint\}/, `${locale.locale} remapped collapsed output is resolved`);
+
+		const disabled = createView([]);
+		const disabledExpanded = stripTerminalSequences(disabled.render(120).join("\n"));
+		assert.doesNotMatch(disabledExpanded, /\{key\}|\{cancelHint\}/, `${locale.locale} disabled output has no unresolved placeholders`);
+		assert.doesNotMatch(disabledExpanded, /Esc|Ctrl\+C|Ctrl\+Q/, `${locale.locale} disabled output omits keyboard cancellation hints`);
+		assert.match(disabledExpanded, /Cancel/, `${locale.locale} keeps pointer Cancel visible`);
+		disabled.handleInput(COLLAPSE);
+		const expectedDisabledCollapsed = locale.collapsed.replaceAll("{key}", "Ctrl+]").replaceAll("{cancelHint}", "");
+		const disabledCollapsed = disabled.render(120).map((line) => stripTerminalSequences(line).trim()).filter(Boolean);
+		assert.deepEqual(disabledCollapsed, [expectedDisabledCollapsed], `${locale.locale} disabled collapsed output keeps only expansion text`);
+		assert.doesNotMatch(disabledCollapsed[0] ?? "", /\{key\}|\{cancelHint\}|Esc|Ctrl\+C|Ctrl\+Q|·\s*$/,
+			`${locale.locale} disabled collapsed output has no dangling separator or static cancellation label`);
+	}
+});
+
 test("a configured collapse key replaces Ctrl+] and displays its normalized key", () => {
 	type FutureCollapseOptions = ConstructorParameters<typeof QuestionnaireTuiPresentation>[0] & { collapseKey?: string };
 	const component = new QuestionnaireTuiPresentation({
@@ -1814,7 +1904,7 @@ test("a configured collapse key replaces Ctrl+] and displays its normalized key"
 	component.handleInput("\u001d");
 	assert.match(stripTerminalSequences(component.render(48).join("\n")), /Custom response/, "the old default shortcut stays with the editor when overridden");
 	component.handleInput("\u000b");
-	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+K to expand · Esc to cancel"]);
+	assert.deepEqual(component.render(48).map((line) => stripTerminalSequences(line).trim()).filter(Boolean), ["Ctrl+K to expand · Esc / Ctrl+C to cancel"]);
 });
 
 test("an off collapse key leaves Ctrl+] and Ctrl+K to the current editor", () => {
@@ -1828,7 +1918,7 @@ test("an off collapse key leaves Ctrl+] and Ctrl+K to the current editor", () =>
 	component.handleInput("\u000b");
 	const expanded = stripTerminalSequences(component.render(48).join("\n"));
 	assert.match(expanded, /Custom response/, "disabled collapse never enters hidden state");
-	assert.doesNotMatch(expanded, /to expand · Esc to cancel/);
+	assert.doesNotMatch(expanded, /to expand/);
 });
 
 test("configured tui.select.cancel remaps outside cancellation without using Escape or Ctrl+C", () => {
@@ -1870,6 +1960,71 @@ test("default cancellation keeps Escape and Ctrl+C with or without an injected m
 				`default cancellation handles ${key === ESCAPE ? "Escape" : "Ctrl+C"} ${keybindings ? "with" : "without"} a manager`);
 		}
 	}
+});
+
+test("renders cancellation hints from injected tui.select.cancel keys in expanded and collapsed chrome", () => {
+	const scenarios: readonly {
+		name: string;
+		keybindings?: KeybindingsManager;
+		expanded: string | undefined;
+		collapsed: string;
+	}[] = [
+		{
+			name: "no manager fallback",
+			expanded: "Esc / Ctrl+C to cancel",
+			collapsed: "Ctrl+] to expand · Esc / Ctrl+C to cancel",
+		},
+		{
+			name: "default injected TUI keys",
+			keybindings: publicKeybindings(),
+			expanded: "Esc / Ctrl+C to cancel",
+			collapsed: "Ctrl+] to expand · Esc / Ctrl+C to cancel",
+		},
+		{
+			name: "remapped single key",
+			keybindings: publicKeybindings({ "tui.select.cancel": "ctrl+q" }),
+			expanded: "Ctrl+Q to cancel",
+			collapsed: "Ctrl+] to expand · Ctrl+Q to cancel",
+		},
+		{
+			name: "configured keys in manager order",
+			keybindings: publicKeybindings({ "tui.select.cancel": ["ctrl+q", "escape", "ctrl+c"] }),
+			expanded: "Ctrl+Q / Esc / Ctrl+C to cancel",
+			collapsed: "Ctrl+] to expand · Ctrl+Q / Esc / Ctrl+C to cancel",
+		},
+		{
+			name: "empty configured keys",
+			keybindings: publicKeybindings({ "tui.select.cancel": [] }),
+			expanded: undefined,
+			collapsed: "Ctrl+] to expand",
+		},
+	];
+
+	for (const scenario of scenarios) {
+		const component = keyboardView(() => {}, false, scenario.keybindings);
+		const expanded = renderedText(component, 80);
+		const hint = expanded.find((line) => line.includes("to cancel"));
+		assert.equal(hint, scenario.expanded, `${scenario.name} renders only its configured keyboard hint`);
+		assert.ok(actionRow(expanded, "Cancel") >= 0, `${scenario.name} keeps pointer Cancel visible`);
+
+		component.handleInput(COLLAPSE);
+		const collapsed = component.render(80).map((line) => stripTerminalSequences(line).trim()).filter(Boolean);
+		assert.deepEqual(collapsed, [scenario.collapsed], `${scenario.name} renders the matching collapsed hint`);
+	}
+});
+
+test("keeps dynamic cancellation affordances semantically visible at narrow widths", () => {
+	const component = keyboardView(() => {}, false, publicKeybindings({ "tui.select.cancel": "ctrl+q" }));
+	const expanded = renderedText(component, 10);
+	assert.ok(expanded.every((line) => visibleWidth(line) <= 10));
+	assert.ok(expanded.some((line) => line.includes("Ctrl+Q")),
+		"the configured cancellation key remains visible even when the sentence is truncated");
+
+	component.handleInput(COLLAPSE);
+	const collapsed = component.render(10).map((line) => stripTerminalSequences(line).trim());
+	assert.ok(collapsed.every((line) => visibleWidth(line) <= 10));
+	assert.ok(collapsed.some((line) => line.includes("Ctrl+]")),
+		"the collapse affordance remains semantically visible at a narrow width");
 });
 
 test("configured cancellation exits every editor row, and a held key cannot cancel after editor exit", () => {
