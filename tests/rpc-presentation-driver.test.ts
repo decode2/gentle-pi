@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
+import type { ExtensionUIContext, ExtensionUIDialogOptions } from "@earendil-works/pi-coding-agent";
 import type { RawQuestionnaireOutcome } from "../lib/questions/contract.ts";
 import type { QuestionnaireLocalizer } from "../lib/questions/localization.ts";
 import { createRpcQuestionPresentationDriver } from "../lib/questions/rpc-presentation-driver.ts";
@@ -8,7 +8,14 @@ import { validateAndFormat } from "../lib/questions/response.ts";
 import { createFrozenQuestionnaireRequest } from "../lib/questions/validation.ts";
 
 type Reply = string | undefined | Promise<string | undefined>;
-type Call = { kind: "select" | "editor"; title: string; values?: string[]; prefill?: string };
+type Call = {
+	kind: "select" | "editor" | "input";
+	title: string;
+	values?: string[];
+	prefill?: string;
+	placeholder?: string;
+	signal?: AbortSignal;
+};
 
 const input = { questions: [{
 	question: "Choose a route", header: "Route", options: [
@@ -48,7 +55,7 @@ class FakeUi implements Pick<ExtensionUIContext, "select" | "editor"> {
 	private position = 0;
 	private readonly replies: Reply[];
 	constructor(replies: Reply[]) { this.replies = replies; }
-	async select(title: string, values: string[]): Promise<string | undefined> {
+	async select(title: string, values: string[], _options?: ExtensionUIDialogOptions): Promise<string | undefined> {
 		return this.ask({ kind: "select", title, values: [...values] });
 	}
 	async editor(title: string, prefill?: string): Promise<string | undefined> {
@@ -65,13 +72,55 @@ class FakeUi implements Pick<ExtensionUIContext, "select" | "editor"> {
 	}
 }
 
+class InputOnlyUi implements Pick<ExtensionUIContext, "select" | "input"> {
+	readonly calls: Call[] = [];
+	private position = 0;
+	constructor(
+		private readonly replies: Reply[],
+		private readonly onCall: (call: Call) => void = () => {},
+	) {}
+	async select(title: string, values: string[], options?: ExtensionUIDialogOptions): Promise<string | undefined> {
+		return this.ask({ kind: "select", title, values: [...values], signal: options?.signal });
+	}
+	async input(title: string, placeholder?: string, options?: ExtensionUIDialogOptions): Promise<string | undefined> {
+		return this.ask({ kind: "input", title, placeholder, signal: options?.signal });
+	}
+	private async ask(call: Call): Promise<string | undefined> {
+		this.calls.push(call);
+		this.onCall(call);
+		assert.ok(this.position < this.replies.length, "test script supplies every dialog result");
+		return await this.replies[this.position++];
+	}
+}
+
+class BothCapabilitiesUi extends FakeUi implements Pick<ExtensionUIContext, "select" | "editor" | "input"> {
+	inputCalls = 0;
+	async input(_title: string, _placeholder?: string, _options?: ExtensionUIDialogOptions): Promise<string | undefined> {
+		this.inputCalls++;
+		return undefined;
+	}
+}
+
+function inputOnlyDriver(ui: Pick<ExtensionUIContext, "select" | "input">) {
+	return createRpcQuestionPresentationDriver(ui);
+}
+
 function owned(outcome: unknown): RawQuestionnaireOutcome {
 	assertOwnedOutcome(outcome);
 	return outcome;
 }
 
+function ownedFor(questionnaire: ReturnType<typeof request>, outcome: unknown): RawQuestionnaireOutcome {
+	assertOwnedOutcomeFor(questionnaire, outcome);
+	return outcome;
+}
+
 function assertOwnedOutcome(value: unknown): asserts value is RawQuestionnaireOutcome {
-	const formatted = validateAndFormat(request(), value);
+	assertOwnedOutcomeFor(request(), value);
+}
+
+function assertOwnedOutcomeFor(questionnaire: ReturnType<typeof request>, value: unknown): asserts value is RawQuestionnaireOutcome {
+	const formatted = validateAndFormat(questionnaire, value);
 	assert.equal(formatted.ok, true, "driver raw outcome belongs to the owner validator");
 	if (!formatted.ok) throw new Error("driver raw outcome belongs to the owner validator");
 }
@@ -125,6 +174,103 @@ test("supports multi-select custom drafts and switches their active tab back to 
 		assert.deepEqual(owned(await createRpcQuestionPresentationDriver(ui).present(request())), expected);
 		assert.ok(ui.calls[1]!.values!.includes("Use custom text"));
 	}
+});
+
+test("uses native input fallback with an empty placeholder and exact custom answers", async (t) => {
+	const cases = [
+		{ name: "empty", answer: "" },
+		{ name: "whitespace and newlines", answer: " \tcustom\ntext \n" },
+	] as const;
+	for (const scenario of cases) {
+		await t.test(scenario.name, async () => {
+			const questionnaire = emptyMultiSubmitRequest();
+			const ui = new InputOnlyUi(["Use custom text", scenario.answer, "Submit"]);
+			const outcome = ownedFor(questionnaire, await inputOnlyDriver(ui).present(questionnaire));
+			assert.deepEqual(outcome, {
+				correlationId: questionnaire.correlationId, cancelled: false,
+				answers: [{ questionIndex: 0, question: "Choose checks", kind: "custom", answer: scenario.answer }],
+			});
+			assert.equal(ui.calls.filter((call) => call.kind === "editor").length, 0);
+			const customCall = ui.calls.find((call) => call.kind === "input");
+			assert.equal(customCall?.placeholder, "");
+		});
+	}
+});
+
+test("cancels when native input returns undefined without a continuation", async () => {
+	const questionnaire = emptyMultiSubmitRequest();
+	const ui = new InputOnlyUi(["Use custom text", undefined]);
+	const outcome = ownedFor(questionnaire, await inputOnlyDriver(ui).present(questionnaire));
+	assert.deepEqual(outcome, { correlationId: questionnaire.correlationId, cancelled: true, answers: [] });
+	assert.equal(ui.calls.length, 2);
+});
+
+test("revisits input custom drafts with an empty placeholder until a new value arrives", async () => {
+	const questionnaire = request();
+	const ui = new InputOnlyUi([
+		"Use custom text", "first draft", "Next",
+		"Back", "Use custom text", "replacement\n", "Next", "Submit partial",
+	]);
+	const outcome = ownedFor(questionnaire, await inputOnlyDriver(ui).present(questionnaire));
+	assert.deepEqual(outcome.answers, [{ questionIndex: 0, question: "Choose a route", kind: "custom", answer: "replacement\n" }]);
+	assert.deepEqual(ui.calls.filter((call) => call.kind === "input").map((call) => call.placeholder), ["", ""]);
+});
+
+test("cancels before opening native input fallback when the signal is already aborted", async () => {
+	const questionnaire = emptyMultiSubmitRequest();
+	const controller = new AbortController();
+	controller.abort();
+	const ui = new InputOnlyUi(["Use custom text", "late value"]);
+	const outcome = ownedFor(questionnaire, await inputOnlyDriver(ui).present(questionnaire, controller.signal));
+	assert.deepEqual(outcome, { correlationId: questionnaire.correlationId, cancelled: true, answers: [] });
+	assert.deepEqual(ui.calls, []);
+});
+
+test("forwards abort to native input fallback and ignores its late value", async () => {
+	const questionnaire = emptyMultiSubmitRequest();
+	let releaseInput!: (value: string | undefined) => void;
+	const pendingInput = new Promise<string | undefined>((resolve) => { releaseInput = resolve; });
+	let markInputStarted!: () => void;
+	const inputStarted = new Promise<void>((resolve) => { markInputStarted = resolve; });
+	const ui = new InputOnlyUi(["Use custom text", pendingInput], (call) => {
+		if (call.kind === "input") markInputStarted();
+	});
+	const controller = new AbortController();
+	const presenting = inputOnlyDriver(ui).present(questionnaire, controller.signal);
+	const inputWasOpened = await Promise.race([
+		inputStarted.then(() => true),
+		Promise.resolve(presenting).then(() => false),
+	]);
+	assert.equal(inputWasOpened, true, "input opens before the presentation settles");
+	assert.deepEqual(ui.calls.map((call) => ({ kind: call.kind, signal: call.signal })), [
+		{ kind: "select", signal: controller.signal },
+		{ kind: "input", signal: controller.signal },
+	]);
+	controller.abort();
+	const outcome = ownedFor(questionnaire, await presenting);
+	assert.deepEqual(outcome, { correlationId: questionnaire.correlationId, cancelled: true, answers: [] });
+	releaseInput("late value");
+	await Promise.resolve();
+	assert.equal(ui.calls.length, 2, "a late input result cannot continue the questionnaire");
+});
+
+test("prefers editor over input when both native custom dialogs exist", async () => {
+	const questionnaire = emptyMultiSubmitRequest();
+	const ui = new BothCapabilitiesUi(["Use custom text", "editor value", "Submit"]);
+	const outcome = ownedFor(questionnaire, await createRpcQuestionPresentationDriver(ui).present(questionnaire));
+	assert.deepEqual(outcome.answers, [{ questionIndex: 0, question: "Choose checks", kind: "custom", answer: "editor value" }]);
+	assert.equal(ui.calls[1]?.kind, "editor");
+	assert.equal(ui.calls[1]?.prefill, undefined);
+	assert.equal(ui.inputCalls, 0);
+});
+
+test("treats preferred editor cancellation as cancellation without retrying input", async () => {
+	const questionnaire = emptyMultiSubmitRequest();
+	const ui = new BothCapabilitiesUi(["Use custom text", undefined]);
+	const outcome = ownedFor(questionnaire, await createRpcQuestionPresentationDriver(ui).present(questionnaire));
+	assert.deepEqual(outcome, { correlationId: questionnaire.correlationId, cancelled: true, answers: [] });
+	assert.equal(ui.inputCalls, 0);
+	assert.equal(ui.calls.length, 2);
 });
 
 test("commits deliberately empty multi and empty custom drafts only through Next", async () => {

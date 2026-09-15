@@ -4,6 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
+import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
 import { createAskUserQuestionExtension, type AskUserQuestionDependencies } from "../extensions/ask-user-question.ts";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import type { QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
@@ -22,7 +23,12 @@ type LocalizedRpcDriverFactory = (
 // Keep the local test seam aligned with the public driver factory.
 const createLocalizedRpcDriver = createRpcQuestionPresentationDriver as LocalizedRpcDriverFactory;
 
-type TestUi = { custom?: unknown; select?: (title: string, options: string[], dialogOptions?: { signal?: AbortSignal }) => Promise<string | undefined>; editor?: (title: string, prefill?: string) => Promise<string | undefined> };
+type TestUi = {
+	custom?: unknown;
+	select?: ExtensionUIContext["select"];
+	input?: ExtensionUIContext["input"];
+	editor?: ExtensionUIContext["editor"];
+};
 type SessionHandler = (event: unknown, ctx: { mode: string; hasUI?: boolean; ui: TestUi }) => Promise<void> | void;
 
 function createTestKeybindings(): TuiKeybindingsManager {
@@ -264,18 +270,28 @@ test("default admitted TUI registration forwards an external-editor callback to 
 	});
 });
 
-test("registers in RPC only when the owner allows it and native dialog methods are available", async () => {
-	const subject = host();
-	createAskUserQuestionExtension(dependencies(owner("gentle-pi")))(subject.pi as never);
-	await start(subject, "rpc", { select: async () => undefined, editor: async () => undefined }, true);
-	assert.deepEqual(subject.tools.map((tool) => tool.name), ["ask_user_question"]);
+test("registers in RPC only when the owner allows it and select plus editor or input support are available", async (t) => {
+	const cases: Array<{ name: string; ui: TestUi }> = [
+		{ name: "editor", ui: { select: async () => undefined, editor: async () => undefined } },
+		{ name: "input", ui: { select: async () => undefined, input: async () => undefined } },
+	];
+	for (const scenario of cases) {
+		await t.test(scenario.name, async () => {
+			const subject = host();
+			createAskUserQuestionExtension(dependencies(owner("gentle-pi")))(subject.pi as never);
+			await start(subject, "rpc", scenario.ui, true);
+			assert.deepEqual(subject.tools.map((tool) => tool.name), ["ask_user_question"]);
+		});
+	}
 });
 
-test("does not register for RPC without both native dialog methods or for hasUI false", async (t) => {
+test("does not register for RPC without select plus editor or input support or for hasUI false", async (t) => {
 	const cases: Array<{ name: string; ui: TestUi; hasUI: boolean }> = [
-		{ name: "missing select", ui: { editor: async () => undefined }, hasUI: true },
-		{ name: "missing editor", ui: { select: async () => undefined }, hasUI: true },
-		{ name: "no UI", ui: { select: async () => undefined, editor: async () => undefined }, hasUI: false },
+		{ name: "select only", ui: { select: async () => undefined }, hasUI: true },
+		{ name: "input without select", ui: { input: async () => undefined }, hasUI: true },
+		{ name: "editor without select", ui: { editor: async () => undefined }, hasUI: true },
+		{ name: "missing both", ui: {}, hasUI: true },
+		{ name: "no UI", ui: { select: async () => undefined, input: async () => undefined, editor: async () => undefined }, hasUI: false },
 	];
 	for (const scenario of cases) {
 		await t.test(scenario.name, async () => {
