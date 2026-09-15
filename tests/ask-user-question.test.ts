@@ -381,7 +381,7 @@ test("leaves an initially unsupported session unregistered until a supported ses
 	const subject = host();
 	createAskUserQuestionExtension(dependencies(owner("gentle-pi")))(subject.pi as never);
 	await start(subject, "print", {}, false);
-	assert.deepEqual(subject.tools, []);
+	assert.deepEqual([...subject.tools], []);
 	assert.deepEqual(subject.pi.getActiveTools(), []);
 	assert.deepEqual(subject.activeToolWrites(), []);
 
