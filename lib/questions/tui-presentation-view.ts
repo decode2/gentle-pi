@@ -276,6 +276,12 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		return this.collapsed;
 	}
 
+	consumeRawCancellationInput(data: string): boolean {
+		if (this.disposed || this.pasteActive || !this.matchesSelectKey(data, "tui.select.cancel")) return false;
+		if (!isKeyRelease(data) && !isKeyRepeat(data)) this.cancel();
+		return true;
+	}
+
 	consumeRawCollapseInput(data: string): boolean {
 		if (this.disposed || this.pasteActive || !this.matchesCollapseKey(data)) return false;
 		if (!isKeyRelease(data) && !isKeyRepeat(data)) this.toggleCollapsed();
@@ -304,7 +310,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (this.collapsed) {
 			if (this.matchesCollapseKey(data)) {
 				if (!isKeyRepeat(data)) this.toggleCollapsed();
-			} else if (matchesKey(data, "escape")) {
+			} else if (this.matchesSelectKey(data, "tui.select.cancel")) {
 				if (!isKeyRepeat(data)) this.finish({ type: "cancel" });
 			}
 			return;
@@ -320,7 +326,8 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 			else if (this.editing === "custom" && this.matchesExternalEditorKey(data)) this.launchExternalEditor();
 			else if (this.matchesInputKey(data, "tui.input.tab")) this.moveKeyboardFocusFromEditor(1);
 			else if (matchesKey(data, "shift+tab")) this.moveKeyboardFocusFromEditor(-1);
-			else if (!isKeyRepeat(data) && matchesKey(data, "escape")) {
+			else if (this.matchesSelectKey(data, "tui.select.cancel") || matchesKey(data, "escape")) {
+				if (isKeyRepeat(data)) return;
 				const target: KeyboardFocusTarget = this.editing === "custom" ? { type: "custom" }
 					: this.editing === "question-note" ? { type: "question-note" } : { type: "global-note" };
 				this.closeEditor();
@@ -340,10 +347,6 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (this.matchesInputKey(data, "tui.input.tab")) return this.moveKeyboardFocus(1);
 		if (matchesKey(data, "shift+tab")) return this.moveKeyboardFocus(-1);
 		if (this.matchesSelectKey(data, "tui.select.confirm")) return this.activateKeyboardFocus(data);
-		if (matchesKey(data, "escape")) {
-			if (!isKeyRepeat(data)) this.finish({ type: "cancel" });
-			return;
-		}
 		if (this.matchesSelectKey(data, "tui.select.cancel")) {
 			if (!isKeyRepeat(data)) this.finish({ type: "cancel" });
 			return;
@@ -460,7 +463,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (keybinding === "tui.select.up") return matchesKey(data, "up");
 		if (keybinding === "tui.select.down") return matchesKey(data, "down");
 		if (keybinding === "tui.select.confirm") return matchesKey(data, "enter");
-		return matchesKey(data, "escape");
+		return matchesKey(data, "escape") || matchesKey(data, "ctrl+c");
 	}
 
 	private matchesInputKey(data: string, keybinding: "tui.input.newLine" | "tui.input.submit" | "tui.input.tab" | "tui.editor.deleteToLineStart"): boolean {

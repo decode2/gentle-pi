@@ -1,5 +1,5 @@
 import type { ExtensionUIContext } from "@earendil-works/pi-coding-agent";
-import { isKeyRelease, isKeyRepeat, matchesKey, type Component, type KeybindingsManager, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
+import { type Component, type KeybindingsManager, type OverlayHandle, type TUI } from "@earendil-works/pi-tui";
 import type {
 	FrozenQuestionnaireRequest,
 	QuestionPresentationDriver,
@@ -73,10 +73,7 @@ export function createTuiQuestionPresentationDriver(
 			try {
 				const hidden = overlayHandle.isHidden();
 				if (!hidden && !overlayHandle.isFocused()) return undefined;
-				if (hidden && matchesKey(data, "escape")) {
-					if (!isKeyRelease(data) && !isKeyRepeat(data)) view.cancel();
-					return { consume: true };
-				}
+				if (hidden && view.consumeRawCancellationInput(data)) return { consume: true };
 				return view.consumeRawCollapseInput(data) ? { consume: true } : undefined;
 			} catch {
 				return undefined;
