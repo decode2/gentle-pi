@@ -5,7 +5,6 @@ import { join } from "node:path";
 import { tmpdir } from "node:os";
 import test from "node:test";
 import { createAskUserQuestionExtension, type AskUserQuestionDependencies } from "../extensions/ask-user-question.ts";
-import type { KeybindingsManager as AppKeybindingsManager } from "@earendil-works/pi-coding-agent";
 import { KeybindingsManager as TuiKeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 import type { QuestionOwnerConfigResolution } from "../lib/questions/owner-config.ts";
 import type { QuestionnaireGuidance } from "../lib/questions/guidance-config.ts";
@@ -26,11 +25,11 @@ const createLocalizedRpcDriver = createRpcQuestionPresentationDriver as Localize
 type TestUi = { custom?: unknown; select?: (title: string, options: string[], dialogOptions?: { signal?: AbortSignal }) => Promise<string | undefined>; editor?: (title: string, prefill?: string) => Promise<string | undefined> };
 type SessionHandler = (event: unknown, ctx: { mode: string; hasUI?: boolean; ui: TestUi }) => Promise<void> | void;
 
-function createTestKeybindings(): AppKeybindingsManager {
+function createTestKeybindings(): TuiKeybindingsManager {
 	return new TuiKeybindingsManager({
 		...TUI_KEYBINDINGS,
 		"app.editor.external": { defaultKeys: "ctrl+g", description: "Open external editor" },
-	}) as AppKeybindingsManager;
+	});
 }
 
 type RegisteredTool = {
