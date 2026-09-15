@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { Theme, type ExtensionUIContext, type TerminalInputHandler } from "@earendil-works/pi-coding-agent";
-import { getKeybindings, stripTerminalSequences, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
+import { KeybindingsManager, stripTerminalSequences, TUI_KEYBINDINGS, TuiAltScreen, visibleWidth } from "@earendil-works/pi-tui";
 import type {
 	Component,
-	KeybindingsManager,
 	OverlayHandle,
 	OverlayUnfocusOptions,
 	Terminal,
@@ -89,7 +88,10 @@ const testBackgroundColors = {
 };
 
 const theme = new Theme(testForegroundColors, testBackgroundColors, "truecolor");
-const testKeybindings = getKeybindings();
+const testKeybindings = new KeybindingsManager({
+	...TUI_KEYBINDINGS,
+	"app.editor.external": { defaultKeys: "ctrl+g", description: "Open external editor" },
+});
 
 class FailingTheme extends Theme {
 	constructor() {

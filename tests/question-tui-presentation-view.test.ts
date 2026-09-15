@@ -733,7 +733,7 @@ test("a configured external Ctrl+J remains reachable when newline is remapped", 
 	}, () => {}, undefined, injectedKeybindings({ "tui.input.newLine": "ctrl+q", "app.editor.external": "ctrl+j" }));
 	focusCustomForKeyboard(component);
 	component.handleInput("draft");
-	component.handleInput(CTRL_J);
+	component.handleInput("\u001b[106;5u");
 	await settleExternalEditor();
 	assert.deepEqual(calls, ["draft"], "the configured external-editor action wins over the old default newline key");
 	assert.deepEqual(outcomes, [], "launching the external editor does not complete the questionnaire");
