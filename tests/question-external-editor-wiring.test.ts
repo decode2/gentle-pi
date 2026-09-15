@@ -3,6 +3,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import test, { mock } from "node:test";
+import { KeybindingsManager, TUI_KEYBINDINGS } from "@earendil-works/pi-tui";
 
 const hostCalls: Array<{ operation: string; value: unknown }> = [];
 let hostFactoryCalls = 0;
@@ -114,8 +115,12 @@ test("the admitted default TUI callback is lazy and runs the real runtime bridge
 		const pending = new Promise<unknown>((resolve) => { settle = resolve; });
 		let trusted = false;
 		const tui = { terminal: { rows: 24 }, stop() {}, start() {}, requestRender() {} };
+		const keybindings = new KeybindingsManager({
+			...TUI_KEYBINDINGS,
+			"app.editor.external": { defaultKeys: "ctrl+g", description: "Open external editor" },
+		});
 		const ui = { custom(factory: unknown) {
-			component = (factory as (tuiValue: typeof tui, theme: { fg(color: string, text: string): string; bold(text: string): string }, keybindings: object, done: (outcome: unknown) => void) => CapturedComponent)(tui, { fg: (_color, text) => text, bold: (text) => text }, {}, settle);
+			component = (factory as (tuiValue: typeof tui, theme: { fg(color: string, text: string): string; bold(text: string): string }, keybindings: object, done: (outcome: unknown) => void) => CapturedComponent)(tui, { fg: (_color, text) => text, bold: (text) => text }, keybindings, settle);
 			return pending;
 		} };
 		const execution = subject.tools[0]!.execute("external-editor", validInput, signal, undefined, { mode: "tui", cwd: "/execution-cwd", isProjectTrusted: () => trusted, ui });
