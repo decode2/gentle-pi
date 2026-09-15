@@ -71,18 +71,41 @@ function owner(ownerName: "gentle-pi" | "legacy-external" | "disabled"): Questio
 		: { allowRegistration: false, owner: ownerName, reason: ownerName === "disabled" ? "configured_disabled" : "configured_external", path: "/profiles/test/gentle-ai/question-owner.json" };
 }
 
-function host(inventory: string[] = []) {
+function host(inventory: string[] = [], initialActiveTools: string[] = inventory) {
 	const sessionStarts: SessionHandler[] = [];
+	const beforeAgentStarts: SessionHandler[] = [];
 	const tools: RegisteredTool[] = [];
 	const events: EventRecord[] = [];
+	const activeTools = [...initialActiveTools];
+	const activeToolWrites: string[][] = [];
 	let inventoryCalls = 0;
 	const pi = {
-		on(event: string, handler: SessionHandler) { if (event === "session_start") sessionStarts.push(handler); },
-		registerTool(tool: RegisteredTool) { tools.push(tool); },
+		on(event: string, handler: SessionHandler) {
+			if (event === "session_start") sessionStarts.push(handler);
+			else if (event === "before_agent_start") beforeAgentStarts.push(handler);
+		},
+		registerTool(tool: RegisteredTool) {
+			tools.push(tool);
+			if (!activeTools.includes(tool.name)) activeTools.push(tool.name);
+		},
 		getAllTools() { inventoryCalls++; return inventory.map((name) => ({ name })); },
+		getActiveTools() { return [...activeTools]; },
+		setActiveTools(names: string[]) {
+			activeToolWrites.push([...names]);
+			activeTools.splice(0, activeTools.length, ...names);
+		},
 		events: { emit(channel: string, payload: unknown) { events.push({ channel, payload }); } },
 	};
-	return { pi, sessionStarts, tools, events, inventoryCalls: () => inventoryCalls };
+	return {
+		pi,
+		sessionStarts,
+		beforeAgentStarts,
+		tools,
+		events,
+		activeTools: () => [...activeTools],
+		activeToolWrites: () => activeToolWrites.map((names) => [...names]),
+		inventoryCalls: () => inventoryCalls,
+	};
 }
 
 function dependencies(config: QuestionOwnerConfigResolution, driver?: QuestionPresentationDriver): AskUserQuestionDependencies {
@@ -134,6 +157,21 @@ function guidanceDependencies(
 async function start(subject: ReturnType<typeof host>, mode: string, ui: TestUi = { custom: async () => undefined }, hasUI = mode === "tui"): Promise<void> {
 	assert.equal(subject.sessionStarts.length, 1, "the factory registers one session_start handler");
 	await subject.sessionStarts[0]!({ type: "session_start", reason: "startup" }, { mode, hasUI, ui });
+}
+
+async function startWithoutHasUI(subject: ReturnType<typeof host>, mode = "tui", ui: TestUi = { custom: async () => undefined }): Promise<void> {
+	assert.equal(subject.sessionStarts.length, 1, "the factory registers one session_start handler");
+	await subject.sessionStarts[0]!({ type: "session_start", reason: "startup" }, { mode, ui });
+}
+
+async function beforeAgentStart(subject: ReturnType<typeof host>, mode: string, ui: TestUi, hasUI = mode === "tui"): Promise<void> {
+	assert.equal(subject.beforeAgentStarts.length, 1, "the factory registers one before_agent_start handler");
+	await subject.beforeAgentStarts[0]!({ type: "before_agent_start" }, { mode, hasUI, ui });
+}
+
+async function beforeAgentStartWithoutHasUI(subject: ReturnType<typeof host>, ui: TestUi = { custom: async () => undefined }): Promise<void> {
+	assert.equal(subject.beforeAgentStarts.length, 1, "the factory registers one before_agent_start handler");
+	await subject.beforeAgentStarts[0]!({ type: "before_agent_start" }, { mode: "tui", ui });
 }
 
 async function withDefaultOwner(run: (agentHome: string) => Promise<void>): Promise<void> {
@@ -272,6 +310,105 @@ test("makes repeated TUI session starts idempotent", async () => {
 	await start(subject, "tui");
 	await start(subject, "tui");
 	assert.deepEqual(subject.tools.map((tool) => tool.name), ["ask_user_question"]);
+});
+
+test("reconciles an admitted questionnaire across session starts and before-agent turns", async () => {
+	const siblings = ["read", "other_tool"];
+	const admitted = [...siblings, "ask_user_question"];
+	const tui: TestUi = { custom: async () => undefined };
+	const rpc: TestUi = { select: async () => undefined, editor: async () => undefined };
+	const subject = host([], siblings);
+	createAskUserQuestionExtension(dependencies(owner("gentle-pi")))(subject.pi as never);
+
+	await startWithoutHasUI(subject, "tui", tui);
+	assert.deepEqual(subject.tools.map((tool) => tool.name), ["ask_user_question"]);
+	assert.deepEqual(subject.pi.getActiveTools(), admitted);
+
+	await start(subject, "tui", tui, false);
+	assert.deepEqual(subject.pi.getActiveTools(), siblings, "explicit hasUI:false removes only the admitted tool");
+	await start(subject, "tui", tui, true);
+	assert.deepEqual(subject.pi.getActiveTools(), admitted, "a supported session_start restores the tool");
+	await start(subject, "tui", tui, true);
+	assert.deepEqual(subject.pi.getActiveTools(), admitted, "repeated supported session starts remain idempotent");
+
+	await start(subject, "print", {}, false);
+	assert.deepEqual(subject.pi.getActiveTools(), siblings, "an unsupported session_start removes the admitted tool");
+	await beforeAgentStartWithoutHasUI(subject, tui);
+	assert.deepEqual(subject.pi.getActiveTools(), admitted, "a TUI context without hasUI remains supported");
+	await beforeAgentStartWithoutHasUI(subject, tui);
+	assert.deepEqual(subject.pi.getActiveTools(), admitted, "repeated supported before_agent_start turns remain idempotent");
+
+	await beforeAgentStart(subject, "rpc", { select: async () => undefined }, true);
+	assert.deepEqual(subject.pi.getActiveTools(), siblings, "RPC without select+editor support is not interactive for this tool");
+	await beforeAgentStart(subject, "rpc", rpc, true);
+	assert.deepEqual(subject.pi.getActiveTools(), admitted, "supported RPC restores the admitted tool");
+	await beforeAgentStart(subject, "rpc", rpc, true);
+	assert.deepEqual(subject.pi.getActiveTools(), admitted, "repeated supported RPC turns remain idempotent");
+
+	assert.deepEqual(subject.activeToolWrites(), [
+		siblings,
+		admitted,
+		siblings,
+		admitted,
+		siblings,
+		admitted,
+	], "reconciliation preserves sibling entries and their order");
+	assert.deepEqual(subject.tools.map((tool) => tool.name), ["ask_user_question"], "session transitions do not re-register the tool");
+});
+
+test("does not reconcile active tools before owned owner and incumbent admission", async (t) => {
+	const cases: Array<{ name: string; config: QuestionOwnerConfigResolution; inventory: string[]; active: string[] }> = [
+		{ name: "owner denied", config: owner("disabled"), inventory: [], active: ["read", "ask_user_question", "other_tool"] },
+		{ name: "incumbent present", config: owner("gentle-pi"), inventory: ["ask_user_question"], active: ["read", "ask_user_question", "other_tool"] },
+	];
+	for (const scenario of cases) {
+		await t.test(scenario.name, async () => {
+			const subject = host(scenario.inventory, scenario.active);
+			createAskUserQuestionExtension(dependencies(scenario.config))(subject.pi as never);
+			await start(subject, "tui", { custom: async () => undefined }, true);
+			assert.deepEqual(subject.tools, []);
+			await start(subject, "print", {}, false);
+			for (const handler of subject.beforeAgentStarts) {
+				await handler({ type: "before_agent_start" }, { mode: "print", hasUI: false, ui: {} });
+			}
+			assert.deepEqual(subject.pi.getActiveTools(), scenario.active, "unowned or incumbent entries are untouched");
+			assert.deepEqual(subject.activeToolWrites(), [], "denied admission performs no active-set writes");
+		});
+	}
+});
+
+test("leaves an initially unsupported session unregistered until a supported session_start", async () => {
+	const subject = host();
+	createAskUserQuestionExtension(dependencies(owner("gentle-pi")))(subject.pi as never);
+	await start(subject, "print", {}, false);
+	assert.deepEqual(subject.tools, []);
+	assert.deepEqual(subject.pi.getActiveTools(), []);
+	assert.deepEqual(subject.activeToolWrites(), []);
+
+	await startWithoutHasUI(subject, "tui");
+	assert.deepEqual(subject.tools.map((tool) => tool.name), ["ask_user_question"]);
+	assert.deepEqual(subject.pi.getActiveTools(), ["ask_user_question"]);
+});
+
+test("fails closed when an admitted TUI tool executes with explicit hasUI:false", async () => {
+	let driverCalls = 0;
+	const subject = host();
+	createAskUserQuestionExtension(dependencies(owner("gentle-pi"), { present: async () => {
+		driverCalls++;
+		throw new Error("explicit no-ui execution reached the presentation driver");
+	} }))(subject.pi as never);
+	await start(subject, "tui");
+
+	const result = await subject.tools[0]!.execute(
+		"no-ui-tui",
+		{ questions: [legacyQuestion()] },
+		new AbortController().signal,
+		undefined,
+		{ mode: "tui", hasUI: false, ui: { custom: async () => undefined } },
+	);
+	assert.deepEqual(result, legacyErrorEnvelope("no_ui", "UI not available (running in non-interactive mode)"));
+	assert.equal(driverCalls, 0);
+	assert.deepEqual(subject.events, []);
 });
 
 test("correlates and aborts one TUI request, balances status, and rejects concurrent execution", async () => {
