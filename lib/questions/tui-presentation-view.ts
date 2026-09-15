@@ -315,16 +315,17 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 			return;
 		}
 		if (this.editing) {
-			if (this.editing === "custom" && matchesKey(data, "ctrl+g")) this.launchExternalEditor();
-			else if (matchesKey(data, "tab")) this.moveKeyboardFocusFromEditor(1);
+			if (this.handleEditorInputKey(data)) return;
+			else if (this.editing === "custom" && this.handleCustomEditorDelete(data)) return;
+			else if (this.editing === "custom" && this.matchesExternalEditorKey(data)) this.launchExternalEditor();
+			else if (this.matchesInputKey(data, "tui.input.tab")) this.moveKeyboardFocusFromEditor(1);
 			else if (matchesKey(data, "shift+tab")) this.moveKeyboardFocusFromEditor(-1);
 			else if (!isKeyRepeat(data) && matchesKey(data, "escape")) {
 				const target: KeyboardFocusTarget = this.editing === "custom" ? { type: "custom" }
 					: this.editing === "question-note" ? { type: "question-note" } : { type: "global-note" };
 				this.closeEditor();
 				this.setKeyboardFocus(target);
-			} else if (matchesKey(data, "enter")) this.editor!.insertTextAtCursor("\n");
-			else this.handleEditorInput(data);
+			} else this.handleEditorInput(data);
 			return;
 		}
 		// Ctrl+PageUp/PageDown are not used by the options control or fullscreen navigation;
@@ -336,7 +337,7 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		}
 		if (this.matchesSelectKey(data, "tui.select.up")) return this.moveKeyboardFocus(-1);
 		if (this.matchesSelectKey(data, "tui.select.down")) return this.moveKeyboardFocus(1);
-		if (matchesKey(data, "tab")) return this.moveKeyboardFocus(1);
+		if (this.matchesInputKey(data, "tui.input.tab")) return this.moveKeyboardFocus(1);
 		if (matchesKey(data, "shift+tab")) return this.moveKeyboardFocus(-1);
 		if (this.matchesSelectKey(data, "tui.select.confirm")) return this.activateKeyboardFocus(data);
 		if (matchesKey(data, "escape")) {
@@ -460,6 +461,70 @@ export class QuestionnaireTuiPresentation extends NativeFullscreenInteraction im
 		if (keybinding === "tui.select.down") return matchesKey(data, "down");
 		if (keybinding === "tui.select.confirm") return matchesKey(data, "enter");
 		return matchesKey(data, "escape");
+	}
+
+	private matchesInputKey(data: string, keybinding: "tui.input.newLine" | "tui.input.submit" | "tui.input.tab" | "tui.editor.deleteToLineStart"): boolean {
+		const manager = this.presentationOptions.keybindings;
+		if (manager) return manager.matches(data, keybinding);
+		if (keybinding === "tui.input.newLine") return matchesKey(data, "shift+enter") || matchesKey(data, "ctrl+j");
+		if (keybinding === "tui.input.submit") return matchesKey(data, "enter");
+		if (keybinding === "tui.input.tab") return matchesKey(data, "tab");
+		return matchesKey(data, "ctrl+u");
+	}
+
+	private matchesExternalEditorKey(data: string): boolean {
+		const manager = this.presentationOptions.keybindings;
+		return manager ? manager.matches(data, "app.editor.external") : matchesKey(data, "ctrl+g");
+	}
+
+	private hasExplicitKeybinding(keybinding: string): boolean {
+		const manager = this.presentationOptions.keybindings;
+		return manager !== undefined && Object.prototype.hasOwnProperty.call(manager.getUserBindings(), keybinding);
+	}
+
+	private handleCustomEditorDelete(data: string): boolean {
+		if (!this.matchesInputKey(data, "tui.editor.deleteToLineStart")) return false;
+		this.editor!.setText("");
+		return true;
+	}
+
+	private handleEditorInputKey(data: string): boolean {
+		const inputBindingsConfigured = this.hasExplicitKeybinding("tui.input.newLine") || this.hasExplicitKeybinding("tui.input.submit");
+		if (!inputBindingsConfigured) {
+			if (matchesKey(data, "enter") || this.matchesInputKey(data, "tui.input.newLine")) {
+				this.editor!.insertTextAtCursor("\n");
+				return true;
+			}
+			return false;
+		}
+		if (this.matchesInputKey(data, "tui.input.newLine")) {
+			this.editor!.insertTextAtCursor("\n");
+			return true;
+		}
+		if (this.matchesInputKey(data, "tui.input.submit")) {
+			this.confirmEditor();
+			return true;
+		}
+		return false;
+	}
+
+	private confirmEditor(): void {
+		const editing = this.editing;
+		if (!this.editor || !editing) return;
+		if (editing !== "custom") {
+			const target: KeyboardFocusTarget = editing === "question-note" ? { type: "question-note" } : { type: "global-note" };
+			this.closeEditor();
+			this.setKeyboardFocus(target);
+			return;
+		}
+		if (!this.isFinalQuestion()) {
+			this.continueToNextQuestion(true);
+			return;
+		}
+		this.persistEditor();
+		if (this.hasExplicitActiveAnswer()) this.state = reduceQuestionnairePresentation(this.state, { type: "next" });
+		this.closeEditor(false);
+		this.setKeyboardFocus({ type: "primary" }, true);
 	}
 
 	private setKeyboardFocus(target: KeyboardFocusTarget, followKeyboardFocus = false): void {
