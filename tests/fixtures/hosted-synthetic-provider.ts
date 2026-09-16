@@ -12,14 +12,32 @@ const PROMPT_EVENT = "rpiv:ask-user:prompt";
 const BLOCKED_EVENT = "rpiv:ask-user:blocked";
 const FINAL_TEXT = "Synthetic provider completed after questionnaire cancellation.";
 const MARKERS = { session: "hosted:session_start", beforeAgent: "hosted:before_agent_start", registered: "hosted:ask_user_question:registered", invoked: "hosted:ask_user_question:invoked", cancelled: "hosted:ask_user_question:cancelled", prompt: "hosted:rpiv:ask-user:prompt", blocked: (active: boolean) => `hosted:rpiv:ask-user:blocked:${active}` } as const;
-const CANDIDATE_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "../../extensions/ask-user-question.ts");
+const OWNED_SOURCE_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "../../extensions/ask-user-question.ts");
+const REFERENCE_SOURCE_PATH = "/reference/node_modules/@juicesharp/rpiv-ask-user-question/index.ts";
+const expectedSourcePath = process.env.GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH ?? OWNED_SOURCE_PATH;
+if (expectedSourcePath !== OWNED_SOURCE_PATH && expectedSourcePath !== REFERENCE_SOURCE_PATH) throw new Error(`unsupported hosted questionnaire source path: ${expectedSourcePath}`);
 const QUESTION_ARGUMENTS = { questions: [{ question: "Which layout should we inspect?", header: "Layout", options: [{ label: "Compact", description: "Use a compact layout." }, { label: "Detailed", description: "Use a detailed layout." }] }] };
-const observed = { session: false, beforeAgent: false, registered: false, invoked: false, cancelled: false, prompt: 0, blocked: [] as boolean[] };
+type PromptProjection = { questions: { question: string; header: string; multiSelect: boolean; options: { label: string; description: string; hasPreview: boolean }[] }[] };
+const observed = { session: false, beforeAgent: false, registered: false, invoked: false, cancelled: false, prompt: 0, promptProjection: undefined as string | undefined, blocked: [] as boolean[] };
 const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 let notify: ((message: string) => void) | undefined;
 let questionIssued = false;
 
 function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
+function projectPrompt(value: unknown): PromptProjection | undefined {
+	if (!isRecord(value) || !Array.isArray(value.questions)) return undefined;
+	const questions: PromptProjection["questions"] = [];
+	for (const rawQuestion of value.questions) {
+		if (!isRecord(rawQuestion) || typeof rawQuestion.question !== "string" || typeof rawQuestion.header !== "string" || typeof rawQuestion.multiSelect !== "boolean" || !Array.isArray(rawQuestion.options)) return undefined;
+		const options: PromptProjection["questions"][number]["options"] = [];
+		for (const rawOption of rawQuestion.options as unknown[]) {
+			if (!isRecord(rawOption) || typeof rawOption.label !== "string" || typeof rawOption.description !== "string" || typeof rawOption.hasPreview !== "boolean") return undefined;
+			options.push({ label: rawOption.label, description: rawOption.description, hasPreview: rawOption.hasPreview });
+		}
+		questions.push({ question: rawQuestion.question, header: rawQuestion.header, multiSelect: rawQuestion.multiSelect, options });
+	}
+	return { questions };
+}
 function mark(message: string): void { notify?.(message); }
 function cancelledDetails(value: unknown): boolean { return isRecord(value) && value.cancelled === true && Array.isArray(value.answers) && value.answers.length === 0; }
 function latestQuestionnaireResult(context: Context): ToolResultMessage | undefined {
@@ -57,7 +75,7 @@ function streamSynthetic(model: Model<any>, context: Context, options?: SimpleSt
 			output.stopReason = "toolUse";
 			stream.push({ type: "done", reason: "toolUse", message: output });
 		} else {
-			if (!observed.session || !observed.beforeAgent || !observed.registered || !observed.invoked || observed.prompt !== 1 || observed.blocked.join(",") !== "true,false" || !observed.cancelled || result?.isError || !cancelledDetails(result?.details)) throw new Error("hosted questionnaire observer contract was incomplete");
+			if (!observed.session || !observed.beforeAgent || !observed.registered || !observed.invoked || observed.prompt !== 1 || observed.promptProjection === undefined || observed.blocked.join(",") !== "true,false" || !observed.cancelled || result?.isError || !cancelledDetails(result?.details)) throw new Error("hosted questionnaire observer contract was incomplete");
 			output.content.push({ type: "text", text: "" });
 			stream.push({ type: "text_start", contentIndex: 0, partial: output }); const block = output.content[0]; if (block?.type !== "text") throw new Error("synthetic text block was not created"); block.text = FINAL_TEXT;
 			stream.push({ type: "text_delta", contentIndex: 0, delta: FINAL_TEXT, partial: output });
@@ -79,7 +97,7 @@ export default function (pi: ExtensionAPI): void {
 	pi.on("session_start", (_event, ctx) => { observed.session = true; notify = (message) => ctx.ui.notify(message, "info"); mark(MARKERS.session); });
 	pi.on("before_agent_start", () => {
 		observed.beforeAgent = true;
-		observed.registered = pi.getAllTools().find((tool) => tool.name === TOOL_NAME)?.sourceInfo.path === CANDIDATE_PATH;
+		observed.registered = pi.getAllTools().find((tool) => tool.name === TOOL_NAME)?.sourceInfo.path === expectedSourcePath;
 		mark(MARKERS.beforeAgent);
 		if (observed.registered) mark(MARKERS.registered);
 	});
@@ -89,6 +107,14 @@ export default function (pi: ExtensionAPI): void {
 		observed.cancelled = true;
 		mark(MARKERS.cancelled);
 	});
-	pi.events.on(PROMPT_EVENT, (data) => { if (isRecord(data) && Array.isArray(data.questions)) { observed.prompt += 1; mark(MARKERS.prompt); } });
+	pi.events.on(PROMPT_EVENT, (data) => {
+		const projection = projectPrompt(data);
+		if (projection === undefined) return;
+		observed.prompt += 1;
+		const encoded = JSON.stringify(projection);
+		observed.promptProjection = encoded;
+		mark(MARKERS.prompt);
+		mark(`${MARKERS.prompt}:projection:${encoded}`);
+	});
 	pi.events.on(BLOCKED_EVENT, (data) => { if (isRecord(data) && typeof data.active === "boolean") { observed.blocked.push(data.active); mark(MARKERS.blocked(data.active)); } });
 }

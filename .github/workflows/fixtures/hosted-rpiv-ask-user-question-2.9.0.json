@@ -1,0 +1,72 @@
+{
+  "schema": "gentle-pi.hosted-rpiv-reference/v1",
+  "packages": [
+    {
+      "name": "@juicesharp/rpiv-ask-user-question",
+      "version": "2.9.0",
+      "license": "MIT",
+      "url": "https://registry.npmjs.org/@juicesharp/rpiv-ask-user-question/-/rpiv-ask-user-question-2.9.0.tgz",
+      "integrity": "sha512-/sqY7ysOgJ8snWyXLOS2zH+djfVuwFce6hU88BDP6tpoFPYq5gT+TaZpSIt9lYnJUVkgzTABIAtCNSUc/rovrA==",
+      "archiveRoot": "package/",
+      "extractPath": "node_modules/@juicesharp/rpiv-ask-user-question",
+      "entry": "index.ts",
+      "dependencies": {
+        "@juicesharp/rpiv-config": "^2.9.0",
+        "typebox": "^1.1.24"
+      },
+      "peerDependencies": {
+        "@earendil-works/pi-coding-agent": "*",
+        "@earendil-works/pi-tui": "*",
+        "@juicesharp/rpiv-i18n": "*"
+      },
+      "optionalPeers": ["@juicesharp/rpiv-i18n"]
+    },
+    {
+      "name": "@juicesharp/rpiv-config",
+      "version": "2.9.0",
+      "license": "MIT",
+      "url": "https://registry.npmjs.org/@juicesharp/rpiv-config/-/rpiv-config-2.9.0.tgz",
+      "integrity": "sha512-/7iFmG40bTsQaOwK5z44ZTAc0V0RI/X+Lr5N3f1rWjkdx1ZsiHBAzMcWO+5kMgjUuQAcyVbDkt19pmriIG2E7A==",
+      "archiveRoot": "package/",
+      "extractPath": "node_modules/@juicesharp/rpiv-config",
+      "entry": "index.ts",
+      "dependencies": {
+        "typebox": "^1.1.24"
+      },
+      "peerDependencies": {},
+      "optionalPeers": []
+    }
+  ],
+  "links": [
+    {
+      "path": "node_modules/@juicesharp/rpiv-ask-user-question/node_modules/@juicesharp/rpiv-config",
+      "target": "/reference/node_modules/@juicesharp/rpiv-config",
+      "package": "@juicesharp/rpiv-config",
+      "version": "2.9.0"
+    },
+    {
+      "path": "node_modules/@juicesharp/rpiv-ask-user-question/node_modules/typebox",
+      "target": "/workspace/node_modules/typebox",
+      "package": "typebox",
+      "version": "1.1.38"
+    },
+    {
+      "path": "node_modules/@juicesharp/rpiv-config/node_modules/typebox",
+      "target": "/workspace/node_modules/typebox",
+      "package": "typebox",
+      "version": "1.1.38"
+    },
+    {
+      "path": "node_modules/@juicesharp/rpiv-ask-user-question/node_modules/@earendil-works/pi-coding-agent",
+      "target": "/workspace/node_modules/@earendil-works/pi-coding-agent",
+      "package": "@earendil-works/pi-coding-agent",
+      "version": "0.85.1"
+    },
+    {
+      "path": "node_modules/@juicesharp/rpiv-ask-user-question/node_modules/@earendil-works/pi-tui",
+      "target": "/workspace/node_modules/@earendil-works/pi-tui",
+      "package": "@earendil-works/pi-tui",
+      "version": "0.85.1"
+    }
+  ]
+}

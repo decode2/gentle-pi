@@ -205,6 +205,144 @@ jobs:
             env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             /usr/local/bin/node --input-type=module -e 'import { readFileSync } from "node:fs"; import { networkInterfaces } from "node:os"; const mounts = readFileSync("/proc/self/mountinfo", "utf8").split(String.fromCharCode(10)).map((line) => line.split(" - ")[0]?.split(" ")).filter(Boolean); const opts = (point) => mounts.find((fields) => fields[4] === point)?.[5]?.split(",") ?? []; const status = readFileSync("/proc/self/status", "utf8").split(String.fromCharCode(10)); const noNewPrivs = status.some((line) => line.startsWith("NoNewPrivs:") && line.trim().endsWith("1")); const capsDropped = status.some((line) => line.startsWith("CapEff:") && [...(line.split(":")[1]?.trim() ?? "")].every((char) => char === "0")); if (!opts("/").includes("ro") || !opts("/workspace").includes("ro") || process.getuid() !== 1000 || !noNewPrivs || !capsDropped || Object.keys(networkInterfaces()).some((name) => name !== "lo")) throw new Error("Docker isolation readback failed"); console.log(`uid=${process.getuid()} node=${process.version} network=none rootfs=ro checkout=ro caps=0 no_new_privs=1`);'
 
+      - name: Acquire pinned public rpiv sources in isolated container
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          reference_dir="$RUNNER_TEMP/hosted-rpiv-reference"
+          test ! -e "$reference_dir"
+          mkdir "$reference_dir"
+          chmod 0777 "$reference_dir"
+          docker run --rm -i --network=bridge --read-only --cap-drop=ALL --security-opt=no-new-privileges \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$reference_dir,target=/artifact" \
+            --user 1000:1000 "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/artifact TMPDIR=/artifact \
+            /usr/local/bin/node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { execFileSync } from "node:child_process";
+          import { mkdir, readFile, readlink, symlink } from "node:fs/promises";
+          import { dirname, join } from "node:path";
+          import { gunzipSync } from "node:zlib";
+
+          const manifestPath = "/workspace/.github/workflows/fixtures/hosted-rpiv-ask-user-question-2.9.0.json";
+          const manifest = JSON.parse(await readFile(manifestPath, "utf8"));
+          const fail = (condition, message) => { if (!condition) throw new Error(message); };
+          fail(manifest.schema === "gentle-pi.hosted-rpiv-reference/v1", "invalid hosted rpiv manifest schema");
+          fail(Array.isArray(manifest.packages) && manifest.packages.length === 2, "hosted rpiv manifest must pin two packages");
+          fail(Array.isArray(manifest.links) && manifest.links.length === 5, "hosted rpiv manifest must pin five dependency links");
+          const packages = manifest.packages;
+          const links = manifest.links;
+          const byName = new Map();
+          for (const spec of packages) {
+            fail(typeof spec.name === "string" && !byName.has(spec.name), "invalid or duplicate hosted package name");
+            byName.set(spec.name, spec);
+            fail(spec.archiveRoot === "package/", `${spec.name}: unexpected archive root`);
+            fail(typeof spec.extractPath === "string" && spec.extractPath.startsWith("node_modules/") && !spec.extractPath.includes("\\") && spec.extractPath.split("/").every((part) => part.length > 0 && part !== "." && part !== ".."), `${spec.name}: invalid extraction path`);
+            fail(typeof spec.entry === "string" && !spec.entry.includes("..") && !spec.entry.includes("\\") && !spec.entry.startsWith("/"), `${spec.name}: invalid public entry`);
+          }
+          const decoder = new TextDecoder();
+          const headerText = (bytes, start, length) => {
+            const text = decoder.decode(bytes.subarray(start, start + length));
+            const nul = text.indexOf("\0");
+            return nul < 0 ? text : text.slice(0, nul);
+          };
+          const octal = (bytes, start, length) => {
+            const value = headerText(bytes, start, length).trim();
+            const number = Number.parseInt(value || "0", 8);
+            fail(Number.isSafeInteger(number) && number >= 0, "invalid tar size");
+            return number;
+          };
+          const safeArchivePath = (name) => {
+            fail(name === "package" || name === "package/" || name.startsWith("package/"), `unsafe archive path: ${name}`);
+            fail(!name.startsWith("/") && !name.includes("\\") && !name.includes("\0"), `unsafe archive path: ${name}`);
+            const parts = name.split("/");
+            if (parts.at(-1) === "") parts.pop();
+            fail(parts.every((part) => part.length > 0 && part !== "." && part !== ".."), `unsafe archive path: ${name}`);
+          };
+          const paxPath = (data) => {
+            let cursor = 0; let path;
+            while (cursor < data.length) {
+              const space = data.indexOf(0x20, cursor);
+              const length = Number.parseInt(decoder.decode(data.subarray(cursor, space)), 10);
+              fail(space > cursor && Number.isSafeInteger(length) && length > 0 && cursor + length <= data.length, "invalid pax record");
+              const record = decoder.decode(data.subarray(space + 1, cursor + length - 1));
+              if (record.startsWith("path=")) path = record.slice(5);
+              cursor += length;
+            }
+            return path;
+          };
+          const archiveEntries = (bytes) => {
+            const tar = gunzipSync(bytes);
+            const names = new Set(); let offset = 0; let override;
+            while (offset + 512 <= tar.length) {
+              const header = tar.subarray(offset, offset + 512);
+              if (header.every((byte) => byte === 0)) break;
+              const size = octal(header, 124, 12);
+              const end = offset + 512 + Math.ceil(size / 512) * 512;
+              fail(end <= tar.length, "truncated tar archive");
+              const type = header[156] === 0 ? "0" : String.fromCharCode(header[156]);
+              const data = tar.subarray(offset + 512, offset + 512 + size);
+              if (type === "x") { override = paxPath(data); } else {
+                fail(type === "0" || type === "5", `unsafe tar entry type: ${type}`);
+                const name = override ?? [headerText(header, 345, 155), headerText(header, 0, 100)].filter(Boolean).join("/");
+                override = undefined; safeArchivePath(name); names.add(name);
+              }
+              offset = end;
+            }
+            return names;
+          };
+          const map = (value) => Object.fromEntries(Object.entries(value ?? {}).sort(([left], [right]) => left.localeCompare(right)));
+          const sameMap = (actual, expected, label) => fail(JSON.stringify(map(actual)) === JSON.stringify(map(expected)), `${label}: dependency metadata changed`);
+          const relativePath = (value, label) => { fail(typeof value === "string" && value.length > 0 && !value.startsWith("/") && !value.includes("\\") && value.split("/").every((part) => part.length > 0 && part !== "." && part !== ".."), `${label}: unsafe relative path`); };
+          const directLink = (owner, packageName) => links.find((link) => link.package === packageName && link.path.startsWith(`${owner.extractPath}/node_modules/`));
+
+          for (const spec of packages) {
+            const response = await fetch(spec.url, { redirect: "error" });
+            fail(response.ok, `${spec.name}: registry returned HTTP ${response.status}`);
+            const bytes = Buffer.from(await response.arrayBuffer());
+            const integrity = `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
+            fail(integrity === spec.integrity, `${spec.name}: SRI mismatch`);
+            const entries = archiveEntries(bytes);
+            const entryPath = `${spec.archiveRoot}${spec.entry}`;
+            fail(entries.has(entryPath) && entries.has(`${spec.archiveRoot}package.json`), `${spec.name}: required archive files missing`);
+            const metadata = JSON.parse(execFileSync("tar", ["--extract", "--to-stdout", "--gzip", "--file=-", `${spec.archiveRoot}package.json"], { input: bytes }).toString("utf8"));
+            fail(metadata.name === spec.name && metadata.version === spec.version && metadata.license === spec.license && metadata.type === "module", `${spec.name}: package metadata changed`);
+            fail(metadata.exports?.["."] === `./${spec.entry}`, `${spec.name}: public export changed`);
+            sameMap(metadata.dependencies, spec.dependencies, `${spec.name} dependencies`);
+            sameMap(metadata.peerDependencies, spec.peerDependencies, `${spec.name} peers`);
+            const optionalPeers = new Set(spec.optionalPeers ?? []);
+            for (const peer of Object.keys(spec.peerDependencies ?? {})) fail((metadata.peerDependenciesMeta?.[peer]?.optional === true) === optionalPeers.has(peer), `${spec.name}: optional peer metadata changed`);
+            for (const dependency of Object.keys(spec.dependencies ?? {})) fail(byName.has(dependency) || directLink(spec, dependency), `${spec.name}: unresolved dependency ${dependency}`);
+            for (const peer of Object.keys(spec.peerDependencies ?? {})) if (!optionalPeers.has(peer)) fail(directLink(spec, peer), `${spec.name}: unresolved peer ${peer}`);
+            const destination = join("/artifact", spec.extractPath); await mkdir(destination, { recursive: true });
+            execFileSync("tar", ["--extract", "--gzip", "--file=-", "--directory", destination, "--strip-components=1", "--no-same-owner", "--no-same-permissions", "--no-overwrite-dir", "--delay-directory-restore"], { input: bytes, stdio: ["pipe", "ignore", "inherit"] });
+          }
+          const targetPath = (target) => {
+            if (target.startsWith("/reference/")) return join("/artifact", target.slice("/reference/".length));
+            if (target.startsWith("/workspace/")) return target;
+            throw new Error(`unapproved dependency target: ${target}`);
+          };
+          for (const link of links) {
+            relativePath(link.path, "link path"); relativePath(link.package, "link package");
+            fail(link.target === `/reference/node_modules/${link.package}` || link.target === `/workspace/node_modules/${link.package}`, `${link.package}: unexpected link target`);
+            const target = targetPath(link.target); const metadata = JSON.parse(await readFile(join(target, "package.json"), "utf8"));
+            fail(metadata.name === link.package && metadata.version === link.version, `${link.package}: linked package metadata changed`);
+            const linkPath = join("/artifact", link.path); await mkdir(dirname(linkPath), { recursive: true });
+            await symlink(link.target, linkPath); fail(await readlink(linkPath) === link.target, `${link.package}: link readback failed`);
+          }
+          console.log(`acquired=${packages.map((spec) => `${spec.name}@${spec.version}`).join(",")} links=${links.length} source=registry SRI=verified scripts=none`);
+          NODE
+          test -r "$reference_dir/node_modules/@juicesharp/rpiv-ask-user-question/index.ts"
+          test -r "$reference_dir/node_modules/@juicesharp/rpiv-config/index.ts"
+          test "$(readlink "$reference_dir/node_modules/@juicesharp/rpiv-ask-user-question/node_modules/typebox")" = "/workspace/node_modules/typebox"
+          test "$(readlink "$reference_dir/node_modules/@juicesharp/rpiv-config/node_modules/typebox")" = "/workspace/node_modules/typebox"
+
       - name: Run hosted RPC cancellation in isolated container
         env:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
@@ -213,8 +351,11 @@ jobs:
         run: |
           set -euo pipefail
           test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          reference_dir="$RUNNER_TEMP/hosted-rpiv-reference"
+          test -r "$reference_dir/node_modules/@juicesharp/rpiv-ask-user-question/index.ts"
           docker run --rm --network=none --read-only \
             --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$reference_dir,target=/reference,readonly" \
             --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
             --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
             env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
