@@ -311,7 +311,7 @@ jobs:
             const entries = archiveEntries(bytes);
             const entryPath = `${spec.archiveRoot}${spec.entry}`;
             fail(entries.has(entryPath) && entries.has(`${spec.archiveRoot}package.json`), `${spec.name}: required archive files missing`);
-            const metadata = JSON.parse(execFileSync("tar", ["--extract", "--to-stdout", "--gzip", "--file=-", `${spec.archiveRoot}package.json"], { input: bytes }).toString("utf8"));
+            const metadata = JSON.parse(execFileSync("tar", ["--extract", "--to-stdout", "--gzip", "--file=-", `${spec.archiveRoot}package.json`], { input: bytes }).toString("utf8"));
             fail(metadata.name === spec.name && metadata.version === spec.version && metadata.license === spec.license && metadata.type === "module", `${spec.name}: package metadata changed`);
             fail(metadata.exports?.["."] === `./${spec.entry}`, `${spec.name}: public export changed`);
             sameMap(metadata.dependencies, spec.dependencies, `${spec.name} dependencies`);
