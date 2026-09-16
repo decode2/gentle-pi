@@ -13,7 +13,15 @@ const REFERENCE_ROOT = "/reference";
 const TOOL_NAME = "ask_user_question";
 const PROVIDER_ID = "hosted-questionnaire-synthetic";
 const MODEL_ID = "hosted-questionnaire-model";
-const FINAL_TEXT = "Synthetic provider completed after questionnaire cancellation.";
+const QUESTION = "Which layout should we inspect?";
+const CUSTOM_ANSWER = "  leading  internal\ntrailing  ";
+const FINAL_TEXT = {
+	cancel: "Synthetic provider completed after questionnaire cancellation.",
+	single: "Synthetic provider completed after questionnaire single selection.",
+	custom: "Synthetic provider completed after questionnaire custom response.",
+} as const;
+const CANCELLED_MARKER = "hosted:ask_user_question:cancelled";
+const COMPLETED_MARKER = "hosted:ask_user_question:completed";
 const ISOLATION_MARKER = "docker-network-none-readonly-v1";
 const OWNED_EXTENSION_PATH = `${CHECKOUT_ROOT}/extensions/ask-user-question.ts`;
 const REFERENCE_EXTENSION_PATH = `${REFERENCE_ROOT}/node_modules/@juicesharp/rpiv-ask-user-question/index.ts`;
@@ -32,9 +40,11 @@ const MARKERS = [
 
 type RpcRecord = Record<string, unknown>;
 type ExitStatus = { code: number | null; signal: NodeJS.Signals | null };
+type HostedScenario = "cancel" | "single" | "custom";
 type RunResult = { events: RpcRecord[]; cancellationResponses: number };
-type HostedCase = { name: "owned" | "reference"; candidatePath: string; expectedSourcePath?: string; reference: boolean };
-type ComparableResult = { cancellationResult: RpcRecord; promptProjection: RpcRecord; blocked: boolean[] };
+type HostedCase = { name: "owned" | "reference"; candidatePath: string; expectedSourcePath?: string; reference: boolean; scenario: HostedScenario };
+type StableResult = { content: unknown; details: { cancelled: unknown; answers: unknown } };
+type ComparableResult = { result: StableResult; promptProjection: RpcRecord; blocked: boolean[] };
 
 type PiPackage = { name?: string; version?: string; bin?: string | Record<string, string> };
 
@@ -99,6 +109,21 @@ function blockedSequence(events: RpcRecord[]): boolean[] {
 	return sequence;
 }
 
+function expectedAnswer(scenario: Exclude<HostedScenario, "cancel">): RpcRecord {
+	return { questionIndex: 0, question: QUESTION, kind: scenario === "single" ? "option" : "custom", answer: scenario === "single" ? "Compact" : CUSTOM_ANSWER };
+}
+
+function successfulContent(answer: string): string {
+	return `User has answered your questions: "${QUESTION}"="${answer}". You can now continue with the user's answers in mind.`;
+}
+
+function assertSuccessfulResult(content: unknown, details: RpcRecord, scenario: Exclude<HostedScenario, "cancel">): void {
+	const expected = expectedAnswer(scenario);
+	assert.equal(details.cancelled, false);
+	assert.deepEqual(details.answers, [expected]);
+	assert.deepEqual(content, [{ type: "text", text: successfulContent(expected.answer as string) }]);
+}
+
 function withTimeout<T>(promise: Promise<T>, milliseconds: number, label: string): Promise<T> {
 	return new Promise<T>((resolvePromise, rejectPromise) => {
 		const timer = setTimeout(() => rejectPromise(new Error(`${label} timed out`)), milliseconds);
@@ -106,7 +131,7 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number, label: string
 	});
 }
 
-async function runRpc(cliPath: string, candidatePath: string, fixturePath: string, sandbox: string, expectedSourcePath?: string): Promise<RunResult> {
+async function runRpc(cliPath: string, candidatePath: string, fixturePath: string, sandbox: string, expectedSourcePath?: string, scenario: HostedScenario = "cancel"): Promise<RunResult> {
 	assert.ok(candidatePath === OWNED_EXTENSION_PATH || candidatePath === REFERENCE_EXTENSION_PATH, `unsupported hosted questionnaire candidate: ${candidatePath}`);
 	assert.equal(fixturePath, FIXTURE_PATH);
 	assert.equal(expectedSourcePath, candidatePath === REFERENCE_EXTENSION_PATH ? REFERENCE_EXTENSION_PATH : undefined);
@@ -125,9 +150,10 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 		TMPDIR: tempPath("tmp"), TMP: tempPath("tmp"), TEMP: tempPath("tmp"),
 		PI_CODING_AGENT_DIR: tempPath("agent"), PI_CODING_AGENT_SESSION_DIR: tempPath("sessions"),
 		GENTLE_PI_AGENT_HOME: tempPath("agent"), GENTLE_PI_CONFIG_HOME: tempPath("xdg-config"), PI_OFFLINE: "1", PI_SKIP_VERSION_CHECK: "1", PI_TELEMETRY: "0",
+		GENTLE_PI_HOSTED_SCENARIO: scenario,
 	};
 	if (expectedSourcePath !== undefined) childEnv.GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH = expectedSourcePath;
-	assert.deepEqual(Object.keys(childEnv).sort(), ["GENTLE_PI_AGENT_HOME", "GENTLE_PI_CONFIG_HOME", "HOME", "PATH", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_OFFLINE", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", ...(expectedSourcePath === undefined ? [] : ["GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH"])].sort());
+	assert.deepEqual(Object.keys(childEnv).sort(), ["GENTLE_PI_AGENT_HOME", "GENTLE_PI_CONFIG_HOME", "GENTLE_PI_HOSTED_SCENARIO", "HOME", "PATH", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_OFFLINE", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", ...(expectedSourcePath === undefined ? [] : ["GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH"])].sort());
 	for (const path of Object.values(childEnv).filter((value) => value.startsWith("/"))) {
 		assert.ok(relative(CHECKOUT_ROOT, path).startsWith(".."), `child path must be outside checkout: ${path}`);
 	}
@@ -140,6 +166,8 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	let stderr = "";
 	let buffer = "";
 	let cancellationResponses = 0;
+	let dialogIndex = 0;
+	const observedDialogMethods: string[] = [];
 	let completionClaimed = false;
 	let resolveCompletion!: () => void;
 	let rejectCompletion!: (error: unknown) => void;
@@ -153,17 +181,51 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 		if (!child.stdin || child.stdin.destroyed || child.stdin.writableEnded) throw new Error("hosted Pi stdin is not writable");
 		child.stdin.write(`${JSON.stringify(command)}\n`);
 	};
+	const selectStep = (matcher: (option: string) => boolean, label: string) => (event: RpcRecord): void => {
+		assert.equal(event.method, "select", `${label} must use select`);
+		if (!Array.isArray(event.options)) throw new Error(`${label} must expose options`);
+		const matches = event.options.filter((option): option is string => typeof option === "string" && matcher(option));
+		assert.equal(matches.length, 1, `${label} must have one matching emitted option`);
+		assert.equal(typeof event.id, "string", `${label} request must have an RPC id`);
+		send({ type: "extension_ui_response", id: event.id, value: matches[0] });
+	};
+	const textStep = (methods: readonly ("editor" | "input")[], label: string) => (event: RpcRecord): void => {
+		assert.ok(methods.includes(event.method as "editor" | "input"), `${label} used unexpected method ${String(event.method)}`);
+		assert.equal(typeof event.id, "string", `${label} request must have an RPC id`);
+		send({ type: "extension_ui_response", id: event.id, value: CUSTOM_ANSWER });
+	};
+	const cancelStep = (event: RpcRecord): void => {
+		assert.equal(event.method, "select", "cancellation must start with select");
+		if (cancellationResponses !== 0) throw new Error("hosted questionnaire requested more than one selection dialog");
+		assert.equal(typeof event.id, "string", "selection request must have an RPC id");
+		cancellationResponses += 1;
+		send({ type: "extension_ui_response", id: event.id, cancelled: true });
+	};
+	const owned = candidatePath === OWNED_EXTENSION_PATH;
+	const plannedDialogs: Array<(event: RpcRecord) => void> = scenario === "cancel" ? [cancelStep]
+		: owned
+			? scenario === "single"
+				? [selectStep((option) => option === "Choose an option", "owned single action"), selectStep((option) => option === "Compact", "owned single option"), selectStep((option) => option === "Submit", "owned single submit")]
+				: [selectStep((option) => option === "Use custom text", "owned custom action"), textStep(["editor", "input"], "owned custom text"), selectStep((option) => option === "Submit", "owned custom submit")]
+			: scenario === "single"
+				? [selectStep((option) => /^1\. Compact — .+$/.test(option), "reference single option")]
+				: [selectStep((option) => option === "3. Type something.", "reference custom option"), textStep(["input"], "reference custom text")];
+	const fireAndForget = new Set(["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"]);
 	const onLine = (rawLine: string): void => {
 		const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
 		if (!line) return;
 		try {
 			const event = record(JSON.parse(line), "RPC stdout must contain JSON objects");
 			events.push(event);
-			if (event.type === "extension_ui_request" && event.method === "select") {
-				if (cancellationResponses !== 0) throw new Error("hosted questionnaire requested more than one selection dialog");
-				if (typeof event.id !== "string") throw new Error("selection request must have an RPC id");
-				cancellationResponses += 1;
-				send({ type: "extension_ui_response", id: event.id, cancelled: true });
+			if (event.type === "extension_ui_request") {
+				if (typeof event.method !== "string") throw new Error("extension UI request method must be a string");
+				if (!fireAndForget.has(event.method)) {
+					const step = plannedDialogs[dialogIndex];
+					if (!step) throw new Error(`unexpected or extra extension dialog: ${event.method}`);
+					observedDialogMethods.push(event.method);
+					step(event);
+					dialogIndex += 1;
+				}
 			}
 			if (event.type === "agent_settled") { completionClaimed = true; resolveCompletion(); }
 		} catch (error) { fail(error); }
@@ -187,6 +249,8 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 		child.stdin?.end();
 		exit = await withTimeout(exited, 5_000, `Pi child ${childPid} exit`);
 		assert.equal(exit.code, 0, `Pi child exited with ${exit.signal ?? exit.code}; stderr: ${stderr}`);
+		assert.equal(dialogIndex, plannedDialogs.length, "planned hosted questionnaire dialog sequence was not fully consumed");
+		assert.equal(observedDialogMethods.length, plannedDialogs.length, "hosted questionnaire dialog count changed");
 		return { events, cancellationResponses };
 	} finally {
 		if (!exit) {
@@ -197,7 +261,7 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	}
 }
 
-test("hosted real Pi cancellation compares owned and public reference", async (t) => {
+test("hosted real Pi RPC compares owned and public reference", async (t) => {
 	const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
 	assert.equal(repoRoot, CHECKOUT_ROOT);
 	const candidatePath = join(repoRoot, "extensions", "ask-user-question.ts");
@@ -210,21 +274,34 @@ test("hosted real Pi cancellation compares owned and public reference", async (t
 	await assert.rejects(access(repoRoot, constants.W_OK));
 	const cliPath = resolvePiCli(repoRoot);
 	const cases: HostedCase[] = [
-		{ name: "owned", candidatePath, reference: false },
-		{ name: "reference", candidatePath: REFERENCE_EXTENSION_PATH, expectedSourcePath: REFERENCE_EXTENSION_PATH, reference: true },
+		{ name: "owned", candidatePath, reference: false, scenario: "cancel" },
+		{ name: "reference", candidatePath: REFERENCE_EXTENSION_PATH, expectedSourcePath: REFERENCE_EXTENSION_PATH, reference: true, scenario: "cancel" },
+		{ name: "owned", candidatePath, reference: false, scenario: "single" },
+		{ name: "reference", candidatePath: REFERENCE_EXTENSION_PATH, expectedSourcePath: REFERENCE_EXTENSION_PATH, reference: true, scenario: "single" },
+		{ name: "owned", candidatePath, reference: false, scenario: "custom" },
+		{ name: "reference", candidatePath: REFERENCE_EXTENSION_PATH, expectedSourcePath: REFERENCE_EXTENSION_PATH, reference: true, scenario: "custom" },
 	];
-	const comparable: ComparableResult[] = [];
-	for (const scenario of cases) {
-		await t.test(`hosted ${scenario.name} cancellation`, async (caseTest) => {
-			assertHostedIsolation(scenario.reference === true);
-			const sandbox = await mkdtemp(join(tmpdir(), `gentle-pi-hosted-rpc-${scenario.name}-`));
+	const comparable = new Map<HostedScenario, ComparableResult[]>();
+	for (const testCase of cases) {
+		await t.test(`hosted ${testCase.name} ${testCase.scenario}`, async (caseTest) => {
+			assertHostedIsolation(testCase.reference === true);
+			const sandbox = await mkdtemp(join(tmpdir(), `gentle-pi-hosted-rpc-${testCase.name}-${testCase.scenario}-`));
 			caseTest.after(async () => { await rm(sandbox, { recursive: true, force: true }); });
-			const result = await runRpc(cliPath, scenario.candidatePath, fixturePath, sandbox, scenario.expectedSourcePath);
-			assert.equal(result.cancellationResponses, 1);
-			for (const marker of MARKERS) assert.equal(notificationCount(result.events, marker), 1, marker);
+			const result = await runRpc(cliPath, testCase.candidatePath, fixturePath, sandbox, testCase.expectedSourcePath, testCase.scenario);
+			const cancelled = testCase.scenario === "cancel";
+			assert.equal(result.cancellationResponses, cancelled ? 1 : 0);
+			for (const marker of MARKERS) assert.equal(notificationCount(result.events, marker), marker === CANCELLED_MARKER ? (cancelled ? 1 : 0) : 1, marker);
+			assert.equal(notificationCount(result.events, COMPLETED_MARKER), cancelled ? 0 : 1, COMPLETED_MARKER);
+			const dialogs = result.events.filter((event) => event.type === "extension_ui_request" && ["select", "input", "editor", "confirm"].includes(String(event.method)));
+			const dialogMethods = dialogs.map((event) => String(event.method));
+			if (cancelled) assert.deepEqual(dialogMethods, ["select"]);
+			else if (testCase.name === "owned" && testCase.scenario === "single") assert.deepEqual(dialogMethods, ["select", "select", "select"]);
+			else if (testCase.name === "owned") { assert.equal(dialogMethods[0], "select"); assert.ok(dialogMethods[1] === "editor" || dialogMethods[1] === "input"); assert.equal(dialogMethods[2], "select"); }
+			else if (testCase.scenario === "single") assert.deepEqual(dialogMethods, ["select"]);
+			else assert.deepEqual(dialogMethods, ["select", "input"]);
 			const selection = result.events.filter((event) => event.type === "extension_ui_request" && event.method === "select");
-			assert.equal(selection.length, 1);
-			if (scenario.name === "owned") {
+			assert.equal(selection.length, cancelled ? 1 : testCase.name === "owned" ? testCase.scenario === "single" ? 3 : 2 : 1);
+			if (cancelled && testCase.name === "owned") {
 				assert.match(String(selection[0]!.title), /Which layout should we inspect/);
 				assert.deepEqual(selection[0]!.options, ["Choose an option", "Use custom text", "Skip", "Submit", "Submit partial", "Cancel"]);
 			}
@@ -236,31 +313,37 @@ test("hosted real Pi cancellation compares owned and public reference", async (t
 			const execution = record(toolEnds[0]!.result, "tool execution result");
 			assert.equal(toolEnds[0]!.isError, false);
 			const executionDetails = record(execution.details, "tool execution details");
-			assert.equal(executionDetails.cancelled, true);
-			assert.deepEqual(executionDetails.answers, []);
 			const messages = result.events.filter((event) => event.type === "message_end").map((event) => record(event.message, "message_end message"));
 			const toolResult = messages.find((message) => message.role === "toolResult" && message.toolName === TOOL_NAME);
 			assert.ok(toolResult);
 			assert.equal(toolResult.isError, false);
 			const toolResultDetails = record(toolResult.details, "tool result details");
-			assert.equal(toolResultDetails.cancelled, true);
-			assert.deepEqual(toolResultDetails.answers, []);
+			if (testCase.scenario === "cancel") {
+				assert.equal(executionDetails.cancelled, true);
+				assert.deepEqual(executionDetails.answers, []);
+				assert.equal(toolResultDetails.cancelled, true);
+				assert.deepEqual(toolResultDetails.answers, []);
+			} else {
+				assertSuccessfulResult(execution.content, executionDetails, testCase.scenario);
+				assertSuccessfulResult(toolResult.content, toolResultDetails, testCase.scenario);
+			}
 			const assistants = messages.filter((message) => message.role === "assistant");
 			assert.ok(assistants.length >= 2);
 			const finalAssistant = assistants[assistants.length - 1]!;
 			assert.equal(finalAssistant.stopReason, "stop");
 			const content = Array.isArray(finalAssistant.content) ? finalAssistant.content : [];
-			assert.ok(content.some((block) => record(block, "assistant content").text === FINAL_TEXT));
+			assert.ok(content.some((block) => record(block, "assistant content").text === FINAL_TEXT[testCase.scenario]));
 			assert.equal(result.events.filter((event) => event.type === "agent_settled").length, 1);
-			comparable.push({
-				cancellationResult: { content: execution.content, details: { cancelled: executionDetails.cancelled, answers: executionDetails.answers } },
-				promptProjection: promptProjection(result.events),
-				blocked: blockedSequence(result.events),
-			});
+			const scenarioResults = comparable.get(testCase.scenario) ?? [];
+			scenarioResults.push({ result: { content: execution.content, details: { cancelled: executionDetails.cancelled, answers: executionDetails.answers } }, promptProjection: promptProjection(result.events), blocked: blockedSequence(result.events) });
+			comparable.set(testCase.scenario, scenarioResults);
 		});
 	}
-	assert.equal(comparable.length, cases.length);
-	assert.deepEqual(comparable[1]!.cancellationResult, comparable[0]!.cancellationResult, "public cancellation result parity");
-	assert.deepEqual(comparable[1]!.promptProjection, comparable[0]!.promptProjection, "JSON-safe prompt projection parity");
-	assert.deepEqual(comparable[1]!.blocked, comparable[0]!.blocked, "blocked-event sequence parity");
+	for (const scenario of ["cancel", "single", "custom"] as const) {
+		const pair = comparable.get(scenario) ?? [];
+		assert.equal(pair.length, 2, `${scenario} must have owned and reference results`);
+		assert.deepEqual(pair[1]!.result, pair[0]!.result, scenario === "cancel" ? "public cancellation result parity" : `public ${scenario} result parity`);
+		assert.deepEqual(pair[1]!.promptProjection, pair[0]!.promptProjection, `${scenario} JSON-safe prompt projection parity`);
+		assert.deepEqual(pair[1]!.blocked, pair[0]!.blocked, `${scenario} blocked-event sequence parity`);
+	}
 });

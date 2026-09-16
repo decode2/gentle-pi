@@ -10,20 +10,46 @@ const TOOL_NAME = "ask_user_question";
 const TOOL_CALL_ID = "hosted-questionnaire-call-1";
 const PROMPT_EVENT = "rpiv:ask-user:prompt";
 const BLOCKED_EVENT = "rpiv:ask-user:blocked";
-const FINAL_TEXT = "Synthetic provider completed after questionnaire cancellation.";
-const MARKERS = { session: "hosted:session_start", beforeAgent: "hosted:before_agent_start", registered: "hosted:ask_user_question:registered", invoked: "hosted:ask_user_question:invoked", cancelled: "hosted:ask_user_question:cancelled", prompt: "hosted:rpiv:ask-user:prompt", blocked: (active: boolean) => `hosted:rpiv:ask-user:blocked:${active}` } as const;
+const QUESTION = "Which layout should we inspect?";
+const CUSTOM_ANSWER = "  leading  internal\ntrailing  ";
+const FINAL_TEXT = {
+	cancel: "Synthetic provider completed after questionnaire cancellation.",
+	single: "Synthetic provider completed after questionnaire single selection.",
+	custom: "Synthetic provider completed after questionnaire custom response.",
+} as const;
+const MARKERS = { session: "hosted:session_start", beforeAgent: "hosted:before_agent_start", registered: "hosted:ask_user_question:registered", invoked: "hosted:ask_user_question:invoked", cancelled: "hosted:ask_user_question:cancelled", completed: "hosted:ask_user_question:completed", prompt: "hosted:rpiv:ask-user:prompt", blocked: (active: boolean) => `hosted:rpiv:ask-user:blocked:${active}` } as const;
+const HOSTED_SCENARIOS = ["cancel", "single", "custom"] as const;
+type HostedScenario = (typeof HOSTED_SCENARIOS)[number];
 const OWNED_SOURCE_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "../../extensions/ask-user-question.ts");
 const REFERENCE_SOURCE_PATH = "/reference/node_modules/@juicesharp/rpiv-ask-user-question/index.ts";
 const expectedSourcePath = process.env.GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH ?? OWNED_SOURCE_PATH;
 if (expectedSourcePath !== OWNED_SOURCE_PATH && expectedSourcePath !== REFERENCE_SOURCE_PATH) throw new Error(`unsupported hosted questionnaire source path: ${expectedSourcePath}`);
-const QUESTION_ARGUMENTS = { questions: [{ question: "Which layout should we inspect?", header: "Layout", options: [{ label: "Compact", description: "Use a compact layout." }, { label: "Detailed", description: "Use a detailed layout." }] }] };
+const scenarioValue = process.env.GENTLE_PI_HOSTED_SCENARIO;
+if (scenarioValue !== undefined && !(HOSTED_SCENARIOS as readonly string[]).includes(scenarioValue)) throw new Error(`unsupported hosted questionnaire scenario: ${scenarioValue}`);
+const expectedScenario: HostedScenario = (scenarioValue as HostedScenario | undefined) ?? "cancel";
+const QUESTION_ARGUMENTS = { questions: [{ question: QUESTION, header: "Layout", options: [{ label: "Compact", description: "Use a compact layout." }, { label: "Detailed", description: "Use a detailed layout." }] }] };
 type PromptProjection = { questions: { question: string; header: string; multiSelect: boolean; options: { label: string; description: string; hasPreview: boolean }[] }[] };
-const observed = { session: false, beforeAgent: false, registered: false, invoked: false, cancelled: false, prompt: 0, promptProjection: undefined as string | undefined, blocked: [] as boolean[] };
+const observed = { session: false, beforeAgent: false, registered: false, invoked: false, cancelled: false, completed: false, prompt: 0, promptProjection: undefined as string | undefined, blocked: [] as boolean[] };
 const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 let notify: ((message: string) => void) | undefined;
 let questionIssued = false;
 
 function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
+function expectedAnswer(scenario: Exclude<HostedScenario, "cancel">): Record<string, unknown> {
+	return { questionIndex: 0, question: QUESTION, kind: scenario === "single" ? "option" : "custom", answer: scenario === "single" ? "Compact" : CUSTOM_ANSWER };
+}
+function textContent(value: unknown): string | undefined {
+	if (!isRecord(value) || !Array.isArray(value.content) || value.content.length !== 1) return undefined;
+	const block = value.content[0];
+	return isRecord(block) && block.type === "text" && typeof block.text === "string" ? block.text : undefined;
+}
+function successfulResult(value: unknown, scenario: HostedScenario): boolean {
+	if (scenario === "cancel" || !isRecord(value) || !isRecord(value.details) || value.details.cancelled !== false || !Array.isArray(value.details.answers) || value.details.answers.length !== 1) return false;
+	const expected = expectedAnswer(scenario);
+	const answer = value.details.answers[0];
+	return isRecord(answer) && Object.keys(answer).length === Object.keys(expected).length && Object.entries(expected).every(([key, field]) => answer[key] === field)
+		&& textContent(value) === `User has answered your questions: "${QUESTION}"="${expected.answer}". You can now continue with the user's answers in mind.`;
+}
 function projectPrompt(value: unknown): PromptProjection | undefined {
 	if (!isRecord(value) || !Array.isArray(value.questions)) return undefined;
 	const questions: PromptProjection["questions"] = [];
@@ -75,11 +101,15 @@ function streamSynthetic(model: Model<any>, context: Context, options?: SimpleSt
 			output.stopReason = "toolUse";
 			stream.push({ type: "done", reason: "toolUse", message: output });
 		} else {
-			if (!observed.session || !observed.beforeAgent || !observed.registered || !observed.invoked || observed.prompt !== 1 || observed.promptProjection === undefined || observed.blocked.join(",") !== "true,false" || !observed.cancelled || result?.isError || !cancelledDetails(result?.details)) throw new Error("hosted questionnaire observer contract was incomplete");
+			const expectedResultObserved = expectedScenario === "cancel"
+				? observed.cancelled && cancelledDetails(result?.details)
+				: observed.completed && successfulResult(result, expectedScenario);
+			if (!observed.session || !observed.beforeAgent || !observed.registered || !observed.invoked || observed.prompt !== 1 || observed.promptProjection === undefined || observed.blocked.join(",") !== "true,false" || !expectedResultObserved || result?.isError) throw new Error("hosted questionnaire observer contract was incomplete");
+			const finalText = FINAL_TEXT[expectedScenario];
 			output.content.push({ type: "text", text: "" });
-			stream.push({ type: "text_start", contentIndex: 0, partial: output }); const block = output.content[0]; if (block?.type !== "text") throw new Error("synthetic text block was not created"); block.text = FINAL_TEXT;
-			stream.push({ type: "text_delta", contentIndex: 0, delta: FINAL_TEXT, partial: output });
-			stream.push({ type: "text_end", contentIndex: 0, content: FINAL_TEXT, partial: output });
+			stream.push({ type: "text_start", contentIndex: 0, partial: output }); const block = output.content[0]; if (block?.type !== "text") throw new Error("synthetic text block was not created"); block.text = finalText;
+			stream.push({ type: "text_delta", contentIndex: 0, delta: finalText, partial: output });
+			stream.push({ type: "text_end", contentIndex: 0, content: finalText, partial: output });
 			output.stopReason = "stop";
 			stream.push({ type: "done", reason: "stop", message: output });
 		}
@@ -103,9 +133,16 @@ export default function (pi: ExtensionAPI): void {
 	});
 	pi.on("tool_execution_start", (event) => { if (event.toolName === TOOL_NAME) { observed.invoked = true; mark(MARKERS.invoked); } });
 	pi.on("tool_execution_end", (event) => {
-		if (event.toolName !== TOOL_NAME || event.isError || !isRecord(event.result) || !cancelledDetails(event.result.details)) return;
-		observed.cancelled = true;
-		mark(MARKERS.cancelled);
+		if (event.toolName !== TOOL_NAME || event.isError || !isRecord(event.result)) return;
+		if (expectedScenario === "cancel") {
+			if (!cancelledDetails(event.result.details)) return;
+			observed.cancelled = true;
+			mark(MARKERS.cancelled);
+			return;
+		}
+		if (!successfulResult(event.result, expectedScenario)) return;
+		observed.completed = true;
+		mark(MARKERS.completed);
 	});
 	pi.events.on(PROMPT_EVENT, (data) => {
 		const projection = projectPrompt(data);
