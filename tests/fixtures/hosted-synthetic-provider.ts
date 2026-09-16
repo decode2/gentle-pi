@@ -140,7 +140,21 @@ export default function (pi: ExtensionAPI): void {
 			mark(MARKERS.cancelled);
 			return;
 		}
-		if (!successfulResult(event.result, expectedScenario)) return;
+		if (!successfulResult(event.result, expectedScenario)) {
+			const details = isRecord(event.result) ? event.result.details : undefined;
+			const answers = isRecord(details) ? details.answers : undefined;
+			const answer = Array.isArray(answers) ? answers[0] : undefined;
+			const hasOwnPreview = isRecord(answer) && Object.prototype.hasOwnProperty.call(answer, "preview");
+			const renderedText = textContent(event.result);
+			mark(`hosted:questionnaire-result-rejected:${JSON.stringify({
+				scenario: expectedScenario,
+				answerKeys: isRecord(answer) ? Object.keys(answer) : [],
+				hasOwnPreview,
+				previewType: isRecord(answer) ? typeof answer.preview : "undefined",
+				textContent: renderedText === undefined ? null : renderedText.slice(0, 500),
+			})}`);
+			return;
+		}
 		observed.completed = true;
 		mark(MARKERS.completed);
 	});

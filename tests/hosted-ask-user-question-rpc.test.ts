@@ -291,7 +291,7 @@ test("hosted real Pi RPC compares owned and public reference", async (t) => {
 			const cancelled = testCase.scenario === "cancel";
 			assert.equal(result.cancellationResponses, cancelled ? 1 : 0);
 			for (const marker of MARKERS) assert.equal(notificationCount(result.events, marker), marker === CANCELLED_MARKER ? (cancelled ? 1 : 0) : 1, marker);
-			assert.equal(notificationCount(result.events, COMPLETED_MARKER), cancelled ? 0 : 1, COMPLETED_MARKER);
+			assert.equal(notificationCount(result.events, COMPLETED_MARKER), cancelled ? 0 : 1, `${COMPLETED_MARKER}; ${notificationMessages(result.events).filter((message) => message.startsWith("hosted:questionnaire-result-rejected:")).slice(0, 4).map((message) => message.slice(0, 800)).join("\n").slice(0, 2000)}`);
 			const dialogs = result.events.filter((event) => event.type === "extension_ui_request" && ["select", "input", "editor", "confirm"].includes(String(event.method)));
 			const dialogMethods = dialogs.map((event) => String(event.method));
 			if (cancelled) assert.deepEqual(dialogMethods, ["select"]);
