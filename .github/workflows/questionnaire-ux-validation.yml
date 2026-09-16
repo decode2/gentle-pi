@@ -22,6 +22,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ github.sha }}
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -40,6 +41,7 @@ jobs:
           head_sha="$(git rev-parse HEAD)"
           printf 'github.sha=%s\nhead=%s\nos=%s\nnode=%s\npnpm=%s\n' "$GITHUB_SHA" "$head_sha" "$RUNNER_OS" "$(node --version)" "$(pnpm --version)"
           test "$head_sha" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
 
       - name: Install dependencies without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
@@ -66,6 +68,7 @@ jobs:
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
         with:
           ref: ${{ matrix.expected_sha }}
+          persist-credentials: false
 
       - name: Setup pnpm
         uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
@@ -84,6 +87,7 @@ jobs:
           head_sha="$(git rev-parse HEAD)"
           printf 'target=%s\ngithub.sha=%s\nexpected_sha=%s\nhead=%s\nos=%s\nnode=%s\npnpm=%s\n' "$TARGET" "$GITHUB_SHA" "$EXPECTED_SHA" "$head_sha" "$RUNNER_OS" "$(node --version)" "$(pnpm --version)"
           test "$head_sha" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain)"
 
       - name: Install dependencies without lifecycle scripts
         run: pnpm install --frozen-lockfile --ignore-scripts
@@ -122,4 +126,101 @@ jobs:
             tests/question-external-editor-wiring.test.ts \
             tests/ask-user-choice.test.ts \
             tests/tui-presentation-driver.test.ts \
-            tests/rpc-presentation-driver.test.ts
+            tests/rpc-presentation-driver.test.ts \
+            tests/hosted-ask-user-question-rpc.test.ts \
+            tests/fixtures/hosted-synthetic-provider.ts
+
+  hosted-rpc-cancellation:
+    name: Hosted RPC cancellation (isolated Docker)
+    if: github.repository == 'decode2/gentle-pi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Setup pnpm
+        uses: pnpm/action-setup@b906affcce14559ad1aafd4ab0e942779e9f58b1 # v4
+        with:
+          version: 11.1.1
+
+      - name: Setup Node.js 24
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+          cache: pnpm
+
+      - name: Verify clean exact checkout
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$GITHUB_SHA"
+          test -z "$(git status --porcelain)"
+
+      - name: Install frozen dependencies without lifecycle scripts
+        run: pnpm install --frozen-lockfile --ignore-scripts
+
+      - name: Record hosted runtime provenance
+        shell: bash
+        run: |
+          set -euo pipefail
+          pi_entry="$(node -e 'console.log(require.resolve("@earendil-works/pi-coding-agent"))')"
+          pi_root="$(dirname "$(dirname "$pi_entry")")"
+          pi_metadata="$(node -e 'const fs=require("node:fs"), path=require("node:path"); const p=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const bin=typeof p.bin==="string" ? p.bin : p.bin?.pi; const cli=typeof bin==="string" ? path.resolve(process.argv[2], bin) : ""; if (p.name!=="@earendil-works/pi-coding-agent" || p.version!=="0.85.1" || typeof bin!=="string" || !fs.statSync(cli).isFile()) throw new Error("invalid hosted Pi package metadata"); console.log(JSON.stringify({name:p.name, version:p.version, bin:p.bin, cli}));' "$pi_root/package.json" "$pi_root")"
+          pi_version="$(node -e 'console.log(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).version)' "$pi_root/package.json")"
+          test "$pi_version" = "0.85.1"
+          printf 'head=%s\nlock_sha256=%s\nnode=%s\npnpm=%s\npi_entry=%s\npi_metadata=%s\n' \
+            "$(git rev-parse HEAD)" "$(sha256sum pnpm-lock.yaml | cut -d' ' -f1)" "$(node --version)" "$(pnpm --version)" "$pi_entry" "$pi_metadata"
+
+      - name: Pull and pin Node 24 candidate image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v docker >/dev/null
+          docker info >/dev/null
+          docker pull node:24-bookworm-slim
+          image_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' node:24-bookworm-slim)"
+          image_id="$(docker image inspect --format '{{.Id}}' node:24-bookworm-slim)"
+          case "$image_ref" in node@sha256:*) ;; *) echo "missing immutable image digest" >&2; exit 1;; esac
+          test -n "$image_id"
+          printf 'image_ref=%s\nimage_id=%s\n' "$image_ref" "$image_id"
+          printf 'ref=%s\nid=%s\n' "$image_ref" "$image_id" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Docker isolation readback
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            /usr/local/bin/node --input-type=module -e 'import { readFileSync } from "node:fs"; import { networkInterfaces } from "node:os"; const mounts = readFileSync("/proc/self/mountinfo", "utf8").split(String.fromCharCode(10)).map((line) => line.split(" - ")[0]?.split(" ")).filter(Boolean); const opts = (point) => mounts.find((fields) => fields[4] === point)?.[5]?.split(",") ?? []; const status = readFileSync("/proc/self/status", "utf8").split(String.fromCharCode(10)); const noNewPrivs = status.some((line) => line.startsWith("NoNewPrivs:") && line.trim().endsWith("1")); const capsDropped = status.some((line) => line.startsWith("CapEff:") && [...(line.split(":")[1]?.trim() ?? "")].every((char) => char === "0")); if (!opts("/").includes("ro") || !opts("/workspace").includes("ro") || process.getuid() !== 1000 || !noNewPrivs || !capsDropped || Object.keys(networkInterfaces()).some((name) => name !== "lo")) throw new Error("Docker isolation readback failed"); console.log(`uid=${process.getuid()} node=${process.version} network=none rootfs=ro checkout=ro caps=0 no_new_privs=1`);'
+
+      - name: Run hosted RPC cancellation in isolated container
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/tmp/hosted-home USERPROFILE=/tmp/hosted-userprofile \
+            XDG_CONFIG_HOME=/tmp/hosted-xdg-config XDG_CACHE_HOME=/tmp/hosted-xdg-cache \
+            XDG_DATA_HOME=/tmp/hosted-xdg-data XDG_STATE_HOME=/tmp/hosted-xdg-state \
+            XDG_RUNTIME_DIR=/tmp/hosted-xdg-runtime TMPDIR=/tmp \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            /usr/local/bin/node --experimental-strip-types --test /workspace/tests/hosted-ask-user-question-rpc.test.ts
