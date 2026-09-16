@@ -167,7 +167,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          pi_entry="$(node -e 'console.log(require.resolve("@earendil-works/pi-coding-agent"))')"
+          pi_entry="$(node --input-type=module -e 'import { fileURLToPath } from "node:url"; console.log(fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")))')"
           pi_root="$(dirname "$(dirname "$pi_entry")")"
           pi_metadata="$(node -e 'const fs=require("node:fs"), path=require("node:path"); const p=JSON.parse(fs.readFileSync(process.argv[1], "utf8")); const bin=typeof p.bin==="string" ? p.bin : p.bin?.pi; const cli=typeof bin==="string" ? path.resolve(process.argv[2], bin) : ""; if (p.name!=="@earendil-works/pi-coding-agent" || p.version!=="0.85.1" || typeof bin!=="string" || !fs.statSync(cli).isFile()) throw new Error("invalid hosted Pi package metadata"); console.log(JSON.stringify({name:p.name, version:p.version, bin:p.bin, cli}));' "$pi_root/package.json" "$pi_root")"
           pi_version="$(node -e 'console.log(JSON.parse(require("node:fs").readFileSync(process.argv[1], "utf8")).version)' "$pi_root/package.json")"

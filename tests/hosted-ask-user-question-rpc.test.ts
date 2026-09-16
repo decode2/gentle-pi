@@ -1,6 +1,5 @@
 import assert from "node:assert/strict";
 import { spawn } from "node:child_process";
-import { createRequire } from "node:module";
 import { readFileSync } from "node:fs";
 import { access, constants, mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { networkInterfaces, tmpdir } from "node:os";
@@ -44,7 +43,7 @@ function assertHostedIsolation(): void {
 }
 
 function resolvePiCli(repoRoot: string): string {
-	const entry = createRequire(import.meta.url).resolve("@earendil-works/pi-coding-agent"), packageRoot = dirname(dirname(entry));
+	const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent")), packageRoot = dirname(dirname(entry));
 	const metadata = JSON.parse(readFileSync(join(packageRoot, "package.json"), "utf8")) as PiPackage;
 	assert.equal(metadata.name, "@earendil-works/pi-coding-agent"); assert.equal(metadata.version, "0.85.1");
 	const bin = typeof metadata.bin === "string" ? metadata.bin : metadata.bin?.pi;
