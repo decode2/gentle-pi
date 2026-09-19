@@ -1,4 +1,5 @@
-import { dirname, resolve } from "node:path";
+import { readFileSync } from "node:fs";
+import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createAssistantMessageEventStream, type AssistantMessage, type AssistantMessageEventStream, type Context, type Model, type SimpleStreamOptions, type ToolCall, type ToolResultMessage } from "@earendil-works/pi-ai";
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
@@ -35,6 +36,9 @@ type AnsweredScenario = Exclude<HostedScenario, "cancel" | "partial-cancel" | "s
 const SCHEMA_NOTIFICATION_MAX = 24_000;
 const RELOAD_MODE = process.env.GENTLE_PI_HOSTED_RELOAD === "1";
 const RELOAD_TELEMETRY_PREFIX = "hosted:reload-telemetry:";
+const PACKAGE_COMPOSITION_PREFIX = "hosted:package-composition:";
+const HOSTED_PACKAGE_CASES = ["external-only", "candidate-only", "candidate-external-filtered"] as const;
+type HostedPackageCase = (typeof HOSTED_PACKAGE_CASES)[number];
 const GENERATION_KEY = Symbol.for("gentle-pi.hosted-questionnaire.synthetic-generation-v1");
 function isInvalidScenario(scenario: HostedScenario): scenario is InvalidScenario { return scenario.startsWith("invalid-"); }
 
@@ -77,6 +81,13 @@ const OWNED_SOURCE_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "../.
 const REFERENCE_SOURCE_PATH = "/reference/node_modules/@juicesharp/rpiv-ask-user-question/index.ts";
 const expectedSourcePath = process.env.GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH ?? OWNED_SOURCE_PATH;
 if (expectedSourcePath !== OWNED_SOURCE_PATH && expectedSourcePath !== REFERENCE_SOURCE_PATH) throw new Error(`unsupported hosted questionnaire source path: ${expectedSourcePath}`);
+const packageCaseValue = process.env.GENTLE_PI_HOSTED_PACKAGE_CASE;
+if (packageCaseValue !== undefined && !(HOSTED_PACKAGE_CASES as readonly string[]).includes(packageCaseValue)) throw new Error(`unsupported hosted questionnaire package case: ${packageCaseValue}`);
+const expectedPackageCase = packageCaseValue as HostedPackageCase | undefined;
+if (expectedPackageCase !== undefined) {
+	const expectedPackageSource = expectedPackageCase === "external-only" ? REFERENCE_SOURCE_PATH : OWNED_SOURCE_PATH;
+	if (expectedSourcePath !== expectedPackageSource) throw new Error(`package case/source mismatch: ${expectedPackageCase} -> ${expectedSourcePath}`);
+}
 const scenarioValue = process.env.GENTLE_PI_HOSTED_SCENARIO;
 if (scenarioValue !== undefined && !(HOSTED_SCENARIOS as readonly string[]).includes(scenarioValue)) throw new Error(`unsupported hosted questionnaire scenario: ${scenarioValue}`);
 const expectedScenario: HostedScenario = (scenarioValue as HostedScenario | undefined) ?? "cancel";
@@ -118,6 +129,39 @@ type PromptProjection = { questions: { question: string; header: string; multiSe
 const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 
 function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
+type HostedPackageEntry = { source: string; extensions: string[]; skills: string[]; prompts: string[]; themes: string[] };
+type HostedPackageProfile = { packages: HostedPackageEntry[]; root: { extensions: string[]; skills: string[]; prompts: string[]; themes: string[] } };
+function readStringArray(value: unknown, label: string): string[] {
+	if (!Array.isArray(value) || !value.every((item) => typeof item === "string")) throw new Error(`${label} must be a string array`);
+	return [...value];
+}
+function readPackageEntry(value: unknown, index: number): HostedPackageEntry {
+	if (!isRecord(value) || typeof value.source !== "string") throw new Error(`package entry ${index} is invalid`);
+	if (Object.keys(value).sort().join(",") !== "extensions,prompts,skills,source,themes") throw new Error(`package entry ${index} shape changed`);
+	return {
+		source: value.source,
+		extensions: readStringArray(value.extensions, `package entry ${index}.extensions`),
+		skills: readStringArray(value.skills, `package entry ${index}.skills`),
+		prompts: readStringArray(value.prompts, `package entry ${index}.prompts`),
+		themes: readStringArray(value.themes, `package entry ${index}.themes`),
+	};
+}
+function readPackageProfile(): HostedPackageProfile {
+	const agentDir = process.env.PI_CODING_AGENT_DIR;
+	if (typeof agentDir !== "string" || agentDir.length === 0) throw new Error("package mode requires PI_CODING_AGENT_DIR");
+	const settings = JSON.parse(readFileSync(join(agentDir, "settings.json"), "utf8")) as unknown;
+	if (!isRecord(settings) || Object.keys(settings).sort().join(",") !== "extensions,packages,prompts,skills,themes") throw new Error("package settings shape changed");
+	if (!Array.isArray(settings.packages)) throw new Error("package settings packages must be an array");
+	return {
+		packages: settings.packages.map((entry, index) => readPackageEntry(entry, index)),
+		root: {
+			extensions: readStringArray(settings.extensions, "root.extensions"),
+			skills: readStringArray(settings.skills, "root.skills"),
+			prompts: readStringArray(settings.prompts, "root.prompts"),
+			themes: readStringArray(settings.themes, "root.themes"),
+		},
+	};
+}
 function expectedAnswer(scenario: AnsweredScenario): Record<string, unknown> {
 	if (scenario === "single") return { questionIndex: 0, question: QUESTION, kind: "option", answer: "Compact" };
 	if (scenario === "custom") return { questionIndex: 0, question: QUESTION, kind: "custom", answer: CUSTOM_ANSWER };
@@ -199,6 +243,23 @@ function notifyToolSchema(pi: ExtensionAPI, state: FixtureState): void {
 	if (encoded === undefined) return mark(state, `${MARKERS.schema}error:not-json-serializable`);
 	if (encoded.length > SCHEMA_NOTIFICATION_MAX) return mark(state, `${MARKERS.schema}error:too-large`);
 	mark(state, `${MARKERS.schema}${encoded}`);
+}
+function notifyPackageComposition(pi: ExtensionAPI, state: FixtureState): void {
+	if (expectedPackageCase === undefined) return;
+	const tools = pi.getAllTools();
+	const questionnaireTools = tools.filter((tool) => tool.name === TOOL_NAME);
+	const payload = {
+		packageCase: expectedPackageCase,
+		profile: readPackageProfile(),
+		inventory: {
+			allToolNames: tools.map((tool) => tool.name),
+			questionnaireCount: questionnaireTools.length,
+			questionnaire: questionnaireTools.map((tool) => ({ name: tool.name, sourceInfoPath: tool.sourceInfo?.path ?? null })),
+		},
+	};
+	const encoded = JSON.stringify(payload);
+	if (encoded.length > 8_000) throw new Error("package composition telemetry exceeded its bound");
+	mark(state, `${PACKAGE_COMPOSITION_PREFIX}${encoded}`);
 }
 function isPublicValidationText(value: unknown): value is string {
 	return typeof value === "string" && value.trim().length > 0 && !/SyntaxError|ReferenceError|TypeError|Cannot find module|ERR_MODULE_NOT_FOUND|jiti|loader|compile|transpil|stack trace/i.test(value);
@@ -305,6 +366,7 @@ export default function (pi: ExtensionAPI): void {
 		emit(MARKERS.beforeAgent);
 		if (state.observed.registered) emit(MARKERS.registered);
 		notifyToolSchema(pi, state);
+		notifyPackageComposition(pi, state);
 	});
 	pi.on("tool_execution_start", (event) => { if (event.toolName === TOOL_NAME) { state.observed.invoked = true; trace(state, "tool_callback", { phase: "execution_start", toolCallId: event.toolCallId }); emit(MARKERS.invoked); } });
 	pi.on("tool_call", (event) => { if (event.toolName === TOOL_NAME) { state.observed.toolCall = true; trace(state, "tool_callback", { phase: "call", toolCallId: event.toolCallId }); emit(MARKERS.toolCall); } });

@@ -35,7 +35,9 @@ const COMPLETED_MARKER = "hosted:ask_user_question:completed";
 const ISOLATION_MARKER = "docker-network-none-readonly-v1";
 const OWNED_EXTENSION_PATH = `${CHECKOUT_ROOT}/extensions/ask-user-question.ts`;
 const REFERENCE_EXTENSION_PATH = `${REFERENCE_ROOT}/node_modules/@juicesharp/rpiv-ask-user-question/index.ts`;
+const REFERENCE_PACKAGE_ROOT = `${REFERENCE_ROOT}/node_modules/@juicesharp/rpiv-ask-user-question`;
 const FIXTURE_PATH = `${CHECKOUT_ROOT}/tests/fixtures/hosted-synthetic-provider.ts`;
+const PACKAGE_COMPOSITION_PREFIX = "hosted:package-composition:";
 const PROMPT_PROJECTION_PREFIX = "hosted:rpiv:ask-user:prompt:projection:";
 const SCHEMA_PROJECTION_PREFIX = "hosted:ask_user_question:schema:";
 const RELOAD_TELEMETRY_PREFIX = "hosted:reload-telemetry:";
@@ -62,6 +64,10 @@ type InvalidScenario = "invalid-missing-questions" | "invalid-empty-questions" |
 type AnsweredScenario = Exclude<HostedScenario, "cancel" | "partial-cancel" | "schema-positive" | InvalidScenario>;
 type RunResult = { events: RpcRecord[]; cancellationResponses: number; childPid: number };
 type HostedCase = { name: "owned" | "reference"; candidatePath: string; expectedSourcePath?: string; reference: boolean; scenario: HostedScenario };
+type HostedPackageCase = "external-only" | "candidate-only" | "candidate-external-filtered";
+type HostedPackageEntry = { source: string; extensions: string[]; skills: string[]; prompts: string[]; themes: string[] };
+type HostedPackageSettings = { packages: HostedPackageEntry[]; extensions: string[]; skills: string[]; prompts: string[]; themes: string[] };
+type HostedPackageProfile = { packages: HostedPackageEntry[]; root: { extensions: string[]; skills: string[]; prompts: string[]; themes: string[] } };
 type StableResult = { content: unknown; details: { cancelled: unknown; answers: unknown } };
 type ComparableResult = { result: StableResult; promptProjection: RpcRecord; blocked: boolean[] };
 
@@ -94,6 +100,29 @@ function resolvePiCli(repoRoot: string): string {
 	if (typeof bin !== "string") throw new Error("Pi package has no public pi bin");
 	assert.equal(bin, "dist/bundle/cli.js"); const cliPath = resolve(packageRoot, bin);
 	assert.ok(relative(repoRoot, cliPath).startsWith("node_modules")); return cliPath;
+}
+
+function hostedPackageEntry(source: string, extensions: string[]): HostedPackageEntry {
+	return { source, extensions, skills: [], prompts: [], themes: [] };
+}
+
+function hostedPackageSettings(packageCase: HostedPackageCase): HostedPackageSettings {
+	const candidate = hostedPackageEntry(CHECKOUT_ROOT, ["extensions/ask-user-question.ts"]);
+	const external = hostedPackageEntry(REFERENCE_PACKAGE_ROOT, ["index.ts"]);
+	const packages = packageCase === "external-only"
+		? [external]
+		: packageCase === "candidate-only"
+			? [candidate]
+			: [candidate, hostedPackageEntry(REFERENCE_PACKAGE_ROOT, [])];
+	return { packages, extensions: [FIXTURE_PATH], skills: [], prompts: [], themes: [] };
+}
+
+function packageComposition(events: RpcRecord[]): RpcRecord {
+	const messages = notificationMessages(events).filter((message) => message.startsWith(PACKAGE_COMPOSITION_PREFIX));
+	assert.equal(messages.length, 1);
+	const encoded = messages[0]!.slice(PACKAGE_COMPOSITION_PREFIX.length);
+	assert.ok(encoded.length <= 8_000, "package composition telemetry must stay bounded");
+	return record(JSON.parse(encoded), "package composition");
 }
 
 function notificationCount(events: RpcRecord[], message: string): number {
@@ -287,6 +316,58 @@ function blockedSequence(events: RpcRecord[]): boolean[] {
 	return sequence;
 }
 
+function expectedPackageProfile(packageCase: HostedPackageCase): HostedPackageProfile {
+	const settings = hostedPackageSettings(packageCase);
+	return {
+		packages: settings.packages,
+		root: { extensions: settings.extensions, skills: settings.skills, prompts: settings.prompts, themes: settings.themes },
+	};
+}
+
+function assertHostedPackageComposition(events: RpcRecord[], packageCase: HostedPackageCase, expectedSourcePath: string): void {
+	const composition = packageComposition(events);
+	assert.deepEqual(Object.keys(composition).sort(), ["inventory", "packageCase", "profile"]);
+	assert.equal(composition.packageCase, packageCase);
+	assert.deepEqual(composition.profile, expectedPackageProfile(packageCase));
+	assert.deepEqual(record(composition.inventory, "package tool inventory"), {
+		allToolNames: [TOOL_NAME],
+		questionnaireCount: 1,
+		questionnaire: [{ name: TOOL_NAME, sourceInfoPath: expectedSourcePath }],
+	});
+}
+
+function assertHostedPackageCancellation(events: RpcRecord[]): void {
+	for (const marker of MARKERS) assert.equal(notificationCount(events, marker), 1, marker);
+	assert.equal(notificationCount(events, PUBLIC_TOOL_CALL_MARKER), 1);
+	assert.equal(notificationCount(events, VALIDATION_ERROR_MARKER), 0);
+	assert.equal(notificationCount(events, COMPLETED_MARKER), 0);
+	const dialogs = events.filter((event) => event.type === "extension_ui_request" && ["select", "input", "editor", "confirm"].includes(String(event.method)));
+	assert.deepEqual(dialogs.map((event) => event.method), ["select"]);
+	const promptResponses = events.filter((event) => event.type === "response" && event.command === "prompt");
+	assert.deepEqual(promptResponses.map((event) => event.success), [true]);
+	const toolEnds = events.filter((event) => event.type === "tool_execution_end" && event.toolName === TOOL_NAME);
+	assert.equal(toolEnds.length, 1);
+	assert.equal(toolEnds[0]!.isError, false);
+	const execution = record(toolEnds[0]!.result, "package tool execution result");
+	assert.deepEqual(execution.content, [{ type: "text", text: DECLINE_MESSAGE }]);
+	assert.deepEqual(record(execution.details, "package tool execution details"), { answers: [], cancelled: true });
+	const messages = events.filter((event) => event.type === "message_end").map((event) => record(event.message, "package message_end message"));
+	const toolResult = messages.find((message) => message.role === "toolResult" && message.toolName === TOOL_NAME);
+	assert.ok(toolResult);
+	assert.equal(toolResult.isError, false);
+	assert.deepEqual(toolResult.content, [{ type: "text", text: DECLINE_MESSAGE }]);
+	assert.deepEqual(record(toolResult.details, "package tool result details"), { answers: [], cancelled: true });
+	const assistants = messages.filter((message) => message.role === "assistant");
+	assert.ok(assistants.length >= 2);
+	const finalAssistant = assistants[assistants.length - 1]!;
+	assert.equal(finalAssistant.stopReason, "stop");
+	const finalContent = Array.isArray(finalAssistant.content) ? finalAssistant.content : [];
+	assert.ok(finalContent.some((block) => record(block, "package final assistant content").text === FINAL_TEXT.cancel));
+	assert.equal(events.filter((event) => event.type === "agent_settled").length, 1);
+	assert.deepEqual(promptProjection(events), expectedPromptProjection("cancel"));
+	assert.deepEqual(blockedSequence(events), [true, false]);
+}
+
 function expectedPromptProjection(scenario: HostedScenario): RpcRecord {
 	const multi = scenario === "multi" || scenario === "empty-multi";
 	const layoutOptions = multi
@@ -403,7 +484,7 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number, label: string
 	});
 }
 
-async function runRpc(cliPath: string, candidatePath: string, fixturePath: string, sandbox: string, expectedSourcePath?: string, scenario: HostedScenario = "cancel", reload = false): Promise<RunResult> {
+async function runRpc(cliPath: string, candidatePath: string, fixturePath: string, sandbox: string, expectedSourcePath?: string, scenario: HostedScenario = "cancel", reload = false, packageCase?: HostedPackageCase): Promise<RunResult> {
 	assert.ok(candidatePath === OWNED_EXTENSION_PATH || candidatePath === REFERENCE_EXTENSION_PATH, `unsupported hosted questionnaire candidate: ${candidatePath}`);
 	assert.equal(fixturePath, FIXTURE_PATH);
 	assert.equal(expectedSourcePath, candidatePath === REFERENCE_EXTENSION_PATH ? REFERENCE_EXTENSION_PATH : undefined);
@@ -413,6 +494,12 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	await mkdir(dirname(ownerPath), { recursive: true });
 	await writeFile(ownerPath, `${JSON.stringify({ schema: "gentle-pi.question-owner/v1", owner: "gentle-pi" })}\n`);
 	assert.deepEqual(JSON.parse(await readFile(ownerPath, "utf8")), { schema: "gentle-pi.question-owner/v1", owner: "gentle-pi" });
+	if (packageCase !== undefined) {
+		const settingsPath = join(sandbox, "agent", "settings.json");
+		const settings = hostedPackageSettings(packageCase);
+		await writeFile(settingsPath, `${JSON.stringify(settings)}\n`);
+		assert.deepEqual(JSON.parse(await readFile(settingsPath, "utf8")), settings);
+	}
 	const tempPath = (name: string) => join(sandbox, name);
 	const childEnv: Record<string, string> = {
 		PATH: "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin",
@@ -426,12 +513,17 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	};
 	if (expectedSourcePath !== undefined) childEnv.GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH = expectedSourcePath;
 	if (reload) childEnv.GENTLE_PI_HOSTED_RELOAD = "1";
-	assert.deepEqual(Object.keys(childEnv).sort(), ["GENTLE_PI_AGENT_HOME", "GENTLE_PI_CONFIG_HOME", "GENTLE_PI_HOSTED_SCENARIO", "HOME", "PATH", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_OFFLINE", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", ...(expectedSourcePath === undefined ? [] : ["GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH"]), ...(reload ? ["GENTLE_PI_HOSTED_RELOAD"] : [])].sort());
+	if (packageCase !== undefined) childEnv.GENTLE_PI_HOSTED_PACKAGE_CASE = packageCase;
+	assert.deepEqual(Object.keys(childEnv).sort(), ["GENTLE_PI_AGENT_HOME", "GENTLE_PI_CONFIG_HOME", "GENTLE_PI_HOSTED_SCENARIO", "HOME", "PATH", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_OFFLINE", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", ...(expectedSourcePath === undefined ? [] : ["GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH"]), ...(reload ? ["GENTLE_PI_HOSTED_RELOAD"] : []), ...(packageCase === undefined ? [] : ["GENTLE_PI_HOSTED_PACKAGE_CASE"])].sort());
 	for (const path of Object.values(childEnv).filter((value) => value.startsWith("/"))) {
 		assert.ok(relative(CHECKOUT_ROOT, path).startsWith(".."), `child path must be outside checkout: ${path}`);
 	}
 
-	const args = [cliPath, "--mode", "rpc", "--no-session", "--no-extensions", "-e", candidatePath, "-e", fixturePath, "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--no-approve", "--offline", "--model", `${PROVIDER_ID}/${MODEL_ID}`];
+	const args = packageCase === undefined
+		? [cliPath, "--mode", "rpc", "--no-session", "--no-extensions", "-e", candidatePath, "-e", fixturePath, "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--no-approve", "--offline", "--model", `${PROVIDER_ID}/${MODEL_ID}`]
+		: [cliPath, "--mode", "rpc", "--no-session", "--no-skills", "--no-prompt-templates", "--no-themes", "--no-context-files", "--no-builtin-tools", "--no-approve", "--offline", "--model", `${PROVIDER_ID}/${MODEL_ID}`];
+	if (packageCase === undefined) assert.deepEqual(args.filter((arg) => arg === "-e"), ["-e", "-e"]);
+	else { assert.equal(args.includes("--no-extensions"), false); assert.equal(args.includes("-e"), false); }
 	const child = spawn(process.execPath, args, { cwd: tempPath("cwd"), env: childEnv, stdio: ["pipe", "pipe", "pipe"], shell: false });
 	const childPid = child.pid;
 	assert.ok(childPid, "hosted Pi child PID must be tracked");
@@ -736,6 +828,67 @@ test("hosted real Pi RPC compares owned and public reference", async (t) => {
 	const referenceSchema = schemaComparisons.find((comparison) => comparison.name === "reference");
 	assert.ok(ownedSchema); assert.ok(referenceSchema);
 	assertSchemaCompatibility(ownedSchema!.schema, referenceSchema!.schema);
+});
+
+type HostedPackageTestContext = { after(callback: () => Promise<void>): unknown };
+type HostedPackageCaseConfig = {
+	packageCase: HostedPackageCase;
+	candidatePath: string;
+	expectedSourcePath?: string;
+	observedSourcePath: string;
+	reference: boolean;
+};
+
+async function runHostedPackageCase(t: HostedPackageTestContext, config: HostedPackageCaseConfig): Promise<void> {
+	assertHostedIsolation(config.reference);
+	const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+	assert.equal(repoRoot, CHECKOUT_ROOT);
+	const fixturePath = join(repoRoot, "tests", "fixtures", "hosted-synthetic-provider.ts");
+	assert.equal(fixturePath, FIXTURE_PATH);
+	await access(config.candidatePath, constants.R_OK);
+	await access(fixturePath, constants.R_OK);
+	if (config.reference) {
+		await access(REFERENCE_EXTENSION_PATH, constants.R_OK);
+		const referenceMetadata = JSON.parse(readFileSync(join(REFERENCE_PACKAGE_ROOT, "package.json"), "utf8")) as PiPackage;
+		assert.equal(referenceMetadata.name, "@juicesharp/rpiv-ask-user-question");
+		assert.equal(referenceMetadata.version, "2.9.0");
+	}
+	await assert.rejects(access(repoRoot, constants.W_OK));
+	const cliPath = resolvePiCli(repoRoot);
+	const sandbox = await mkdtemp(join(tmpdir(), `gentle-pi-hosted-rpc-package-${config.packageCase}-`));
+	t.after(async () => { await rm(sandbox, { recursive: true, force: true }); });
+	const result = await runRpc(cliPath, config.candidatePath, fixturePath, sandbox, config.expectedSourcePath, "cancel", false, config.packageCase);
+	assert.equal(result.cancellationResponses, 1);
+	assertHostedPackageComposition(result.events, config.packageCase, config.observedSourcePath);
+	assertHostedPackageCancellation(result.events);
+}
+
+test("hosted package external-only loads the public reference with the private owner file present", async (t) => {
+	await runHostedPackageCase(t, {
+		packageCase: "external-only",
+		candidatePath: REFERENCE_EXTENSION_PATH,
+		expectedSourcePath: REFERENCE_EXTENSION_PATH,
+		observedSourcePath: REFERENCE_EXTENSION_PATH,
+		reference: true,
+	});
+});
+
+test("hosted package candidate-only loads the workspace questionnaire", async (t) => {
+	await runHostedPackageCase(t, {
+		packageCase: "candidate-only",
+		candidatePath: OWNED_EXTENSION_PATH,
+		observedSourcePath: OWNED_EXTENSION_PATH,
+		reference: false,
+	});
+});
+
+test("hosted package filters the external questionnaire when the candidate is present", async (t) => {
+	await runHostedPackageCase(t, {
+		packageCase: "candidate-external-filtered",
+		candidatePath: OWNED_EXTENSION_PATH,
+		observedSourcePath: OWNED_EXTENSION_PATH,
+		reference: true,
+	});
 });
 
 test("hosted real Pi RPC reloads the owned questionnaire in place", async (t) => {
