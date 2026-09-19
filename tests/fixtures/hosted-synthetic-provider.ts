@@ -47,7 +47,8 @@ function successfulResult(value: unknown, scenario: HostedScenario): boolean {
 	if (scenario === "cancel" || !isRecord(value) || !isRecord(value.details) || value.details.cancelled !== false || !Array.isArray(value.details.answers) || value.details.answers.length !== 1) return false;
 	const expected = expectedAnswer(scenario);
 	const answer = value.details.answers[0];
-	return isRecord(answer) && Object.keys(answer).length === Object.keys(expected).length && Object.entries(expected).every(([key, field]) => answer[key] === field)
+	// Reference single answers include preview: undefined, which the public RPC JSON transport omits.
+	return isRecord(answer) && Object.keys(answer).filter((key) => key !== "preview" || scenario !== "single" || answer.preview !== undefined).length === Object.keys(expected).length && Object.entries(expected).every(([key, field]) => answer[key] === field)
 		&& textContent(value) === `User has answered your questions: "${QUESTION}"="${expected.answer}". You can now continue with the user's answers in mind.`;
 }
 function projectPrompt(value: unknown): PromptProjection | undefined {
