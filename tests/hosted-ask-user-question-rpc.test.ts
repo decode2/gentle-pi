@@ -40,6 +40,15 @@ const FIXTURE_PATH = `${CHECKOUT_ROOT}/tests/fixtures/hosted-synthetic-provider.
 const PACKAGE_COMPOSITION_PREFIX = "hosted:package-composition:";
 const PACKAGE_PROVIDER_INVENTORY_PREFIX = "hosted:package-provider-inventory:", PACKAGE_PROVIDER_INVENTORY_MAX = 4_000;
 const BUILTIN_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"] as const;
+const PROBE_COMMAND = "hosted-questionnaire-inventory-v1";
+const PROBE_PROMPT_ID = "hosted-questionnaire-inventory-prompt-1";
+const PROBE_INVENTORY_PREFIX = "hosted:questionnaire-inventory:";
+const PROBE_INVENTORY_MAX = 8_000;
+const PROVIDER_ENTRY_PREFIX = "hosted:questionnaire-provider-entry:";
+const HOSTED_OWNER_PROFILES = ["gentle-pi", "missing", "legacy-external"] as const;
+const HOSTED_PROBE_MODES = ["none", "inventory-negative"] as const;
+type HostedOwnerProfile = (typeof HOSTED_OWNER_PROFILES)[number];
+type HostedProbeMode = (typeof HOSTED_PROBE_MODES)[number];
 const PROMPT_PROJECTION_PREFIX = "hosted:rpiv:ask-user:prompt:projection:";
 const SCHEMA_PROJECTION_PREFIX = "hosted:ask_user_question:schema:";
 const RELOAD_TELEMETRY_PREFIX = "hosted:reload-telemetry:";
@@ -330,6 +339,69 @@ function expectedPackageProfile(packageCase: HostedPackageCase): HostedPackagePr
 	};
 }
 
+function ownerConfigText(owner: Exclude<HostedOwnerProfile, "missing">): string {
+	return `${JSON.stringify({ schema: "gentle-pi.question-owner/v1", owner })}\n`;
+}
+
+function probeInventory(events: RpcRecord[]): RpcRecord {
+	const messages = notificationMessages(events).filter((message) => message.startsWith(PROBE_INVENTORY_PREFIX));
+	assert.equal(messages.length, 1, "negative owner probe must emit exactly one inventory notification");
+	const encoded = messages[0]!.slice(PROBE_INVENTORY_PREFIX.length);
+	assert.ok(encoded.length <= PROBE_INVENTORY_MAX, "negative owner probe inventory must stay bounded");
+	return record(JSON.parse(encoded), "negative owner probe inventory");
+}
+
+function assertHostedNegativeProbe(events: RpcRecord[], ownerProfile: Exclude<HostedOwnerProfile, "gentle-pi">): void {
+	const inventory = probeInventory(events);
+	assert.deepEqual(Object.keys(inventory).sort(), ["activeToolNames", "catalog", "fixturePath", "hasUI", "mode", "ownerState", "providerStreamCalls", "questionnaire", "questionnaireCount", "settingsProfile"]);
+	assert.equal(inventory.mode, "rpc");
+	assert.equal(inventory.hasUI, true);
+	const catalog = inventory.catalog;
+	assert.ok(Array.isArray(catalog));
+	assert.deepEqual(catalog.map((entry, index) => record(entry, `negative catalog entry ${index}`).name), [...BUILTIN_TOOL_NAMES]);
+	for (const [index, rawEntry] of catalog.entries()) {
+		const entry = record(rawEntry, `negative catalog entry ${index}`);
+		assert.deepEqual(Object.keys(entry).sort(), ["name", "sourceInfo"]);
+		const sourceInfo = record(entry.sourceInfo, `negative catalog source info ${index}`);
+		assert.deepEqual(Object.keys(sourceInfo).sort(), ["path", "source"]);
+		assert.equal(typeof sourceInfo.path, "string");
+		assert.equal(sourceInfo.source, "builtin");
+	}
+	assert.deepEqual(inventory.activeToolNames, []);
+	assert.equal(inventory.questionnaireCount, 0);
+	assert.deepEqual(inventory.questionnaire, []);
+	assert.deepEqual(inventory.settingsProfile, expectedPackageProfile("candidate-only"));
+	assert.equal(inventory.fixturePath, FIXTURE_PATH);
+	assert.equal(inventory.providerStreamCalls, 0);
+	assert.deepEqual(inventory.ownerState, ownerProfile === "missing"
+		? { state: "missing" }
+		: { state: "present", content: ownerConfigText(ownerProfile) });
+
+	const forbiddenNotifications = notificationMessages(events).filter((message) => [
+		MARKERS[2]!, MARKERS[3]!, MARKERS[4]!, MARKERS[5]!, MARKERS[6]!, MARKERS[7]!, COMPLETED_MARKER,
+		PUBLIC_TOOL_CALL_MARKER, VALIDATION_ERROR_MARKER,
+	].some((marker) => message === marker)
+		|| message.startsWith(PROMPT_PROJECTION_PREFIX)
+		|| message.startsWith(SCHEMA_PROJECTION_PREFIX)
+		|| message.startsWith(PACKAGE_COMPOSITION_PREFIX)
+		|| message.startsWith(PACKAGE_PROVIDER_INVENTORY_PREFIX)
+		|| message.startsWith(PROVIDER_ENTRY_PREFIX)
+		|| message.startsWith(RELOAD_TELEMETRY_PREFIX));
+	assert.deepEqual(forbiddenNotifications, []);
+	const dialogs = events.filter((event) => event.type === "extension_ui_request" && ["select", "input", "editor", "confirm"].includes(String(event.method)));
+	assert.deepEqual(dialogs, []);
+	assert.deepEqual(events.filter((event) => event.type === "tool_execution_start" || event.type === "tool_execution_end"), []);
+	assert.deepEqual(events.filter((event) => event.type === "agent_settled"), []);
+	const providerMessages = events.filter((event) => {
+		if (event.type !== "message_end" || event.message === null || typeof event.message !== "object") return false;
+		const message = event.message as RpcRecord;
+		return message.role === "assistant" || message.role === "toolResult";
+	});
+	assert.deepEqual(providerMessages, []);
+	const responses = events.filter((event) => event.type === "response");
+	assert.deepEqual(responses.map((event) => ({ id: event.id, command: event.command, success: event.success })), [{ id: PROBE_PROMPT_ID, command: "prompt", success: true }]);
+}
+
 function assertHostedPackageComposition(events: RpcRecord[], packageCase: HostedPackageCase, expectedSourcePath: string): void {
 	const composition = packageComposition(events);
 	assert.deepEqual(Object.keys(composition).sort(), ["inventory", "packageCase", "profile"]);
@@ -498,16 +570,27 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number, label: string
 	});
 }
 
-async function runRpc(cliPath: string, candidatePath: string, fixturePath: string, sandbox: string, expectedSourcePath?: string, scenario: HostedScenario = "cancel", reload = false, packageCase?: HostedPackageCase): Promise<RunResult> {
+async function runRpc(cliPath: string, candidatePath: string, fixturePath: string, sandbox: string, expectedSourcePath?: string, scenario: HostedScenario = "cancel", reload = false, packageCase?: HostedPackageCase, ownerProfile: HostedOwnerProfile = "gentle-pi", probeMode: HostedProbeMode = "none"): Promise<RunResult> {
 	assert.ok(candidatePath === OWNED_EXTENSION_PATH || candidatePath === REFERENCE_EXTENSION_PATH, `unsupported hosted questionnaire candidate: ${candidatePath}`);
+	assert.ok((HOSTED_OWNER_PROFILES as readonly string[]).includes(ownerProfile), `unsupported hosted owner profile: ${ownerProfile}`);
+	assert.ok((HOSTED_PROBE_MODES as readonly string[]).includes(probeMode), `unsupported hosted probe mode: ${probeMode}`);
+	if (probeMode !== "none") {
+		assert.equal(packageCase, "candidate-only"); assert.notEqual(ownerProfile, "gentle-pi"); assert.equal(scenario, "cancel"); assert.equal(reload, false);
+	}
 	assert.equal(fixturePath, FIXTURE_PATH);
 	assert.equal(expectedSourcePath, candidatePath === REFERENCE_EXTENSION_PATH ? REFERENCE_EXTENSION_PATH : undefined);
 	const dirs = ["home", "profile", "xdg-config", "xdg-cache", "xdg-data", "xdg-state", "xdg-runtime", "tmp", "agent", "sessions", "cwd"];
 	await Promise.all(dirs.map((name) => mkdir(join(sandbox, name), { recursive: true })));
 	const ownerPath = join(sandbox, "agent", "gentle-ai", "question-owner.json");
-	await mkdir(dirname(ownerPath), { recursive: true });
-	await writeFile(ownerPath, `${JSON.stringify({ schema: "gentle-pi.question-owner/v1", owner: "gentle-pi" })}\n`);
-	assert.deepEqual(JSON.parse(await readFile(ownerPath, "utf8")), { schema: "gentle-pi.question-owner/v1", owner: "gentle-pi" });
+	if (ownerProfile === "missing") {
+		await assert.rejects(readFile(ownerPath, "utf8"), (error: unknown) => { assert.equal((error as NodeJS.ErrnoException).code, "ENOENT"); return true; });
+	} else {
+		await mkdir(dirname(ownerPath), { recursive: true });
+		const contents = ownerConfigText(ownerProfile);
+		await writeFile(ownerPath, contents);
+		assert.equal(await readFile(ownerPath, "utf8"), contents);
+		assert.deepEqual(JSON.parse(contents), { schema: "gentle-pi.question-owner/v1", owner: ownerProfile });
+	}
 	if (packageCase !== undefined) {
 		const settingsPath = join(sandbox, "agent", "settings.json");
 		const settings = hostedPackageSettings(packageCase);
@@ -528,7 +611,9 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	if (expectedSourcePath !== undefined) childEnv.GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH = expectedSourcePath;
 	if (reload) childEnv.GENTLE_PI_HOSTED_RELOAD = "1";
 	if (packageCase !== undefined) childEnv.GENTLE_PI_HOSTED_PACKAGE_CASE = packageCase;
-	assert.deepEqual(Object.keys(childEnv).sort(), ["GENTLE_PI_AGENT_HOME", "GENTLE_PI_CONFIG_HOME", "GENTLE_PI_HOSTED_SCENARIO", "HOME", "PATH", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_OFFLINE", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", ...(expectedSourcePath === undefined ? [] : ["GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH"]), ...(reload ? ["GENTLE_PI_HOSTED_RELOAD"] : []), ...(packageCase === undefined ? [] : ["GENTLE_PI_HOSTED_PACKAGE_CASE"])].sort());
+	if (ownerProfile !== "gentle-pi") childEnv.GENTLE_PI_HOSTED_OWNER_PROFILE = ownerProfile;
+	if (probeMode !== "none") childEnv.GENTLE_PI_HOSTED_PROBE_MODE = probeMode;
+	assert.deepEqual(Object.keys(childEnv).sort(), ["GENTLE_PI_AGENT_HOME", "GENTLE_PI_CONFIG_HOME", "GENTLE_PI_HOSTED_SCENARIO", "HOME", "PATH", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_OFFLINE", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", ...(expectedSourcePath === undefined ? [] : ["GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH"]), ...(reload ? ["GENTLE_PI_HOSTED_RELOAD"] : []), ...(packageCase === undefined ? [] : ["GENTLE_PI_HOSTED_PACKAGE_CASE"]), ...(ownerProfile === "gentle-pi" ? [] : ["GENTLE_PI_HOSTED_OWNER_PROFILE"]), ...(probeMode === "none" ? [] : ["GENTLE_PI_HOSTED_PROBE_MODE"])].sort());
 	for (const path of Object.values(childEnv).filter((value) => value.startsWith("/"))) {
 		assert.ok(relative(CHECKOUT_ROOT, path).startsWith(".."), `child path must be outside checkout: ${path}`);
 	}
@@ -552,17 +637,30 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	let rejectCompletion!: (error: unknown) => void;
 	const completion = new Promise<void>((resolvePromise, rejectPromise) => { resolveCompletion = resolvePromise; rejectCompletion = rejectPromise; });
 	let settledCount = 0;
+	let probeInventoryCount = 0;
+	let probePromptResponseObserved = false;
+	let probeInventoryIndex = -1;
+	let probePromptResponseIndex = -1;
+	let callbackFailure: unknown;
 	let reloadResourcesObserved = false;
 	let reloadResponseObserved = false;
 	let reloadPromptSent = false;
 	const exited = new Promise<ExitStatus>((resolveExit) => child.once("exit", (code, signal) => resolveExit({ code, signal })));
-	const fail = (error: unknown): void => { if (!completionClaimed) { completionClaimed = true; rejectCompletion(error); } };
+	const fail = (error: unknown): void => {
+		if (callbackFailure === undefined) callbackFailure = error;
+		if (!completionClaimed) { completionClaimed = true; rejectCompletion(error); }
+	};
 	child.once("exit", (code, signal) => {
-		if (!completionClaimed) fail(new Error(`Pi child exited before settling (${signal ?? code}); stderr: ${stderr}`));
+		if (!completionClaimed) fail(new Error(`Pi child exited before ${probeMode === "none" ? "settling" : "negative owner probe completion"} (${signal ?? code}); stderr: ${stderr}`));
 	});
 	const send = (command: RpcRecord): void => {
 		if (!child.stdin || child.stdin.destroyed || child.stdin.writableEnded) throw new Error("hosted Pi stdin is not writable");
 		child.stdin.write(`${JSON.stringify(command)}\n`);
+	};
+	const maybeResolveProbeCompletion = (): void => {
+		if (probeMode === "none" || completionClaimed || !probePromptResponseObserved || probeInventoryCount !== 1) return;
+		completionClaimed = true;
+		resolveCompletion();
 	};
 	const selectStep = (matcher: (option: string) => boolean, label: string) => (event: RpcRecord): void => {
 		assert.equal(event.method, "select", `${label} must use select`);
@@ -639,6 +737,45 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 		try {
 			const event = record(JSON.parse(line), "RPC stdout must contain JSON objects");
 			events.push(event);
+			if (probeMode !== "none") {
+				if (event.type === "extension_ui_request" && ["select", "input", "editor", "confirm"].includes(String(event.method))) throw new Error(`negative owner probe unexpectedly requested questionnaire UI: ${String(event.method)}`);
+				if (event.type === "tool_call" || event.type === "tool_execution_start" || event.type === "tool_execution_end" || event.type === "provider_request" || event.type === "provider_inventory") throw new Error(`negative owner probe unexpectedly executed or requested a tool/provider: ${String(event.toolName)}`);
+				if (event.type === "agent_settled") throw new Error("negative owner probe unexpectedly emitted agent_settled");
+				if (event.type === "message_end" && event.message !== null && typeof event.message === "object") {
+					const message = event.message as RpcRecord;
+					if (message.role === "assistant" || message.role === "toolResult") throw new Error(`negative owner probe unexpectedly emitted provider message: ${String(message.role)}`);
+				}
+			}
+			const notification = event.type === "extension_ui_request" && event.method === "notify" && typeof event.message === "string" ? event.message : undefined;
+			if (probeMode !== "none" && notification !== undefined) {
+				const forbidden = [
+					MARKERS[2]!, MARKERS[3]!, MARKERS[4]!, MARKERS[5]!, MARKERS[6]!, MARKERS[7]!, COMPLETED_MARKER,
+					PUBLIC_TOOL_CALL_MARKER, VALIDATION_ERROR_MARKER,
+				].some((marker) => notification === marker)
+					|| notification.startsWith(PROMPT_PROJECTION_PREFIX)
+					|| notification.startsWith(SCHEMA_PROJECTION_PREFIX)
+					|| notification.startsWith(PACKAGE_COMPOSITION_PREFIX)
+					|| notification.startsWith(PACKAGE_PROVIDER_INVENTORY_PREFIX)
+					|| notification.startsWith(PROVIDER_ENTRY_PREFIX)
+					|| notification.startsWith(RELOAD_TELEMETRY_PREFIX);
+				if (forbidden) throw new Error(`negative owner probe emitted forbidden notification: ${notification.slice(0, 240)}`);
+				if (notification.startsWith(PROBE_INVENTORY_PREFIX)) {
+					probeInventoryCount += 1;
+					if (probeInventoryCount > 1) throw new Error("negative owner probe emitted more than one inventory notification");
+					const encoded = notification.slice(PROBE_INVENTORY_PREFIX.length);
+					assert.ok(encoded.length <= PROBE_INVENTORY_MAX, "negative owner probe inventory must stay bounded");
+					record(JSON.parse(encoded), "negative owner probe inventory");
+					probeInventoryIndex = events.length - 1;
+					maybeResolveProbeCompletion();
+				}
+			}
+			if (probeMode !== "none" && event.type === "response" && event.id === PROBE_PROMPT_ID) {
+				assert.equal(event.command, "prompt", "negative owner probe response command changed");
+				assert.equal(event.success, true, "negative owner probe prompt response must succeed");
+				probePromptResponseObserved = event.success === true;
+				probePromptResponseIndex = events.length - 1;
+				maybeResolveProbeCompletion();
+			}
 			const telemetry = reload ? reloadTelemetryEvent(event) : undefined;
 			if (telemetry?.event === "resources_discover" && telemetry.generation === 2 && telemetry.reason === "reload") reloadResourcesObserved = true;
 			if (reload && event.type === "response" && event.id === "reload-1" && event.command === "prompt") {
@@ -680,12 +817,20 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	child.once("error", fail);
 	let exit: ExitStatus | undefined;
 	try {
-		send({ id: "hosted-prompt-1", type: "prompt", message: "Use ask_user_question to choose a layout; do not answer until the questionnaire is complete." });
+		if (probeMode === "none") send({ id: "hosted-prompt-1", type: "prompt", message: "Use ask_user_question to choose a layout; do not answer until the questionnaire is complete." });
+		else send({ id: PROBE_PROMPT_ID, type: "prompt", message: `/${PROBE_COMMAND}` });
 		await withTimeout(completion, 30_000, `Pi child ${childPid} completion`);
 		child.stdin?.end();
 		exit = await withTimeout(exited, 5_000, `Pi child ${childPid} exit`);
+		if (callbackFailure !== undefined) throw callbackFailure;
 		assert.equal(exit.code, 0, `Pi child exited with ${exit.signal ?? exit.code}; stderr: ${stderr}`);
-		assert.equal(settledCount, reload ? 2 : 1, "hosted questionnaire invocation settlement count changed");
+		if (probeMode === "none") assert.equal(settledCount, reload ? 2 : 1, "hosted questionnaire invocation settlement count changed");
+		else {
+			assert.equal(settledCount, 0, "command-only owner probe must not wait for agent_settled");
+			assert.equal(probePromptResponseObserved, true, "negative owner probe prompt response was not observed");
+			assert.equal(probeInventoryCount, 1, "negative owner probe inventory count changed");
+			assert.ok(probeInventoryIndex < probePromptResponseIndex, "negative owner probe inventory must precede its correlated response");
+		}
 		if (reload) {
 			assert.equal(reloadResourcesObserved, true, "reload resources_discover telemetry was not observed");
 			assert.equal(reloadResponseObserved, true, "reload command response was not observed");
@@ -894,6 +1039,31 @@ test("hosted package candidate-only loads the workspace questionnaire", async (t
 		observedSourcePath: OWNED_EXTENSION_PATH,
 		reference: false,
 	});
+});
+
+async function runHostedNegativeOwnerCase(t: HostedPackageTestContext, ownerProfile: Exclude<HostedOwnerProfile, "gentle-pi">): Promise<void> {
+	assertHostedIsolation(false);
+	const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+	assert.equal(repoRoot, CHECKOUT_ROOT);
+	const fixturePath = join(repoRoot, "tests", "fixtures", "hosted-synthetic-provider.ts");
+	assert.equal(fixturePath, FIXTURE_PATH);
+	await access(OWNED_EXTENSION_PATH, constants.R_OK);
+	await access(fixturePath, constants.R_OK);
+	await assert.rejects(access(repoRoot, constants.W_OK));
+	const cliPath = resolvePiCli(repoRoot);
+	const sandbox = await mkdtemp(join(tmpdir(), `gentle-pi-hosted-rpc-owner-${ownerProfile}-`));
+	t.after(async () => { await rm(sandbox, { recursive: true, force: true }); });
+	const result = await runRpc(cliPath, OWNED_EXTENSION_PATH, fixturePath, sandbox, undefined, "cancel", false, "candidate-only", ownerProfile, "inventory-negative");
+	assert.equal(result.cancellationResponses, 0);
+	assertHostedNegativeProbe(result.events, ownerProfile);
+}
+
+test("hosted package candidate-only denies the questionnaire when the owner file is missing", async (t) => {
+	await runHostedNegativeOwnerCase(t, "missing");
+});
+
+test("hosted package candidate-only denies the questionnaire for the legacy owner", async (t) => {
+	await runHostedNegativeOwnerCase(t, "legacy-external");
 });
 
 test("hosted package filters the external questionnaire when the candidate is present", async (t) => {

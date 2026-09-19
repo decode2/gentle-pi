@@ -34,11 +34,19 @@ type HostedScenario = (typeof HOSTED_SCENARIOS)[number];
 type InvalidScenario = "invalid-missing-questions" | "invalid-empty-questions" | "invalid-one-option";
 type AnsweredScenario = Exclude<HostedScenario, "cancel" | "partial-cancel" | "schema-positive" | InvalidScenario>;
 const SCHEMA_NOTIFICATION_MAX = 24_000;
+const PROBE_INVENTORY_PREFIX = "hosted:questionnaire-inventory:";
+const PROBE_INVENTORY_MAX = 8_000;
+const PROVIDER_ENTRY_PREFIX = "hosted:questionnaire-provider-entry:";
+const PROBE_COMMAND = "hosted-questionnaire-inventory-v1";
 const RELOAD_MODE = process.env.GENTLE_PI_HOSTED_RELOAD === "1";
 const RELOAD_TELEMETRY_PREFIX = "hosted:reload-telemetry:";
 const PACKAGE_COMPOSITION_PREFIX = "hosted:package-composition:";
 const PACKAGE_PROVIDER_INVENTORY_PREFIX = "hosted:package-provider-inventory:";
 const HOSTED_PACKAGE_CASES = ["external-only", "candidate-only", "candidate-external-filtered"] as const;
+const HOSTED_OWNER_PROFILES = ["gentle-pi", "missing", "legacy-external"] as const;
+const HOSTED_PROBE_MODES = ["none", "inventory-negative"] as const;
+type HostedOwnerProfile = (typeof HOSTED_OWNER_PROFILES)[number];
+type HostedProbeMode = (typeof HOSTED_PROBE_MODES)[number];
 type HostedPackageCase = (typeof HOSTED_PACKAGE_CASES)[number];
 const GENERATION_KEY = Symbol.for("gentle-pi.hosted-questionnaire.synthetic-generation-v1");
 function isInvalidScenario(scenario: HostedScenario): scenario is InvalidScenario { return scenario.startsWith("invalid-"); }
@@ -92,6 +100,14 @@ if (expectedPackageCase !== undefined) {
 const scenarioValue = process.env.GENTLE_PI_HOSTED_SCENARIO;
 if (scenarioValue !== undefined && !(HOSTED_SCENARIOS as readonly string[]).includes(scenarioValue)) throw new Error(`unsupported hosted questionnaire scenario: ${scenarioValue}`);
 const expectedScenario: HostedScenario = (scenarioValue as HostedScenario | undefined) ?? "cancel";
+const ownerProfileValue = process.env.GENTLE_PI_HOSTED_OWNER_PROFILE;
+if (ownerProfileValue !== undefined && !(HOSTED_OWNER_PROFILES as readonly string[]).includes(ownerProfileValue)) throw new Error(`unsupported hosted owner profile: ${ownerProfileValue}`);
+const expectedOwnerProfile: HostedOwnerProfile = (ownerProfileValue as HostedOwnerProfile | undefined) ?? "gentle-pi";
+const probeModeValue = process.env.GENTLE_PI_HOSTED_PROBE_MODE;
+if (probeModeValue !== undefined && !(HOSTED_PROBE_MODES as readonly string[]).includes(probeModeValue)) throw new Error(`unsupported hosted probe mode: ${probeModeValue}`);
+const expectedProbeMode: HostedProbeMode = (probeModeValue as HostedProbeMode | undefined) ?? "none";
+const PROBE_MODE = expectedProbeMode === "inventory-negative";
+if (PROBE_MODE && (expectedPackageCase !== "candidate-only" || expectedOwnerProfile === "gentle-pi" || expectedScenario !== "cancel" || RELOAD_MODE)) throw new Error("inventory-negative probe requires candidate-only settings, a negative owner, cancel scenario, and no reload");
 const SINGLE_LAYOUT_OPTIONS = [
 	{ label: "Compact", description: "Use a compact layout." },
 	{ label: "Detailed", description: "Use a detailed layout." },
@@ -163,6 +179,18 @@ function readPackageProfile(): HostedPackageProfile {
 		},
 	};
 }
+function readProbeOwnerState(): Record<string, unknown> {
+	const agentDir = process.env.PI_CODING_AGENT_DIR;
+	if (typeof agentDir !== "string" || agentDir.length === 0) throw new Error("owner probe requires PI_CODING_AGENT_DIR");
+	const ownerPath = join(agentDir, "gentle-ai", "question-owner.json");
+	try {
+		return { state: "present", content: readFileSync(ownerPath, "utf8") };
+	} catch (error) {
+		if (!isRecord(error) || error.code !== "ENOENT") throw error;
+		return { state: "missing" };
+	}
+}
+
 function expectedAnswer(scenario: AnsweredScenario): Record<string, unknown> {
 	if (scenario === "single") return { questionIndex: 0, question: QUESTION, kind: "option", answer: "Compact" };
 	if (scenario === "custom") return { questionIndex: 0, question: QUESTION, kind: "custom", answer: CUSTOM_ANSWER };
@@ -299,7 +327,10 @@ function notifyProviderContextInventory(context: Context, state: FixtureState): 
 	const encoded = JSON.stringify({ toolCallId: state.toolCallId, toolNames }); if (encoded.length > 4_000) throw new Error("package provider context telemetry exceeded its bound");
 	mark(state, `${PACKAGE_PROVIDER_INVENTORY_PREFIX}${encoded}`);
 }
+let providerStreamCalls = 0;
 function streamSynthetic(model: Model<any>, context: Context, options: SimpleStreamOptions | undefined, state: FixtureState): AssistantMessageEventStream {
+	providerStreamCalls += 1;
+	if (PROBE_MODE) mark(state, `${PROVIDER_ENTRY_PREFIX}${JSON.stringify({ count: providerStreamCalls })}`);
 	const stream = createAssistantMessageEventStream();
 	const output = createMessage(model);
 	stream.push({ type: "start", partial: output });
@@ -363,6 +394,23 @@ export default function (pi: ExtensionAPI): void {
 		models: [{ id: MODEL_ID, name: "Hosted questionnaire synthetic", reasoning: false, input: ["text"], cost: ZERO_USAGE.cost, contextWindow: 128000, maxTokens: 4096 }],
 		streamSimple: (model, context, options) => streamSynthetic(model, context, options, state),
 	});
+	if (PROBE_MODE) pi.registerCommand(PROBE_COMMAND, { handler: async (_args, ctx) => {
+		const describedTools = pi.getAllTools().map((tool) => {
+			const sourceInfo: unknown = tool.sourceInfo;
+			if (!isRecord(sourceInfo) || typeof sourceInfo.path !== "string" || typeof sourceInfo.source !== "string") throw new Error(`tool ${tool.name} provenance changed`);
+			return { name: tool.name, sourceInfo: { path: sourceInfo.path, source: sourceInfo.source } };
+		});
+		const questionnaire = describedTools.filter((tool) => tool.name === TOOL_NAME);
+		const payload = {
+			mode: ctx.mode, hasUI: ctx.hasUI, catalog: describedTools, activeToolNames: pi.getActiveTools(),
+			questionnaireCount: questionnaire.length, questionnaire, ownerState: readProbeOwnerState(),
+			settingsProfile: readPackageProfile(), fixturePath: fileURLToPath(import.meta.url), providerStreamCalls,
+		};
+		const encoded = JSON.stringify(payload);
+		if (encoded.length > PROBE_INVENTORY_MAX) throw new Error("negative owner probe inventory exceeded its bound");
+		ctx.ui.notify(`${PROBE_INVENTORY_PREFIX}${encoded}`, "info");
+		return;
+	} });
 	if (RELOAD_MODE) pi.registerCommand("hosted-questionnaire-reload-v1", { handler: async (_args, ctx) => { await ctx.reload(); return; } });
 	pi.on("session_start", (event, ctx) => {
 		state.observed.session = true;
@@ -379,8 +427,10 @@ export default function (pi: ExtensionAPI): void {
 		trace(state, "tool_inventory", { sourceInfo: questionnaireTools[0]?.sourceInfo.path ?? null, count: questionnaireTools.length, mode: ctx.mode, hasUI: ctx.hasUI });
 		emit(MARKERS.beforeAgent);
 		if (state.observed.registered) emit(MARKERS.registered);
-		notifyToolSchema(pi, state);
-		notifyPackageComposition(pi, state);
+		if (!PROBE_MODE) {
+			notifyToolSchema(pi, state);
+			notifyPackageComposition(pi, state);
+		}
 	});
 	pi.on("tool_execution_start", (event) => { if (event.toolName === TOOL_NAME) { state.observed.invoked = true; trace(state, "tool_callback", { phase: "execution_start", toolCallId: event.toolCallId }); emit(MARKERS.invoked); } });
 	pi.on("tool_call", (event) => { if (event.toolName === TOOL_NAME) { state.observed.toolCall = true; trace(state, "tool_callback", { phase: "call", toolCallId: event.toolCallId }); emit(MARKERS.toolCall); } });
