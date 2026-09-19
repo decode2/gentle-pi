@@ -14,11 +14,16 @@ const TOOL_NAME = "ask_user_question";
 const PROVIDER_ID = "hosted-questionnaire-synthetic";
 const MODEL_ID = "hosted-questionnaire-model";
 const QUESTION = "Which layout should we inspect?";
+const SECOND_QUESTION = "Which spacing should we inspect?";
 const CUSTOM_ANSWER = "  leading  internal\ntrailing  ";
+const DECLINE_MESSAGE = "User declined to answer questions";
 const FINAL_TEXT = {
 	cancel: "Synthetic provider completed after questionnaire cancellation.",
 	single: "Synthetic provider completed after questionnaire single selection.",
 	custom: "Synthetic provider completed after questionnaire custom response.",
+	multi: "Synthetic provider completed after questionnaire multi selection.",
+	"empty-multi": "Synthetic provider completed after questionnaire empty multi selection.",
+	"partial-cancel": "Synthetic provider completed after questionnaire partial cancellation.",
 } as const;
 const CANCELLED_MARKER = "hosted:ask_user_question:cancelled";
 const COMPLETED_MARKER = "hosted:ask_user_question:completed";
@@ -40,7 +45,8 @@ const MARKERS = [
 
 type RpcRecord = Record<string, unknown>;
 type ExitStatus = { code: number | null; signal: NodeJS.Signals | null };
-type HostedScenario = "cancel" | "single" | "custom";
+type HostedScenario = "cancel" | "single" | "custom" | "multi" | "empty-multi" | "partial-cancel";
+type AnsweredScenario = Exclude<HostedScenario, "cancel" | "partial-cancel">;
 type RunResult = { events: RpcRecord[]; cancellationResponses: number };
 type HostedCase = { name: "owned" | "reference"; candidatePath: string; expectedSourcePath?: string; reference: boolean; scenario: HostedScenario };
 type StableResult = { content: unknown; details: { cancelled: unknown; answers: unknown } };
@@ -109,19 +115,76 @@ function blockedSequence(events: RpcRecord[]): boolean[] {
 	return sequence;
 }
 
-function expectedAnswer(scenario: Exclude<HostedScenario, "cancel">): RpcRecord {
-	return { questionIndex: 0, question: QUESTION, kind: scenario === "single" ? "option" : "custom", answer: scenario === "single" ? "Compact" : CUSTOM_ANSWER };
+function expectedPromptProjection(scenario: HostedScenario): RpcRecord {
+	const multi = scenario === "multi" || scenario === "empty-multi";
+	const layoutOptions = multi
+		? [
+			{ label: "Compact", description: "Use a compact layout.", hasPreview: false },
+			{ label: "Detailed", description: "Use a detailed layout.", hasPreview: false },
+			{ label: "Spacious", description: "Use a spacious layout.", hasPreview: false },
+		]
+		: [
+			{ label: "Compact", description: "Use a compact layout.", hasPreview: false },
+			{ label: "Detailed", description: "Use a detailed layout.", hasPreview: false },
+		];
+	const questions: RpcRecord[] = [{ question: QUESTION, header: "Layout", multiSelect: multi, options: layoutOptions }];
+	if (scenario === "partial-cancel") {
+		questions.push({
+			question: SECOND_QUESTION,
+			header: "Spacing",
+			multiSelect: false,
+			options: [
+				{ label: "Dense", description: "Use tighter spacing.", hasPreview: false },
+				{ label: "Relaxed", description: "Use more generous spacing.", hasPreview: false },
+			],
+		});
+	}
+	return { questions };
+}
+
+function expectedAnswer(scenario: AnsweredScenario): RpcRecord {
+	if (scenario === "single") return { questionIndex: 0, question: QUESTION, kind: "option", answer: "Compact" };
+	if (scenario === "custom") return { questionIndex: 0, question: QUESTION, kind: "custom", answer: CUSTOM_ANSWER };
+	return {
+		questionIndex: 0,
+		question: QUESTION,
+		kind: "multi",
+		answer: null,
+		selected: scenario === "multi" ? ["Compact", "Detailed"] : [],
+	};
+}
+
+function expectedAnswers(scenario: HostedScenario): RpcRecord[] {
+	if (scenario === "cancel") return [];
+	if (scenario === "partial-cancel") return [expectedAnswer("single")];
+	return [expectedAnswer(scenario)];
 }
 
 function successfulContent(answer: string): string {
 	return `User has answered your questions: "${QUESTION}"="${answer}". You can now continue with the user's answers in mind.`;
 }
 
-function assertSuccessfulResult(content: unknown, details: RpcRecord, scenario: Exclude<HostedScenario, "cancel">): void {
-	const expected = expectedAnswer(scenario);
+function expectedContent(scenario: HostedScenario): string {
+	if (scenario === "cancel" || scenario === "partial-cancel") return DECLINE_MESSAGE;
+	const answer = expectedAnswer(scenario);
+	const scalar = answer.kind === "multi"
+		? Array.isArray(answer.selected) && answer.selected.length > 0 ? answer.selected.join(", ") : "(no input)"
+		: typeof answer.answer === "string" ? answer.answer : "(no input)";
+	return successfulContent(scalar);
+}
+
+function assertSuccessfulResult(content: unknown, details: RpcRecord, scenario: AnsweredScenario): void {
+	assert.deepEqual(Object.keys(details).sort(), ["answers", "cancelled"]);
 	assert.equal(details.cancelled, false);
-	assert.deepEqual(details.answers, [expected]);
-	assert.deepEqual(content, [{ type: "text", text: successfulContent(expected.answer as string) }]);
+	assert.deepEqual(details.answers, expectedAnswers(scenario));
+	assert.deepEqual(content, [{ type: "text", text: expectedContent(scenario) }]);
+}
+
+function assertPartialCancelledResult(content: unknown, details: RpcRecord): void {
+	assert.deepEqual(Object.keys(details).sort(), ["answers", "cancelled"]);
+	assert.equal(details.cancelled, true);
+	assert.deepEqual(details.answers, expectedAnswers("partial-cancel"));
+	assert.deepEqual(content, [{ type: "text", text: DECLINE_MESSAGE }]);
 }
 
 function withTimeout<T>(promise: Promise<T>, milliseconds: number, label: string): Promise<T> {
@@ -184,10 +247,19 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	const selectStep = (matcher: (option: string) => boolean, label: string) => (event: RpcRecord): void => {
 		assert.equal(event.method, "select", `${label} must use select`);
 		if (!Array.isArray(event.options)) throw new Error(`${label} must expose options`);
+		assert.ok(event.options.every((option): option is string => typeof option === "string"), `${label} options must be strings`);
+		assert.equal(new Set(event.options).size, event.options.length, `${label} options must be unique`);
 		const matches = event.options.filter((option): option is string => typeof option === "string" && matcher(option));
 		assert.equal(matches.length, 1, `${label} must have one matching emitted option`);
 		assert.equal(typeof event.id, "string", `${label} request must have an RPC id`);
 		send({ type: "extension_ui_response", id: event.id, value: matches[0] });
+	};
+	const inputStep = (value: string, placeholder: string, label: string, question: string = QUESTION) => (event: RpcRecord): void => {
+		assert.equal(event.method, "input", `${label} must use input`);
+		assert.equal(event.placeholder, placeholder, `${label} placeholder changed`);
+		assert.ok(typeof event.title === "string" && event.title.includes(question), `${label} title must name its question`);
+		assert.equal(typeof event.id, "string", `${label} request must have an RPC id`);
+		send({ type: "extension_ui_response", id: event.id, value });
 	};
 	const textStep = (methods: readonly ("editor" | "input")[], label: string) => (event: RpcRecord): void => {
 		assert.ok(methods.includes(event.method as "editor" | "input"), `${label} used unexpected method ${String(event.method)}`);
@@ -196,20 +268,48 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	};
 	const cancelStep = (event: RpcRecord): void => {
 		assert.equal(event.method, "select", "cancellation must start with select");
+		if (!Array.isArray(event.options)) throw new Error("cancellation must expose options");
+		assert.ok(event.options.every((option): option is string => typeof option === "string"), "cancellation options must be strings");
+		assert.equal(new Set(event.options).size, event.options.length, "cancellation options must be unique");
 		if (cancellationResponses !== 0) throw new Error("hosted questionnaire requested more than one selection dialog");
 		assert.equal(typeof event.id, "string", "selection request must have an RPC id");
 		cancellationResponses += 1;
 		send({ type: "extension_ui_response", id: event.id, cancelled: true });
 	};
+	const cancelQuestion = (question: string) => (event: RpcRecord): void => {
+		assert.ok(typeof event.title === "string" && event.title.includes(question), `cancellation title must name ${question}`);
+		cancelStep(event);
+	};
 	const owned = candidatePath === OWNED_EXTENSION_PATH;
-	const plannedDialogs: Array<(event: RpcRecord) => void> = scenario === "cancel" ? [cancelStep]
-		: owned
-			? scenario === "single"
-				? [selectStep((option) => option === "Choose an option", "owned single action"), selectStep((option) => option === "Compact", "owned single option"), selectStep((option) => option === "Submit", "owned single submit")]
-				: [selectStep((option) => option === "Use custom text", "owned custom action"), textStep(["editor", "input"], "owned custom text"), selectStep((option) => option === "Submit", "owned custom submit")]
-			: scenario === "single"
-				? [selectStep((option) => /^1\. Compact — .+$/.test(option), "reference single option")]
-				: [selectStep((option) => option === "3. Type something.", "reference custom option"), textStep(["input"], "reference custom text")];
+	const plannedDialogs: Array<(event: RpcRecord) => void> = (() => {
+		if (scenario === "cancel") return [cancelStep];
+		if (scenario === "partial-cancel") {
+			return owned
+				? [
+					selectStep((option) => option === "Choose an option", "owned partial first action"),
+					selectStep((option) => option === "Compact", "owned partial first option"),
+					selectStep((option) => option === "Next", "owned partial advance"),
+					cancelQuestion(SECOND_QUESTION),
+				]
+				: [selectStep((option) => /^1\. Compact — .+$/.test(option), "reference partial first option"), cancelQuestion(SECOND_QUESTION)];
+		}
+		if (owned) {
+			if (scenario === "single") return [selectStep((option) => option === "Choose an option", "owned single action"), selectStep((option) => option === "Compact", "owned single option"), selectStep((option) => option === "Submit", "owned single submit")];
+			if (scenario === "custom") return [selectStep((option) => option === "Use custom text", "owned custom action"), textStep(["editor", "input"], "owned custom text"), selectStep((option) => option === "Submit", "owned custom submit")];
+			if (scenario === "multi") return [
+				selectStep((option) => option === "Choose options", "owned multi first action"),
+				selectStep((option) => option === "Compact", "owned multi first option"),
+				selectStep((option) => option === "Choose options", "owned multi second action"),
+				selectStep((option) => option === "Detailed", "owned multi second option"),
+				selectStep((option) => option === "Submit", "owned multi submit"),
+			];
+			return [selectStep((option) => option === "Submit", "owned empty multi submit")];
+		}
+		if (scenario === "single") return [selectStep((option) => /^1\. Compact — .+$/.test(option), "reference single option")];
+		if (scenario === "custom") return [selectStep((option) => option === "3. Type something.", "reference custom option"), textStep(["input"], "reference custom text")];
+		if (scenario === "multi") return [inputStep("1,2", "1,3", "reference multi input")];
+		return [inputStep("", "1,3", "reference empty multi input")];
+	})();
 	const fireAndForget = new Set(["notify", "setStatus", "setWidget", "setTitle", "set_editor_text"]);
 	const onLine = (rawLine: string): void => {
 		const line = rawLine.endsWith("\r") ? rawLine.slice(0, -1) : rawLine;
@@ -280,6 +380,12 @@ test("hosted real Pi RPC compares owned and public reference", async (t) => {
 		{ name: "reference", candidatePath: REFERENCE_EXTENSION_PATH, expectedSourcePath: REFERENCE_EXTENSION_PATH, reference: true, scenario: "single" },
 		{ name: "owned", candidatePath, reference: false, scenario: "custom" },
 		{ name: "reference", candidatePath: REFERENCE_EXTENSION_PATH, expectedSourcePath: REFERENCE_EXTENSION_PATH, reference: true, scenario: "custom" },
+		{ name: "owned", candidatePath, reference: false, scenario: "multi" },
+		{ name: "reference", candidatePath: REFERENCE_EXTENSION_PATH, expectedSourcePath: REFERENCE_EXTENSION_PATH, reference: true, scenario: "multi" },
+		{ name: "owned", candidatePath, reference: false, scenario: "empty-multi" },
+		{ name: "reference", candidatePath: REFERENCE_EXTENSION_PATH, expectedSourcePath: REFERENCE_EXTENSION_PATH, reference: true, scenario: "empty-multi" },
+		{ name: "owned", candidatePath, reference: false, scenario: "partial-cancel" },
+		{ name: "reference", candidatePath: REFERENCE_EXTENSION_PATH, expectedSourcePath: REFERENCE_EXTENSION_PATH, reference: true, scenario: "partial-cancel" },
 	];
 	const comparable = new Map<HostedScenario, ComparableResult[]>();
 	for (const testCase of cases) {
@@ -288,20 +394,29 @@ test("hosted real Pi RPC compares owned and public reference", async (t) => {
 			const sandbox = await mkdtemp(join(tmpdir(), `gentle-pi-hosted-rpc-${testCase.name}-${testCase.scenario}-`));
 			caseTest.after(async () => { await rm(sandbox, { recursive: true, force: true }); });
 			const result = await runRpc(cliPath, testCase.candidatePath, fixturePath, sandbox, testCase.expectedSourcePath, testCase.scenario);
-			const cancelled = testCase.scenario === "cancel";
+			const cancelled = testCase.scenario === "cancel" || testCase.scenario === "partial-cancel";
 			assert.equal(result.cancellationResponses, cancelled ? 1 : 0);
 			for (const marker of MARKERS) assert.equal(notificationCount(result.events, marker), marker === CANCELLED_MARKER ? (cancelled ? 1 : 0) : 1, marker);
 			assert.equal(notificationCount(result.events, COMPLETED_MARKER), cancelled ? 0 : 1, `${COMPLETED_MARKER}; ${notificationMessages(result.events).filter((message) => message.startsWith("hosted:questionnaire-result-rejected:")).slice(0, 4).map((message) => message.slice(0, 800)).join("\n").slice(0, 2000)}`);
 			const dialogs = result.events.filter((event) => event.type === "extension_ui_request" && ["select", "input", "editor", "confirm"].includes(String(event.method)));
 			const dialogMethods = dialogs.map((event) => String(event.method));
-			if (cancelled) assert.deepEqual(dialogMethods, ["select"]);
+			if (testCase.scenario === "cancel") assert.deepEqual(dialogMethods, ["select"]);
+			else if (testCase.scenario === "partial-cancel") assert.deepEqual(dialogMethods, testCase.name === "owned" ? ["select", "select", "select", "select"] : ["select", "select"]);
 			else if (testCase.name === "owned" && testCase.scenario === "single") assert.deepEqual(dialogMethods, ["select", "select", "select"]);
-			else if (testCase.name === "owned") { assert.equal(dialogMethods[0], "select"); assert.ok(dialogMethods[1] === "editor" || dialogMethods[1] === "input"); assert.equal(dialogMethods[2], "select"); }
+			else if (testCase.name === "owned" && testCase.scenario === "custom") { assert.equal(dialogMethods[0], "select"); assert.ok(dialogMethods[1] === "editor" || dialogMethods[1] === "input"); assert.equal(dialogMethods[2], "select"); }
+			else if (testCase.name === "owned" && testCase.scenario === "multi") assert.deepEqual(dialogMethods, ["select", "select", "select", "select", "select"]);
+			else if (testCase.name === "owned") assert.deepEqual(dialogMethods, ["select"]);
 			else if (testCase.scenario === "single") assert.deepEqual(dialogMethods, ["select"]);
-			else assert.deepEqual(dialogMethods, ["select", "input"]);
+			else if (testCase.scenario === "custom") assert.deepEqual(dialogMethods, ["select", "input"]);
+			else if (testCase.scenario === "multi" || testCase.scenario === "empty-multi") assert.deepEqual(dialogMethods, ["input"]);
+			else assert.fail(`unexpected dialog assertion for ${testCase.name} ${testCase.scenario}`);
 			const selection = result.events.filter((event) => event.type === "extension_ui_request" && event.method === "select");
-			assert.equal(selection.length, cancelled ? 1 : testCase.name === "owned" ? testCase.scenario === "single" ? 3 : 2 : 1);
-			if (cancelled && testCase.name === "owned") {
+			const expectedSelectionCount = testCase.scenario === "cancel" ? 1
+				: testCase.scenario === "partial-cancel" ? testCase.name === "owned" ? 4 : 2
+					: testCase.name === "owned" ? testCase.scenario === "single" ? 3 : testCase.scenario === "custom" ? 2 : testCase.scenario === "multi" ? 5 : 1
+						: testCase.scenario === "single" || testCase.scenario === "custom" ? 1 : 0;
+			assert.equal(selection.length, expectedSelectionCount);
+			if (testCase.scenario === "cancel" && testCase.name === "owned") {
 				assert.match(String(selection[0]!.title), /Which layout should we inspect/);
 				assert.deepEqual(selection[0]!.options, ["Choose an option", "Use custom text", "Skip", "Submit", "Submit partial", "Cancel"]);
 			}
@@ -323,6 +438,9 @@ test("hosted real Pi RPC compares owned and public reference", async (t) => {
 				assert.deepEqual(executionDetails.answers, []);
 				assert.equal(toolResultDetails.cancelled, true);
 				assert.deepEqual(toolResultDetails.answers, []);
+			} else if (testCase.scenario === "partial-cancel") {
+				assertPartialCancelledResult(execution.content, executionDetails);
+				assertPartialCancelledResult(toolResult.content, toolResultDetails);
 			} else {
 				assertSuccessfulResult(execution.content, executionDetails, testCase.scenario);
 				assertSuccessfulResult(toolResult.content, toolResultDetails, testCase.scenario);
@@ -335,11 +453,13 @@ test("hosted real Pi RPC compares owned and public reference", async (t) => {
 			assert.ok(content.some((block) => record(block, "assistant content").text === FINAL_TEXT[testCase.scenario]));
 			assert.equal(result.events.filter((event) => event.type === "agent_settled").length, 1);
 			const scenarioResults = comparable.get(testCase.scenario) ?? [];
-			scenarioResults.push({ result: { content: execution.content, details: { cancelled: executionDetails.cancelled, answers: executionDetails.answers } }, promptProjection: promptProjection(result.events), blocked: blockedSequence(result.events) });
+			const projection = promptProjection(result.events);
+			assert.deepEqual(projection, expectedPromptProjection(testCase.scenario), `${testCase.scenario} prompt projection must match its request`);
+			scenarioResults.push({ result: { content: execution.content, details: { cancelled: executionDetails.cancelled, answers: executionDetails.answers } }, promptProjection: projection, blocked: blockedSequence(result.events) });
 			comparable.set(testCase.scenario, scenarioResults);
 		});
 	}
-	for (const scenario of ["cancel", "single", "custom"] as const) {
+	for (const scenario of ["cancel", "single", "custom", "multi", "empty-multi", "partial-cancel"] as const) {
 		const pair = comparable.get(scenario) ?? [];
 		assert.equal(pair.length, 2, `${scenario} must have owned and reference results`);
 		assert.deepEqual(pair[1]!.result, pair[0]!.result, scenario === "cancel" ? "public cancellation result parity" : `public ${scenario} result parity`);
