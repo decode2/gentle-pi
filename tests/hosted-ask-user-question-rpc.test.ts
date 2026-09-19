@@ -38,6 +38,7 @@ const REFERENCE_EXTENSION_PATH = `${REFERENCE_ROOT}/node_modules/@juicesharp/rpi
 const FIXTURE_PATH = `${CHECKOUT_ROOT}/tests/fixtures/hosted-synthetic-provider.ts`;
 const PROMPT_PROJECTION_PREFIX = "hosted:rpiv:ask-user:prompt:projection:";
 const SCHEMA_PROJECTION_PREFIX = "hosted:ask_user_question:schema:";
+const RELOAD_TELEMETRY_PREFIX = "hosted:reload-telemetry:";
 const PUBLIC_TOOL_CALL_MARKER = "hosted:ask_user_question:tool_call";
 const VALIDATION_ERROR_MARKER = "hosted:ask_user_question:validation-error";
 const SCHEMA_NOTIFICATION_MAX = 24_000;
@@ -59,7 +60,7 @@ type HostedScenario =
 	| "invalid-missing-questions" | "invalid-empty-questions" | "invalid-one-option";
 type InvalidScenario = "invalid-missing-questions" | "invalid-empty-questions" | "invalid-one-option";
 type AnsweredScenario = Exclude<HostedScenario, "cancel" | "partial-cancel" | "schema-positive" | InvalidScenario>;
-type RunResult = { events: RpcRecord[]; cancellationResponses: number };
+type RunResult = { events: RpcRecord[]; cancellationResponses: number; childPid: number };
 type HostedCase = { name: "owned" | "reference"; candidatePath: string; expectedSourcePath?: string; reference: boolean; scenario: HostedScenario };
 type StableResult = { content: unknown; details: { cancelled: unknown; answers: unknown } };
 type ComparableResult = { result: StableResult; promptProjection: RpcRecord; blocked: boolean[] };
@@ -102,6 +103,27 @@ function notificationCount(events: RpcRecord[], message: string): number {
 function notificationMessages(events: RpcRecord[]): string[] {
 	return events.filter((event) => event.type === "extension_ui_request" && event.method === "notify")
 		.map((event) => event.message).filter((message): message is string => typeof message === "string");
+}
+
+function reloadTelemetryEvent(event: RpcRecord): RpcRecord | undefined {
+	if (event.type !== "extension_ui_request" || event.method !== "notify" || typeof event.message !== "string" || !event.message.startsWith(RELOAD_TELEMETRY_PREFIX)) return undefined;
+	const encoded = event.message.slice(RELOAD_TELEMETRY_PREFIX.length);
+	assert.ok(encoded.length <= 2_000, "reload telemetry must stay bounded");
+	return record(JSON.parse(encoded), "reload telemetry");
+}
+
+function reloadTelemetry(events: RpcRecord[]): RpcRecord[] {
+	return events.flatMap((event) => {
+		const telemetry = reloadTelemetryEvent(event);
+		return telemetry === undefined ? [] : [telemetry];
+	});
+}
+
+function telemetryIndexes(events: RpcRecord[], predicate: (telemetry: RpcRecord) => boolean): number[] {
+	return events.flatMap((event, index) => {
+		const telemetry = reloadTelemetryEvent(event);
+		return telemetry !== undefined && predicate(telemetry) ? [index] : [];
+	});
 }
 
 function assertPromptProjection(value: unknown): RpcRecord {
@@ -350,6 +372,30 @@ function assertPartialCancelledResult(content: unknown, details: RpcRecord): voi
 	assert.deepEqual(content, [{ type: "text", text: DECLINE_MESSAGE }]);
 }
 
+function assertReloadToolResult(events: RpcRecord[], generation: number): void {
+	const toolCallId = `hosted-questionnaire-call-${generation}`;
+	const messages = events.filter((event) => event.type === "message_end").map((event) => record(event.message, "reload message_end message"));
+	const toolCalls = messages.flatMap((message) => message.role === "assistant" && Array.isArray(message.content) ? message.content : []).map((block) => record(block, "reload assistant content block"));
+	const matchingCalls = toolCalls.filter((block) => block.type === "toolCall" && block.name === TOOL_NAME && block.id === toolCallId);
+	assert.equal(matchingCalls.length, 1);
+	const toolCall = matchingCalls[0]!;
+	assert.equal(typeof toolCall.id, "string");
+	assert.equal(toolCall.id, toolCallId);
+	const toolResults = messages.filter((message) => message.role === "toolResult" && message.toolName === TOOL_NAME && message.toolCallId === toolCallId);
+	assert.equal(toolResults.length, 1, `generation ${generation} must have one matching public tool result`);
+	const toolResult = toolResults[0]!;
+	assert.equal(typeof toolResult.toolCallId, "string");
+	assert.equal(toolResult.isError, false);
+	assert.deepEqual(toolResult.content, [{ type: "text", text: DECLINE_MESSAGE }]);
+	assert.deepEqual(record(toolResult.details, "reload tool result details"), { answers: [], cancelled: true });
+	const starts = events.filter((event) => event.type === "tool_execution_start" && event.toolName === TOOL_NAME && event.toolCallId === toolCallId);
+	const calls = reloadTelemetry(events).filter((event) => event.event === "tool_callback" && event.phase === "call" && event.generation === generation && event.toolCallId === toolCallId);
+	const ends = events.filter((event) => event.type === "tool_execution_end" && event.toolName === TOOL_NAME && event.toolCallId === toolCallId);
+	assert.equal(starts.length, 1); assert.equal(calls.length, 1); assert.equal(ends.length, 1);
+	assert.equal(ends[0]!.isError, false);
+	assert.deepEqual(record(ends[0]!.result, "reload execution result").content, [{ type: "text", text: DECLINE_MESSAGE }]);
+}
+
 function withTimeout<T>(promise: Promise<T>, milliseconds: number, label: string): Promise<T> {
 	return new Promise<T>((resolvePromise, rejectPromise) => {
 		const timer = setTimeout(() => rejectPromise(new Error(`${label} timed out`)), milliseconds);
@@ -357,7 +403,7 @@ function withTimeout<T>(promise: Promise<T>, milliseconds: number, label: string
 	});
 }
 
-async function runRpc(cliPath: string, candidatePath: string, fixturePath: string, sandbox: string, expectedSourcePath?: string, scenario: HostedScenario = "cancel"): Promise<RunResult> {
+async function runRpc(cliPath: string, candidatePath: string, fixturePath: string, sandbox: string, expectedSourcePath?: string, scenario: HostedScenario = "cancel", reload = false): Promise<RunResult> {
 	assert.ok(candidatePath === OWNED_EXTENSION_PATH || candidatePath === REFERENCE_EXTENSION_PATH, `unsupported hosted questionnaire candidate: ${candidatePath}`);
 	assert.equal(fixturePath, FIXTURE_PATH);
 	assert.equal(expectedSourcePath, candidatePath === REFERENCE_EXTENSION_PATH ? REFERENCE_EXTENSION_PATH : undefined);
@@ -379,7 +425,8 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 		GENTLE_PI_HOSTED_SCENARIO: scenario,
 	};
 	if (expectedSourcePath !== undefined) childEnv.GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH = expectedSourcePath;
-	assert.deepEqual(Object.keys(childEnv).sort(), ["GENTLE_PI_AGENT_HOME", "GENTLE_PI_CONFIG_HOME", "GENTLE_PI_HOSTED_SCENARIO", "HOME", "PATH", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_OFFLINE", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", ...(expectedSourcePath === undefined ? [] : ["GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH"])].sort());
+	if (reload) childEnv.GENTLE_PI_HOSTED_RELOAD = "1";
+	assert.deepEqual(Object.keys(childEnv).sort(), ["GENTLE_PI_AGENT_HOME", "GENTLE_PI_CONFIG_HOME", "GENTLE_PI_HOSTED_SCENARIO", "HOME", "PATH", "PI_CODING_AGENT_DIR", "PI_CODING_AGENT_SESSION_DIR", "PI_OFFLINE", "PI_SKIP_VERSION_CHECK", "PI_TELEMETRY", "TEMP", "TMP", "TMPDIR", "USERPROFILE", "XDG_CACHE_HOME", "XDG_CONFIG_HOME", "XDG_DATA_HOME", "XDG_RUNTIME_DIR", "XDG_STATE_HOME", ...(expectedSourcePath === undefined ? [] : ["GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH"]), ...(reload ? ["GENTLE_PI_HOSTED_RELOAD"] : [])].sort());
 	for (const path of Object.values(childEnv).filter((value) => value.startsWith("/"))) {
 		assert.ok(relative(CHECKOUT_ROOT, path).startsWith(".."), `child path must be outside checkout: ${path}`);
 	}
@@ -398,6 +445,10 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	let resolveCompletion!: () => void;
 	let rejectCompletion!: (error: unknown) => void;
 	const completion = new Promise<void>((resolvePromise, rejectPromise) => { resolveCompletion = resolvePromise; rejectCompletion = rejectPromise; });
+	let settledCount = 0;
+	let reloadResourcesObserved = false;
+	let reloadResponseObserved = false;
+	let reloadPromptSent = false;
 	const exited = new Promise<ExitStatus>((resolveExit) => child.once("exit", (code, signal) => resolveExit({ code, signal })));
 	const fail = (error: unknown): void => { if (!completionClaimed) { completionClaimed = true; rejectCompletion(error); } };
 	child.once("exit", (code, signal) => {
@@ -434,7 +485,7 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 		if (!Array.isArray(event.options)) throw new Error("cancellation must expose options");
 		assert.ok(event.options.every((option): option is string => typeof option === "string"), "cancellation options must be strings");
 		assert.equal(new Set(event.options).size, event.options.length, "cancellation options must be unique");
-		if (cancellationResponses !== 0) throw new Error("hosted questionnaire requested more than one selection dialog");
+		if (cancellationResponses >= (reload ? 2 : 1)) throw new Error("hosted questionnaire requested more than one selection dialog per invocation");
 		assert.equal(typeof event.id, "string", "selection request must have an RPC id");
 		cancellationResponses += 1;
 		send({ type: "extension_ui_response", id: event.id, cancelled: true });
@@ -447,7 +498,7 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	const plannedDialogs: Array<(event: RpcRecord) => void> = (() => {
 		if (isInvalidScenario(scenario)) return [];
 		if (scenario === "schema-positive") return [cancelQuestion(QUESTION)];
-		if (scenario === "cancel") return [cancelStep];
+		if (scenario === "cancel") return reload ? [cancelStep, cancelStep] : [cancelStep];
 		if (scenario === "partial-cancel") {
 			return owned
 				? [
@@ -482,6 +533,12 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 		try {
 			const event = record(JSON.parse(line), "RPC stdout must contain JSON objects");
 			events.push(event);
+			const telemetry = reload ? reloadTelemetryEvent(event) : undefined;
+			if (telemetry?.event === "resources_discover" && telemetry.generation === 2 && telemetry.reason === "reload") reloadResourcesObserved = true;
+			if (reload && event.type === "response" && event.id === "reload-1" && event.command === "prompt") {
+				assert.equal(event.success, true, "reload command response must succeed");
+				reloadResponseObserved = event.success === true;
+			}
 			if (event.type === "extension_ui_request") {
 				if (typeof event.method !== "string") throw new Error("extension UI request method must be a string");
 				if (!fireAndForget.has(event.method)) {
@@ -492,7 +549,15 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 					dialogIndex += 1;
 				}
 			}
-			if (event.type === "agent_settled") { completionClaimed = true; resolveCompletion(); }
+			if (event.type === "agent_settled") {
+				settledCount += 1;
+				if (!reload || settledCount === 2) { completionClaimed = true; resolveCompletion(); }
+				else if (settledCount === 1) send({ id: "reload-1", type: "prompt", message: "/hosted-questionnaire-reload-v1" });
+			}
+			if (reload && reloadResourcesObserved && reloadResponseObserved && !reloadPromptSent) {
+				reloadPromptSent = true;
+				send({ id: "hosted-prompt-2", type: "prompt", message: "Use ask_user_question to choose a layout after reload; do not answer until the questionnaire is complete." });
+			}
 		} catch (error) { fail(error); }
 	};
 	const decoder = new StringDecoder("utf8");
@@ -514,9 +579,15 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 		child.stdin?.end();
 		exit = await withTimeout(exited, 5_000, `Pi child ${childPid} exit`);
 		assert.equal(exit.code, 0, `Pi child exited with ${exit.signal ?? exit.code}; stderr: ${stderr}`);
+		assert.equal(settledCount, reload ? 2 : 1, "hosted questionnaire invocation settlement count changed");
+		if (reload) {
+			assert.equal(reloadResourcesObserved, true, "reload resources_discover telemetry was not observed");
+			assert.equal(reloadResponseObserved, true, "reload command response was not observed");
+			assert.equal(reloadPromptSent, true, "post-reload prompt was not sent after reload response");
+		}
 		assert.equal(dialogIndex, plannedDialogs.length, "planned hosted questionnaire dialog sequence was not fully consumed");
 		assert.equal(observedDialogMethods.length, plannedDialogs.length, "hosted questionnaire dialog count changed");
-		return { events, cancellationResponses };
+		return { events, cancellationResponses, childPid };
 	} finally {
 		if (!exit) {
 			child.kill("SIGTERM");
@@ -665,4 +736,99 @@ test("hosted real Pi RPC compares owned and public reference", async (t) => {
 	const referenceSchema = schemaComparisons.find((comparison) => comparison.name === "reference");
 	assert.ok(ownedSchema); assert.ok(referenceSchema);
 	assertSchemaCompatibility(ownedSchema!.schema, referenceSchema!.schema);
+});
+
+test("hosted real Pi RPC reloads the owned questionnaire in place", async (t) => {
+	assertHostedIsolation(false);
+	const repoRoot = dirname(dirname(fileURLToPath(import.meta.url)));
+	const candidatePath = join(repoRoot, "extensions", "ask-user-question.ts");
+	const fixturePath = join(repoRoot, "tests", "fixtures", "hosted-synthetic-provider.ts");
+	assert.equal(candidatePath, OWNED_EXTENSION_PATH);
+	assert.equal(fixturePath, FIXTURE_PATH);
+	await access(candidatePath, constants.R_OK);
+	await access(fixturePath, constants.R_OK);
+	await assert.rejects(access(repoRoot, constants.W_OK));
+	const cliPath = resolvePiCli(repoRoot);
+	const sandbox = await mkdtemp(join(tmpdir(), "gentle-pi-hosted-rpc-reload-"));
+	t.after(async () => { await rm(sandbox, { recursive: true, force: true }); });
+	const result = await runRpc(cliPath, candidatePath, fixturePath, sandbox, undefined, "cancel", true);
+	const events = result.events;
+	assert.equal(result.cancellationResponses, 2);
+	assert.equal(notificationCount(events, MARKERS[0]!), 2);
+	assert.equal(notificationCount(events, MARKERS[1]!), 2);
+	assert.equal(notificationCount(events, MARKERS[2]!), 2);
+	assert.equal(notificationCount(events, MARKERS[3]!), 2);
+	assert.equal(notificationCount(events, CANCELLED_MARKER), 2);
+	assert.equal(notificationCount(events, PUBLIC_TOOL_CALL_MARKER), 2);
+	assert.equal(notificationCount(events, VALIDATION_ERROR_MARKER), 0);
+	assert.equal(notificationCount(events, COMPLETED_MARKER), 0);
+	assert.equal(notificationCount(events, MARKERS[5]!), 2);
+	assert.equal(notificationCount(events, MARKERS[6]!), 2);
+	assert.equal(notificationCount(events, MARKERS[7]!), 2);
+	const dialogs = events.filter((event) => event.type === "extension_ui_request" && ["select", "input", "editor", "confirm"].includes(String(event.method)));
+	assert.deepEqual(dialogs.map((event) => event.method), ["select", "select"]);
+	const promptResponses = events.filter((event) => event.type === "response" && event.command === "prompt");
+	assert.deepEqual(promptResponses.map((event) => [event.id, event.success]), [["hosted-prompt-1", true], ["reload-1", true], ["hosted-prompt-2", true]]);
+	const telemetry = reloadTelemetry(events);
+	assert.ok(telemetry.every((entry) => entry.pid === result.childPid), "telemetry must identify the tracked child PID");
+	assert.equal(new Set(telemetry.map((entry) => entry.pid)).size, 1, "reload generations must share one child PID");
+	const of = (event: string, generation?: number): RpcRecord[] => telemetry.filter((entry) => entry.event === event && (generation === undefined || entry.generation === generation));
+	assert.deepEqual(telemetry.filter((entry) => ["session_start", "resources_discover", "session_shutdown"].includes(String(entry.event))).map((entry) => [entry.generation, entry.event, entry.reason]), [
+		[1, "session_start", "startup"], [1, "resources_discover", "startup"], [1, "session_shutdown", "reload"],
+		[2, "session_start", "reload"], [2, "resources_discover", "reload"], [2, "session_shutdown", "quit"],
+	]);
+	assert.equal(of("session_start").length, 2);
+	assert.equal(of("resources_discover").length, 2);
+	assert.equal(of("session_shutdown").length, 2);
+	assert.equal(of("session_shutdown", 1)[0]!.reason, "reload");
+	assert.equal(of("session_shutdown", 2)[0]!.reason, "quit");
+	const inventories = of("tool_inventory");
+	assert.equal(inventories.length, 2);
+	for (const inventory of inventories) {
+		assert.equal(inventory.sourceInfo, OWNED_EXTENSION_PATH);
+		assert.equal(inventory.count, 1);
+		assert.equal(inventory.mode, "rpc");
+		assert.equal(inventory.hasUI, true);
+	}
+	assert.equal(of("prompt").length, 2);
+	assert.equal(of("blocked").length, 4);
+	assert.equal(of("tool_callback").length, 6);
+	assert.equal(of("provider_request").length, 4);
+	assert.equal(of("provider_completion").length, 4);
+	for (const generation of [1, 2]) {
+		const toolCallId = `hosted-questionnaire-call-${generation}`;
+		assert.equal(of("prompt", generation).length, 1);
+		assert.deepEqual(of("blocked", generation).map((entry) => entry.active), [true, false]);
+		assert.deepEqual(of("provider_request", generation).map((entry) => entry.toolCallId), [toolCallId, toolCallId]);
+		assert.deepEqual(of("provider_completion", generation).map((entry) => entry.stopReason), ["toolUse", "stop"]);
+		assert.equal(of("tool_callback", generation).length, 3);
+		assertReloadToolResult(events, generation);
+	}
+	const reloadShutdownIndex = telemetryIndexes(events, (entry) => entry.generation === 1 && entry.event === "session_shutdown" && entry.reason === "reload")[0]!;
+	const generationTwoStartIndex = telemetryIndexes(events, (entry) => entry.generation === 2 && entry.event === "session_start" && entry.reason === "reload")[0]!;
+	const generationTwoResourcesIndex = telemetryIndexes(events, (entry) => entry.generation === 2 && entry.event === "resources_discover" && entry.reason === "reload")[0]!;
+	const reloadResponseIndex = events.findIndex((event) => event.type === "response" && event.id === "reload-1");
+	const secondPromptResponseIndex = events.findIndex((event) => event.type === "response" && event.id === "hosted-prompt-2");
+	assert.ok(reloadShutdownIndex < generationTwoStartIndex);
+	assert.ok(generationTwoStartIndex < generationTwoResourcesIndex);
+	assert.ok(generationTwoResourcesIndex < reloadResponseIndex);
+	assert.ok(reloadResponseIndex < secondPromptResponseIndex);
+	for (let index = reloadShutdownIndex + 1; index < events.length; index += 1) {
+		const entry = reloadTelemetryEvent(events[index]!);
+		if (entry !== undefined) assert.notEqual(entry.generation, 1, "stale generation telemetry appeared after reload");
+	}
+	for (const generation of [1, 2]) {
+		const blockedFalseIndex = telemetryIndexes(events, (entry) => entry.generation === generation && entry.event === "blocked" && entry.active === false)[0]!;
+		const executionEndIndex = telemetryIndexes(events, (entry) => entry.generation === generation && entry.event === "tool_callback" && entry.phase === "execution_end")[0]!;
+		const settledIndexes = events.flatMap((event, index) => event.type === "agent_settled" ? [index] : []);
+		assert.ok(blockedFalseIndex < executionEndIndex);
+		assert.ok(blockedFalseIndex < settledIndexes[generation - 1]!);
+	}
+	const questionnaireResults = events.filter((event) => event.type === "message_end").map((event) => record(event.message, "reload result message"))
+		.filter((message) => message.role === "toolResult" && message.toolName === TOOL_NAME);
+	assert.deepEqual(questionnaireResults.map((message) => message.toolCallId), ["hosted-questionnaire-call-1", "hosted-questionnaire-call-2"]);
+	const finalAssistants = events.filter((event) => event.type === "message_end").map((event) => record(event.message, "reload assistant message"))
+		.filter((message) => message.role === "assistant" && message.stopReason === "stop" && Array.isArray(message.content) && message.content.some((block) => record(block, "reload final content").text === FINAL_TEXT.cancel));
+	assert.equal(finalAssistants.length, 2);
+	assert.equal(events.filter((event) => event.type === "agent_settled").length, 2);
 });

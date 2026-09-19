@@ -33,7 +33,46 @@ type HostedScenario = (typeof HOSTED_SCENARIOS)[number];
 type InvalidScenario = "invalid-missing-questions" | "invalid-empty-questions" | "invalid-one-option";
 type AnsweredScenario = Exclude<HostedScenario, "cancel" | "partial-cancel" | "schema-positive" | InvalidScenario>;
 const SCHEMA_NOTIFICATION_MAX = 24_000;
+const RELOAD_MODE = process.env.GENTLE_PI_HOSTED_RELOAD === "1";
+const RELOAD_TELEMETRY_PREFIX = "hosted:reload-telemetry:";
+const GENERATION_KEY = Symbol.for("gentle-pi.hosted-questionnaire.synthetic-generation-v1");
 function isInvalidScenario(scenario: HostedScenario): scenario is InvalidScenario { return scenario.startsWith("invalid-"); }
+
+type FixtureState = {
+	readonly generation: number;
+	readonly toolCallId: string;
+	questionIssued: boolean;
+	notify?: (message: string) => void;
+	observed: {
+		session: boolean;
+		beforeAgent: boolean;
+		registered: boolean;
+		invoked: boolean;
+		toolCall: boolean;
+		validationError: string | undefined;
+		cancelled: boolean;
+		completed: boolean;
+		prompt: number;
+		promptProjection: string | undefined;
+		blocked: boolean[];
+	};
+};
+
+function nextGeneration(): number {
+	const processState = globalThis as typeof globalThis & Record<symbol, number | undefined>;
+	const generation = (processState[GENERATION_KEY] ?? 0) + 1;
+	processState[GENERATION_KEY] = generation;
+	return generation;
+}
+
+function createState(generation: number): FixtureState {
+	return {
+		generation,
+		toolCallId: RELOAD_MODE ? `hosted-questionnaire-call-${generation}` : TOOL_CALL_ID,
+		questionIssued: false,
+		observed: { session: false, beforeAgent: false, registered: false, invoked: false, toolCall: false, validationError: undefined, cancelled: false, completed: false, prompt: 0, promptProjection: undefined, blocked: [] },
+	};
+}
 const OWNED_SOURCE_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "../../extensions/ask-user-question.ts");
 const REFERENCE_SOURCE_PATH = "/reference/node_modules/@juicesharp/rpiv-ask-user-question/index.ts";
 const expectedSourcePath = process.env.GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH ?? OWNED_SOURCE_PATH;
@@ -76,10 +115,7 @@ const QUESTION_ARGUMENTS_BY_SCENARIO = {
 } as const;
 const QUESTION_ARGUMENTS = QUESTION_ARGUMENTS_BY_SCENARIO[expectedScenario];
 type PromptProjection = { questions: { question: string; header: string; multiSelect: boolean; options: { label: string; description: string; hasPreview: boolean }[] }[] };
-const observed = { session: false, beforeAgent: false, registered: false, invoked: false, toolCall: false, validationError: undefined as string | undefined, cancelled: false, completed: false, prompt: 0, promptProjection: undefined as string | undefined, blocked: [] as boolean[] };
 const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
-let notify: ((message: string) => void) | undefined;
-let questionIssued = false;
 
 function isRecord(value: unknown): value is Record<string, unknown> { return value !== null && typeof value === "object" && !Array.isArray(value); }
 function expectedAnswer(scenario: AnsweredScenario): Record<string, unknown> {
@@ -150,15 +186,19 @@ function projectPrompt(value: unknown): PromptProjection | undefined {
 	}
 	return { questions };
 }
-function mark(message: string): void { notify?.(message); }
-function notifyToolSchema(pi: ExtensionAPI): void {
+function mark(state: FixtureState, message: string): void { state.notify?.(message); }
+function trace(state: FixtureState, event: string, details: Record<string, unknown> = {}): void {
+	if (!RELOAD_MODE) return;
+	mark(state, `${RELOAD_TELEMETRY_PREFIX}${JSON.stringify({ pid: process.pid, generation: state.generation, event, ...details })}`);
+}
+function notifyToolSchema(pi: ExtensionAPI, state: FixtureState): void {
 	const tool = pi.getAllTools().find((candidate) => candidate.name === TOOL_NAME);
-	if (!tool) return mark(`${MARKERS.schema}error:tool-not-found`);
+	if (!tool) return mark(state, `${MARKERS.schema}error:tool-not-found`);
 	let encoded: string | undefined;
-	try { encoded = JSON.stringify(tool.parameters); } catch { return mark(`${MARKERS.schema}error:not-json-serializable`); }
-	if (encoded === undefined) return mark(`${MARKERS.schema}error:not-json-serializable`);
-	if (encoded.length > SCHEMA_NOTIFICATION_MAX) return mark(`${MARKERS.schema}error:too-large`);
-	mark(`${MARKERS.schema}${encoded}`);
+	try { encoded = JSON.stringify(tool.parameters); } catch { return mark(state, `${MARKERS.schema}error:not-json-serializable`); }
+	if (encoded === undefined) return mark(state, `${MARKERS.schema}error:not-json-serializable`);
+	if (encoded.length > SCHEMA_NOTIFICATION_MAX) return mark(state, `${MARKERS.schema}error:too-large`);
+	mark(state, `${MARKERS.schema}${encoded}`);
 }
 function isPublicValidationText(value: unknown): value is string {
 	return typeof value === "string" && value.trim().length > 0 && !/SyntaxError|ReferenceError|TypeError|Cannot find module|ERR_MODULE_NOT_FOUND|jiti|loader|compile|transpil|stack trace/i.test(value);
@@ -168,10 +208,10 @@ function partialCancelledDetails(value: unknown): boolean {
 	return isRecord(value) && value.cancelled === true && Object.keys(value).sort().join(",") === "answers,cancelled"
 		&& Array.isArray(value.answers) && value.answers.length === 1 && answerMatches(value.answers[0], expectedAnswer("single"), true);
 }
-function latestQuestionnaireResult(context: Context): ToolResultMessage | undefined {
+function latestQuestionnaireResult(context: Context, toolCallId: string): ToolResultMessage | undefined {
 	for (let index = context.messages.length - 1; index >= 0; index -= 1) {
 		const message = context.messages[index];
-		if (message?.role === "toolResult" && message.toolName === TOOL_NAME) return message;
+		if (message?.role === "toolResult" && message.toolName === TOOL_NAME && message.toolCallId === toolCallId) return message;
 	}
 	return undefined;
 }
@@ -185,16 +225,21 @@ function emitError(stream: AssistantMessageEventStream, output: AssistantMessage
 	stream.push({ type: "error", reason, error: output });
 	stream.end();
 }
-function streamSynthetic(model: Model<any>, context: Context, options?: SimpleStreamOptions): AssistantMessageEventStream {
+function streamSynthetic(model: Model<any>, context: Context, options: SimpleStreamOptions | undefined, state: FixtureState): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
 	const output = createMessage(model);
 	stream.push({ type: "start", partial: output });
+	trace(state, "provider_request", { toolCallId: state.toolCallId });
 	try {
-		if (options?.signal?.aborted) return emitError(stream, output, options, "Synthetic questionnaire request was aborted"), stream;
-		const result = latestQuestionnaireResult(context);
-		if (!questionIssued && !result) {
-			questionIssued = true;
-			const toolCall: ToolCall = { type: "toolCall", id: TOOL_CALL_ID, name: TOOL_NAME, arguments: {} };
+		if (options?.signal?.aborted) {
+			emitError(stream, output, options, "Synthetic questionnaire request was aborted");
+			trace(state, "provider_completion", { stopReason: output.stopReason, toolCallId: state.toolCallId });
+			return stream;
+		}
+		const result = latestQuestionnaireResult(context, state.toolCallId);
+		if (!state.questionIssued && !result) {
+			state.questionIssued = true;
+			const toolCall: ToolCall = { type: "toolCall", id: state.toolCallId, name: TOOL_NAME, arguments: {} };
 			output.content.push(toolCall);
 			stream.push({ type: "toolcall_start", contentIndex: 0, partial: output });
 			toolCall.arguments = QUESTION_ARGUMENTS;
@@ -206,16 +251,16 @@ function streamSynthetic(model: Model<any>, context: Context, options?: SimpleSt
 			const invalidScenario = isInvalidScenario(expectedScenario);
 			const observedErrorText = textContent(result);
 			const expectedResultObserved = invalidScenario
-				? result?.isError === true && isPublicValidationText(observedErrorText) && observed.validationError === observedErrorText
+				? result?.isError === true && isPublicValidationText(observedErrorText) && state.observed.validationError === observedErrorText
 				: expectedScenario === "cancel" || expectedScenario === "schema-positive"
-					? observed.cancelled && cancelledDetails(result?.details) && textContent(result) === DECLINE_MESSAGE
+					? state.observed.cancelled && cancelledDetails(result?.details) && textContent(result) === DECLINE_MESSAGE
 					: expectedScenario === "partial-cancel"
-						? observed.cancelled && partialCancelledDetails(result?.details) && textContent(result) === DECLINE_MESSAGE
-						: observed.completed && successfulResult(result, expectedScenario);
+						? state.observed.cancelled && partialCancelledDetails(result?.details) && textContent(result) === DECLINE_MESSAGE
+						: state.observed.completed && successfulResult(result, expectedScenario);
 			const observerContract = invalidScenario
-				? !observed.toolCall && observed.prompt === 0 && observed.promptProjection === undefined && observed.blocked.length === 0 && !observed.cancelled && !observed.completed
-				: observed.toolCall && observed.prompt === 1 && observed.promptProjection !== undefined && observed.blocked.join(",") === "true,false";
-			if (!observed.session || !observed.beforeAgent || !observed.registered || !observed.invoked || !observerContract || !expectedResultObserved || (invalidScenario ? result?.isError !== true : result?.isError === true)) throw new Error("hosted questionnaire observer contract was incomplete");
+				? !state.observed.toolCall && state.observed.prompt === 0 && state.observed.promptProjection === undefined && state.observed.blocked.length === 0 && !state.observed.cancelled && !state.observed.completed
+				: state.observed.toolCall && state.observed.prompt === 1 && state.observed.promptProjection !== undefined && state.observed.blocked.join(",") === "true,false";
+			if (!state.observed.session || !state.observed.beforeAgent || !state.observed.registered || !state.observed.invoked || !observerContract || !expectedResultObserved || (invalidScenario ? result?.isError !== true : result?.isError === true)) throw new Error("hosted questionnaire observer contract was incomplete");
 			const finalText = FINAL_TEXT[expectedScenario];
 			output.content.push({ type: "text", text: "" });
 			stream.push({ type: "text_start", contentIndex: 0, partial: output }); const block = output.content[0]; if (block?.type !== "text") throw new Error("synthetic text block was not created"); block.text = finalText;
@@ -224,45 +269,64 @@ function streamSynthetic(model: Model<any>, context: Context, options?: SimpleSt
 			output.stopReason = "stop";
 			stream.push({ type: "done", reason: "stop", message: output });
 		}
-	} catch (error) { emitError(stream, output, options, error instanceof Error ? error.message : String(error)); return stream; }
+	} catch (error) {
+		emitError(stream, output, options, error instanceof Error ? error.message : String(error));
+		trace(state, "provider_completion", { stopReason: output.stopReason, toolCallId: state.toolCallId });
+		return stream;
+	}
+	trace(state, "provider_completion", { stopReason: output.stopReason, toolCallId: state.toolCallId });
 	stream.end();
 	return stream;
 }
 
 export default function (pi: ExtensionAPI): void {
+	const generation = nextGeneration();
+	const state = createState(generation);
+	const emit = (message: string): void => mark(state, message);
 	pi.registerProvider(PROVIDER_ID, {
 		name: "Hosted questionnaire synthetic", baseUrl: "synthetic://hosted-questionnaire", apiKey: "synthetic-no-network-key", api: API_ID, authHeader: false,
 		models: [{ id: MODEL_ID, name: "Hosted questionnaire synthetic", reasoning: false, input: ["text"], cost: ZERO_USAGE.cost, contextWindow: 128000, maxTokens: 4096 }],
-		streamSimple: streamSynthetic,
+		streamSimple: (model, context, options) => streamSynthetic(model, context, options, state),
 	});
-	pi.on("session_start", (_event, ctx) => { observed.session = true; notify = (message) => ctx.ui.notify(message, "info"); mark(MARKERS.session); });
-	pi.on("before_agent_start", () => {
-		observed.beforeAgent = true;
-		observed.registered = pi.getAllTools().find((tool) => tool.name === TOOL_NAME)?.sourceInfo.path === expectedSourcePath;
-		mark(MARKERS.beforeAgent);
-		if (observed.registered) mark(MARKERS.registered);
-		notifyToolSchema(pi);
+	if (RELOAD_MODE) pi.registerCommand("hosted-questionnaire-reload-v1", { handler: async (_args, ctx) => { await ctx.reload(); return; } });
+	pi.on("session_start", (event, ctx) => {
+		state.observed.session = true;
+		state.notify = (message) => ctx.ui.notify(message, "info");
+		emit(MARKERS.session);
+		trace(state, "session_start", { reason: event.reason });
 	});
-	pi.on("tool_execution_start", (event) => { if (event.toolName === TOOL_NAME) { observed.invoked = true; mark(MARKERS.invoked); } });
-	pi.on("tool_call", (event) => { if (event.toolName === TOOL_NAME) { observed.toolCall = true; mark(MARKERS.toolCall); } });
+	pi.on("session_shutdown", (event) => { trace(state, "session_shutdown", { reason: event.reason }); });
+	pi.on("resources_discover", (event) => { trace(state, "resources_discover", { reason: event.reason }); });
+	pi.on("before_agent_start", (_event, ctx) => {
+		state.observed.beforeAgent = true;
+		const questionnaireTools = pi.getAllTools().filter((tool) => tool.name === TOOL_NAME);
+		state.observed.registered = questionnaireTools[0]?.sourceInfo.path === expectedSourcePath;
+		trace(state, "tool_inventory", { sourceInfo: questionnaireTools[0]?.sourceInfo.path ?? null, count: questionnaireTools.length, mode: ctx.mode, hasUI: ctx.hasUI });
+		emit(MARKERS.beforeAgent);
+		if (state.observed.registered) emit(MARKERS.registered);
+		notifyToolSchema(pi, state);
+	});
+	pi.on("tool_execution_start", (event) => { if (event.toolName === TOOL_NAME) { state.observed.invoked = true; trace(state, "tool_callback", { phase: "execution_start", toolCallId: event.toolCallId }); emit(MARKERS.invoked); } });
+	pi.on("tool_call", (event) => { if (event.toolName === TOOL_NAME) { state.observed.toolCall = true; trace(state, "tool_callback", { phase: "call", toolCallId: event.toolCallId }); emit(MARKERS.toolCall); } });
 	pi.on("tool_execution_end", (event) => {
 		if (event.toolName !== TOOL_NAME) return;
+		trace(state, "tool_callback", { phase: "execution_end", toolCallId: event.toolCallId, isError: event.isError });
 		if (event.isError) {
 			const errorText = textContent(event.result);
-			if (isInvalidScenario(expectedScenario) && isPublicValidationText(errorText)) { observed.validationError = errorText; mark(MARKERS.validationError); }
+			if (isInvalidScenario(expectedScenario) && isPublicValidationText(errorText)) { state.observed.validationError = errorText; emit(MARKERS.validationError); }
 			return;
 		}
 		if (!isRecord(event.result)) return;
 		if (expectedScenario === "cancel" || expectedScenario === "schema-positive") {
 			if (!expectedResult(event.result, expectedScenario) || !cancelledDetails(event.result.details)) return;
-			observed.cancelled = true;
-			mark(MARKERS.cancelled);
+			state.observed.cancelled = true;
+			emit(MARKERS.cancelled);
 			return;
 		}
 		if (expectedScenario === "partial-cancel") {
 			if (!expectedResult(event.result, expectedScenario) || !partialCancelledDetails(event.result.details)) return;
-			observed.cancelled = true;
-			mark(MARKERS.cancelled);
+			state.observed.cancelled = true;
+			emit(MARKERS.cancelled);
 			return;
 		}
 		if (isInvalidScenario(expectedScenario)) return;
@@ -272,7 +336,7 @@ export default function (pi: ExtensionAPI): void {
 			const answer = Array.isArray(answers) ? answers[0] : undefined;
 			const hasOwnPreview = isRecord(answer) && Object.prototype.hasOwnProperty.call(answer, "preview");
 			const renderedText = textContent(event.result);
-			mark(`hosted:questionnaire-result-rejected:${JSON.stringify({
+			emit(`hosted:questionnaire-result-rejected:${JSON.stringify({
 				scenario: expectedScenario,
 				answerKeys: isRecord(answer) ? Object.keys(answer) : [],
 				hasOwnPreview,
@@ -281,18 +345,19 @@ export default function (pi: ExtensionAPI): void {
 			})}`);
 			return;
 		}
-		observed.completed = true;
-		mark(MARKERS.completed);
+		state.observed.completed = true;
+		emit(MARKERS.completed);
 	});
 	pi.events.on(PROMPT_EVENT, (data) => {
+		trace(state, "prompt", { count: state.observed.prompt + 1 });
 		if (!("questions" in QUESTION_ARGUMENTS)) throw new Error("invalid questionnaire scenario emitted a prompt without questions");
 		const projection = projectPrompt(data);
 		if (projection === undefined || JSON.stringify(projection) !== JSON.stringify(projectQuestionArguments(QUESTION_ARGUMENTS))) return;
-		observed.prompt += 1;
+		state.observed.prompt += 1;
 		const encoded = JSON.stringify(projection);
-		observed.promptProjection = encoded;
-		mark(MARKERS.prompt);
-		mark(`${MARKERS.prompt}:projection:${encoded}`);
+		state.observed.promptProjection = encoded;
+		emit(MARKERS.prompt);
+		emit(`${MARKERS.prompt}:projection:${encoded}`);
 	});
-	pi.events.on(BLOCKED_EVENT, (data) => { if (isRecord(data) && typeof data.active === "boolean") { observed.blocked.push(data.active); mark(MARKERS.blocked(data.active)); } });
+	pi.events.on(BLOCKED_EVENT, (data) => { if (isRecord(data) && typeof data.active === "boolean") { state.observed.blocked.push(data.active); trace(state, "blocked", { active: data.active }); emit(MARKERS.blocked(data.active)); } });
 }
