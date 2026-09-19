@@ -12,6 +12,7 @@ const PROMPT_EVENT = "rpiv:ask-user:prompt";
 const BLOCKED_EVENT = "rpiv:ask-user:blocked";
 const QUESTION = "Which layout should we inspect?";
 const SECOND_QUESTION = "Which spacing should we inspect?";
+const THIRD_QUESTION = "Which options should we compare?";
 const CUSTOM_ANSWER = "  leading  internal\ntrailing  ";
 const DECLINE_MESSAGE = "User declined to answer questions";
 const FINAL_TEXT = {
@@ -21,11 +22,18 @@ const FINAL_TEXT = {
 	multi: "Synthetic provider completed after questionnaire multi selection.",
 	"empty-multi": "Synthetic provider completed after questionnaire empty multi selection.",
 	"partial-cancel": "Synthetic provider completed after questionnaire partial cancellation.",
+	"schema-positive": "Synthetic provider completed after questionnaire schema-positive cancellation.",
+	"invalid-missing-questions": "Synthetic provider completed after missing-questions schema rejection.",
+	"invalid-empty-questions": "Synthetic provider completed after empty-questions schema rejection.",
+	"invalid-one-option": "Synthetic provider completed after one-option schema rejection.",
 } as const;
-const MARKERS = { session: "hosted:session_start", beforeAgent: "hosted:before_agent_start", registered: "hosted:ask_user_question:registered", invoked: "hosted:ask_user_question:invoked", cancelled: "hosted:ask_user_question:cancelled", completed: "hosted:ask_user_question:completed", prompt: "hosted:rpiv:ask-user:prompt", blocked: (active: boolean) => `hosted:rpiv:ask-user:blocked:${active}` } as const;
-const HOSTED_SCENARIOS = ["cancel", "single", "custom", "multi", "empty-multi", "partial-cancel"] as const;
+const MARKERS = { session: "hosted:session_start", beforeAgent: "hosted:before_agent_start", registered: "hosted:ask_user_question:registered", invoked: "hosted:ask_user_question:invoked", toolCall: "hosted:ask_user_question:tool_call", validationError: "hosted:ask_user_question:validation-error", schema: "hosted:ask_user_question:schema:", cancelled: "hosted:ask_user_question:cancelled", completed: "hosted:ask_user_question:completed", prompt: "hosted:rpiv:ask-user:prompt", blocked: (active: boolean) => `hosted:rpiv:ask-user:blocked:${active}` } as const;
+const HOSTED_SCENARIOS = ["cancel", "single", "custom", "multi", "empty-multi", "partial-cancel", "schema-positive", "invalid-missing-questions", "invalid-empty-questions", "invalid-one-option"] as const;
 type HostedScenario = (typeof HOSTED_SCENARIOS)[number];
-type AnsweredScenario = Exclude<HostedScenario, "cancel" | "partial-cancel">;
+type InvalidScenario = "invalid-missing-questions" | "invalid-empty-questions" | "invalid-one-option";
+type AnsweredScenario = Exclude<HostedScenario, "cancel" | "partial-cancel" | "schema-positive" | InvalidScenario>;
+const SCHEMA_NOTIFICATION_MAX = 24_000;
+function isInvalidScenario(scenario: HostedScenario): scenario is InvalidScenario { return scenario.startsWith("invalid-"); }
 const OWNED_SOURCE_PATH = resolve(dirname(fileURLToPath(import.meta.url)), "../../extensions/ask-user-question.ts");
 const REFERENCE_SOURCE_PATH = "/reference/node_modules/@juicesharp/rpiv-ask-user-question/index.ts";
 const expectedSourcePath = process.env.GENTLE_PI_HOSTED_EXPECTED_SOURCE_PATH ?? OWNED_SOURCE_PATH;
@@ -48,6 +56,12 @@ const SPACING_OPTIONS = [
 const SINGLE_LAYOUT_QUESTION = { question: QUESTION, header: "Layout", options: SINGLE_LAYOUT_OPTIONS } as const;
 const MULTI_LAYOUT_QUESTION = { question: QUESTION, header: "Layout", options: MULTI_LAYOUT_OPTIONS, multiSelect: true } as const;
 const SPACING_QUESTION = { question: SECOND_QUESTION, header: "Spacing", options: SPACING_OPTIONS, multiSelect: false } as const;
+const SCHEMA_POSITIVE_QUESTION = {
+	question: THIRD_QUESTION, header: "Compare", multiSelect: true, options: [
+		{ label: "Compact", description: "Compare the compact option.", preview: "## Compact" },
+		{ label: "Detailed", description: "Compare the detailed option." },
+	],
+} as const;
 const QUESTION_ARGUMENTS_BY_SCENARIO = {
 	cancel: { questions: [SINGLE_LAYOUT_QUESTION] },
 	single: { questions: [SINGLE_LAYOUT_QUESTION] },
@@ -55,10 +69,14 @@ const QUESTION_ARGUMENTS_BY_SCENARIO = {
 	multi: { questions: [MULTI_LAYOUT_QUESTION] },
 	"empty-multi": { questions: [MULTI_LAYOUT_QUESTION] },
 	"partial-cancel": { questions: [SINGLE_LAYOUT_QUESTION, SPACING_QUESTION] },
+	"schema-positive": { questions: [SINGLE_LAYOUT_QUESTION, SPACING_QUESTION, SCHEMA_POSITIVE_QUESTION] },
+	"invalid-missing-questions": {},
+	"invalid-empty-questions": { questions: [] },
+	"invalid-one-option": { questions: [{ question: QUESTION, header: "Layout", options: [{ label: "Compact", description: "Use a compact layout." }] }] },
 } as const;
 const QUESTION_ARGUMENTS = QUESTION_ARGUMENTS_BY_SCENARIO[expectedScenario];
 type PromptProjection = { questions: { question: string; header: string; multiSelect: boolean; options: { label: string; description: string; hasPreview: boolean }[] }[] };
-const observed = { session: false, beforeAgent: false, registered: false, invoked: false, cancelled: false, completed: false, prompt: 0, promptProjection: undefined as string | undefined, blocked: [] as boolean[] };
+const observed = { session: false, beforeAgent: false, registered: false, invoked: false, toolCall: false, validationError: undefined as string | undefined, cancelled: false, completed: false, prompt: 0, promptProjection: undefined as string | undefined, blocked: [] as boolean[] };
 const ZERO_USAGE = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, totalTokens: 0, cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0, total: 0 } };
 let notify: ((message: string) => void) | undefined;
 let questionIssued = false;
@@ -70,7 +88,7 @@ function expectedAnswer(scenario: AnsweredScenario): Record<string, unknown> {
 	return { questionIndex: 0, question: QUESTION, kind: "multi", answer: null, selected: scenario === "multi" ? ["Compact", "Detailed"] : [] };
 }
 function expectedAnswers(scenario: HostedScenario): Record<string, unknown>[] {
-	if (scenario === "cancel") return [];
+	if (scenario === "cancel" || scenario === "schema-positive" || isInvalidScenario(scenario)) return [];
 	if (scenario === "partial-cancel") return [expectedAnswer("single")];
 	return [expectedAnswer(scenario)];
 }
@@ -80,7 +98,7 @@ function textContent(value: unknown): string | undefined {
 	return isRecord(block) && block.type === "text" && typeof block.text === "string" ? block.text : undefined;
 }
 function expectedContent(scenario: HostedScenario): string {
-	if (scenario === "cancel" || scenario === "partial-cancel") return DECLINE_MESSAGE;
+	if (scenario === "cancel" || scenario === "partial-cancel" || scenario === "schema-positive" || isInvalidScenario(scenario)) return DECLINE_MESSAGE;
 	const answer = expectedAnswer(scenario);
 	const scalar = answer.kind === "multi"
 		? Array.isArray(answer.selected) && answer.selected.length > 0 ? answer.selected.join(", ") : "(no input)"
@@ -101,7 +119,7 @@ function answerMatches(value: unknown, expected: Record<string, unknown>, allowU
 function expectedResult(value: unknown, scenario: HostedScenario): boolean {
 	if (!isRecord(value) || !isRecord(value.details) || Object.keys(value.details).sort().join(",") !== "answers,cancelled" || !Array.isArray(value.details.answers)) return false;
 	const expected = expectedAnswers(scenario);
-	if (value.details.cancelled !== (scenario === "cancel" || scenario === "partial-cancel") || value.details.answers.length !== expected.length) return false;
+	if (value.details.cancelled !== (scenario === "cancel" || scenario === "partial-cancel" || scenario === "schema-positive") || value.details.answers.length !== expected.length) return false;
 	// Only single-select answer paths allow the reference's internal preview: undefined; JSON transport omits it.
 	const allowUndefinedPreview = scenario === "single" || scenario === "partial-cancel";
 	return value.details.answers.every((answer, index) => answerMatches(answer, expected[index]!, allowUndefinedPreview))
@@ -133,6 +151,18 @@ function projectPrompt(value: unknown): PromptProjection | undefined {
 	return { questions };
 }
 function mark(message: string): void { notify?.(message); }
+function notifyToolSchema(pi: ExtensionAPI): void {
+	const tool = pi.getAllTools().find((candidate) => candidate.name === TOOL_NAME);
+	if (!tool) return mark(`${MARKERS.schema}error:tool-not-found`);
+	let encoded: string | undefined;
+	try { encoded = JSON.stringify(tool.parameters); } catch { return mark(`${MARKERS.schema}error:not-json-serializable`); }
+	if (encoded === undefined) return mark(`${MARKERS.schema}error:not-json-serializable`);
+	if (encoded.length > SCHEMA_NOTIFICATION_MAX) return mark(`${MARKERS.schema}error:too-large`);
+	mark(`${MARKERS.schema}${encoded}`);
+}
+function isPublicValidationText(value: unknown): value is string {
+	return typeof value === "string" && value.trim().length > 0 && !/SyntaxError|ReferenceError|TypeError|Cannot find module|ERR_MODULE_NOT_FOUND|jiti|loader|compile|transpil|stack trace/i.test(value);
+}
 function cancelledDetails(value: unknown): boolean { return isRecord(value) && value.cancelled === true && Array.isArray(value.answers) && value.answers.length === 0; }
 function partialCancelledDetails(value: unknown): boolean {
 	return isRecord(value) && value.cancelled === true && Object.keys(value).sort().join(",") === "answers,cancelled"
@@ -173,12 +203,19 @@ function streamSynthetic(model: Model<any>, context: Context, options?: SimpleSt
 			output.stopReason = "toolUse";
 			stream.push({ type: "done", reason: "toolUse", message: output });
 		} else {
-			const expectedResultObserved = expectedScenario === "cancel"
-				? observed.cancelled && cancelledDetails(result?.details) && textContent(result) === DECLINE_MESSAGE
-				: expectedScenario === "partial-cancel"
-					? observed.cancelled && partialCancelledDetails(result?.details) && textContent(result) === DECLINE_MESSAGE
-					: observed.completed && successfulResult(result, expectedScenario);
-			if (!observed.session || !observed.beforeAgent || !observed.registered || !observed.invoked || observed.prompt !== 1 || observed.promptProjection === undefined || observed.blocked.join(",") !== "true,false" || !expectedResultObserved || result?.isError) throw new Error("hosted questionnaire observer contract was incomplete");
+			const invalidScenario = isInvalidScenario(expectedScenario);
+			const observedErrorText = textContent(result);
+			const expectedResultObserved = invalidScenario
+				? result?.isError === true && isPublicValidationText(observedErrorText) && observed.validationError === observedErrorText
+				: expectedScenario === "cancel" || expectedScenario === "schema-positive"
+					? observed.cancelled && cancelledDetails(result?.details) && textContent(result) === DECLINE_MESSAGE
+					: expectedScenario === "partial-cancel"
+						? observed.cancelled && partialCancelledDetails(result?.details) && textContent(result) === DECLINE_MESSAGE
+						: observed.completed && successfulResult(result, expectedScenario);
+			const observerContract = invalidScenario
+				? !observed.toolCall && observed.prompt === 0 && observed.promptProjection === undefined && observed.blocked.length === 0 && !observed.cancelled && !observed.completed
+				: observed.toolCall && observed.prompt === 1 && observed.promptProjection !== undefined && observed.blocked.join(",") === "true,false";
+			if (!observed.session || !observed.beforeAgent || !observed.registered || !observed.invoked || !observerContract || !expectedResultObserved || (invalidScenario ? result?.isError !== true : result?.isError === true)) throw new Error("hosted questionnaire observer contract was incomplete");
 			const finalText = FINAL_TEXT[expectedScenario];
 			output.content.push({ type: "text", text: "" });
 			stream.push({ type: "text_start", contentIndex: 0, partial: output }); const block = output.content[0]; if (block?.type !== "text") throw new Error("synthetic text block was not created"); block.text = finalText;
@@ -204,11 +241,19 @@ export default function (pi: ExtensionAPI): void {
 		observed.registered = pi.getAllTools().find((tool) => tool.name === TOOL_NAME)?.sourceInfo.path === expectedSourcePath;
 		mark(MARKERS.beforeAgent);
 		if (observed.registered) mark(MARKERS.registered);
+		notifyToolSchema(pi);
 	});
 	pi.on("tool_execution_start", (event) => { if (event.toolName === TOOL_NAME) { observed.invoked = true; mark(MARKERS.invoked); } });
+	pi.on("tool_call", (event) => { if (event.toolName === TOOL_NAME) { observed.toolCall = true; mark(MARKERS.toolCall); } });
 	pi.on("tool_execution_end", (event) => {
-		if (event.toolName !== TOOL_NAME || event.isError || !isRecord(event.result)) return;
-		if (expectedScenario === "cancel") {
+		if (event.toolName !== TOOL_NAME) return;
+		if (event.isError) {
+			const errorText = textContent(event.result);
+			if (isInvalidScenario(expectedScenario) && isPublicValidationText(errorText)) { observed.validationError = errorText; mark(MARKERS.validationError); }
+			return;
+		}
+		if (!isRecord(event.result)) return;
+		if (expectedScenario === "cancel" || expectedScenario === "schema-positive") {
 			if (!expectedResult(event.result, expectedScenario) || !cancelledDetails(event.result.details)) return;
 			observed.cancelled = true;
 			mark(MARKERS.cancelled);
@@ -220,6 +265,7 @@ export default function (pi: ExtensionAPI): void {
 			mark(MARKERS.cancelled);
 			return;
 		}
+		if (isInvalidScenario(expectedScenario)) return;
 		if (!successfulResult(event.result, expectedScenario)) {
 			const details = isRecord(event.result) ? event.result.details : undefined;
 			const answers = isRecord(details) ? details.answers : undefined;
@@ -239,6 +285,7 @@ export default function (pi: ExtensionAPI): void {
 		mark(MARKERS.completed);
 	});
 	pi.events.on(PROMPT_EVENT, (data) => {
+		if (!("questions" in QUESTION_ARGUMENTS)) throw new Error("invalid questionnaire scenario emitted a prompt without questions");
 		const projection = projectPrompt(data);
 		if (projection === undefined || JSON.stringify(projection) !== JSON.stringify(projectQuestionArguments(QUESTION_ARGUMENTS))) return;
 		observed.prompt += 1;
