@@ -37,6 +37,7 @@ const SCHEMA_NOTIFICATION_MAX = 24_000;
 const RELOAD_MODE = process.env.GENTLE_PI_HOSTED_RELOAD === "1";
 const RELOAD_TELEMETRY_PREFIX = "hosted:reload-telemetry:";
 const PACKAGE_COMPOSITION_PREFIX = "hosted:package-composition:";
+const PACKAGE_PROVIDER_INVENTORY_PREFIX = "hosted:package-provider-inventory:";
 const HOSTED_PACKAGE_CASES = ["external-only", "candidate-only", "candidate-external-filtered"] as const;
 type HostedPackageCase = (typeof HOSTED_PACKAGE_CASES)[number];
 const GENERATION_KEY = Symbol.for("gentle-pi.hosted-questionnaire.synthetic-generation-v1");
@@ -246,15 +247,20 @@ function notifyToolSchema(pi: ExtensionAPI, state: FixtureState): void {
 }
 function notifyPackageComposition(pi: ExtensionAPI, state: FixtureState): void {
 	if (expectedPackageCase === undefined) return;
-	const tools = pi.getAllTools();
-	const questionnaireTools = tools.filter((tool) => tool.name === TOOL_NAME);
+	const describedTools = pi.getAllTools().map((tool) => {
+		const sourceInfo: unknown = tool.sourceInfo; if (!isRecord(sourceInfo) || typeof sourceInfo.path !== "string" || typeof sourceInfo.source !== "string") throw new Error(`tool ${tool.name} provenance changed`);
+		return { tool, sourceInfo: { path: sourceInfo.path, source: sourceInfo.source } };
+	});
+	const questionnaireTools = describedTools.filter(({ tool }) => tool.name === TOOL_NAME);
+	const builtinTools = describedTools.filter(({ sourceInfo }) => sourceInfo.source === "builtin"); const sdkTools = describedTools.filter(({ sourceInfo }) => sourceInfo.source === "sdk"); const otherTools = describedTools.filter(({ sourceInfo }) => sourceInfo.source !== "builtin" && sourceInfo.source !== "sdk");
 	const payload = {
 		packageCase: expectedPackageCase,
 		profile: readPackageProfile(),
 		inventory: {
-			allToolNames: tools.map((tool) => tool.name),
-			questionnaireCount: questionnaireTools.length,
-			questionnaire: questionnaireTools.map((tool) => ({ name: tool.name, sourceInfoPath: tool.sourceInfo?.path ?? null })),
+			allToolNames: describedTools.map(({ tool }) => tool.name), activeToolNames: pi.getActiveTools(),
+			builtinToolNames: builtinTools.map(({ tool }) => tool.name), sdkToolNames: sdkTools.map(({ tool }) => tool.name),
+			otherTools: otherTools.map(({ tool, sourceInfo }) => ({ name: tool.name, sourceInfo })),
+			questionnaireCount: questionnaireTools.length, questionnaire: questionnaireTools.map(({ tool, sourceInfo }) => ({ name: tool.name, sourceInfoPath: sourceInfo.path })),
 		},
 	};
 	const encoded = JSON.stringify(payload);
@@ -286,12 +292,20 @@ function emitError(stream: AssistantMessageEventStream, output: AssistantMessage
 	stream.push({ type: "error", reason, error: output });
 	stream.end();
 }
+function notifyProviderContextInventory(context: Context, state: FixtureState): void {
+	if (expectedPackageCase === undefined) return;
+	if (!Array.isArray(context.tools)) throw new Error("package provider context omitted tools");
+	const toolNames = context.tools.map((tool, index) => { if (!isRecord(tool) || typeof tool.name !== "string") throw new Error(`package provider context tool ${index} is invalid`); return tool.name; });
+	const encoded = JSON.stringify({ toolCallId: state.toolCallId, toolNames }); if (encoded.length > 4_000) throw new Error("package provider context telemetry exceeded its bound");
+	mark(state, `${PACKAGE_PROVIDER_INVENTORY_PREFIX}${encoded}`);
+}
 function streamSynthetic(model: Model<any>, context: Context, options: SimpleStreamOptions | undefined, state: FixtureState): AssistantMessageEventStream {
 	const stream = createAssistantMessageEventStream();
 	const output = createMessage(model);
 	stream.push({ type: "start", partial: output });
 	trace(state, "provider_request", { toolCallId: state.toolCallId });
 	try {
+		notifyProviderContextInventory(context, state);
 		if (options?.signal?.aborted) {
 			emitError(stream, output, options, "Synthetic questionnaire request was aborted");
 			trace(state, "provider_completion", { stopReason: output.stopReason, toolCallId: state.toolCallId });

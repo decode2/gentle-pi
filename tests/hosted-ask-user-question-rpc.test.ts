@@ -38,6 +38,8 @@ const REFERENCE_EXTENSION_PATH = `${REFERENCE_ROOT}/node_modules/@juicesharp/rpi
 const REFERENCE_PACKAGE_ROOT = `${REFERENCE_ROOT}/node_modules/@juicesharp/rpiv-ask-user-question`;
 const FIXTURE_PATH = `${CHECKOUT_ROOT}/tests/fixtures/hosted-synthetic-provider.ts`;
 const PACKAGE_COMPOSITION_PREFIX = "hosted:package-composition:";
+const PACKAGE_PROVIDER_INVENTORY_PREFIX = "hosted:package-provider-inventory:", PACKAGE_PROVIDER_INVENTORY_MAX = 4_000;
+const BUILTIN_TOOL_NAMES = ["read", "bash", "powershell", "edit", "write", "grep", "find", "ls"] as const;
 const PROMPT_PROJECTION_PREFIX = "hosted:rpiv:ask-user:prompt:projection:";
 const SCHEMA_PROJECTION_PREFIX = "hosted:ask_user_question:schema:";
 const RELOAD_TELEMETRY_PREFIX = "hosted:reload-telemetry:";
@@ -123,6 +125,10 @@ function packageComposition(events: RpcRecord[]): RpcRecord {
 	const encoded = messages[0]!.slice(PACKAGE_COMPOSITION_PREFIX.length);
 	assert.ok(encoded.length <= 8_000, "package composition telemetry must stay bounded");
 	return record(JSON.parse(encoded), "package composition");
+}
+function packageProviderInventories(events: RpcRecord[]): RpcRecord[] {
+	const messages = notificationMessages(events).filter((message) => message.startsWith(PACKAGE_PROVIDER_INVENTORY_PREFIX)); assert.equal(messages.length, 2, "package mode must expose one provider inventory for each request");
+	return messages.map((message) => { const encoded = message.slice(PACKAGE_PROVIDER_INVENTORY_PREFIX.length); assert.ok(encoded.length <= PACKAGE_PROVIDER_INVENTORY_MAX, "provider context telemetry must stay bounded"); return record(JSON.parse(encoded), "provider context inventory"); });
 }
 
 function notificationCount(events: RpcRecord[], message: string): number {
@@ -329,14 +335,22 @@ function assertHostedPackageComposition(events: RpcRecord[], packageCase: Hosted
 	assert.deepEqual(Object.keys(composition).sort(), ["inventory", "packageCase", "profile"]);
 	assert.equal(composition.packageCase, packageCase);
 	assert.deepEqual(composition.profile, expectedPackageProfile(packageCase));
-	assert.deepEqual(record(composition.inventory, "package tool inventory"), {
-		allToolNames: [TOOL_NAME],
-		questionnaireCount: 1,
-		questionnaire: [{ name: TOOL_NAME, sourceInfoPath: expectedSourcePath }],
-	});
+	const inventory = record(composition.inventory, "package tool inventory");
+	assert.deepEqual(Object.keys(inventory).sort(), ["activeToolNames", "allToolNames", "builtinToolNames", "otherTools", "questionnaire", "questionnaireCount", "sdkToolNames"]);
+	assert.deepEqual(inventory.allToolNames, [...BUILTIN_TOOL_NAMES, TOOL_NAME]); assert.deepEqual(inventory.activeToolNames, [TOOL_NAME]);
+	assert.deepEqual(inventory.builtinToolNames, [...BUILTIN_TOOL_NAMES]); assert.deepEqual(inventory.sdkToolNames, []);
+	assert.equal(inventory.questionnaireCount, 1); assert.deepEqual(inventory.questionnaire, [{ name: TOOL_NAME, sourceInfoPath: expectedSourcePath }]);
+	assert.ok(Array.isArray(inventory.otherTools)); assert.equal(inventory.otherTools.length, 1);
+	const otherTool = record(inventory.otherTools[0], "other package tool"); assert.deepEqual(Object.keys(otherTool).sort(), ["name", "sourceInfo"]); assert.equal(otherTool.name, TOOL_NAME);
+	const sourceInfo = record(otherTool.sourceInfo, "other package tool provenance"); assert.deepEqual(Object.keys(sourceInfo).sort(), ["path", "source"]);
+	assert.equal(typeof sourceInfo.path, "string"); assert.equal(sourceInfo.path, expectedSourcePath); assert.equal(typeof sourceInfo.source, "string");
+	assert.notEqual(sourceInfo.source, "builtin"); assert.notEqual(sourceInfo.source, "sdk");
 }
 
 function assertHostedPackageCancellation(events: RpcRecord[]): void {
+	for (const inventory of packageProviderInventories(events)) {
+		assert.deepEqual(Object.keys(inventory).sort(), ["toolCallId", "toolNames"]); assert.equal(inventory.toolCallId, "hosted-questionnaire-call-1"); assert.deepEqual(inventory.toolNames, [TOOL_NAME]);
+	}
 	for (const marker of MARKERS) assert.equal(notificationCount(events, marker), 1, marker);
 	assert.equal(notificationCount(events, PUBLIC_TOOL_CALL_MARKER), 1);
 	assert.equal(notificationCount(events, VALIDATION_ERROR_MARKER), 0);
