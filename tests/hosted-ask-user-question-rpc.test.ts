@@ -624,6 +624,7 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	if (packageCase === undefined) assert.deepEqual(args.filter((arg) => arg === "-e"), ["-e", "-e"]);
 	else { assert.equal(args.includes("--no-extensions"), false); assert.equal(args.includes("-e"), false); }
 	const child = spawn(process.execPath, args, { cwd: tempPath("cwd"), env: childEnv, stdio: ["pipe", "pipe", "pipe"], shell: false });
+	const childClosed = new Promise<void>((resolveClosed) => child.once("close", () => resolveClosed()));
 	const childPid = child.pid;
 	assert.ok(childPid, "hosted Pi child PID must be tracked");
 	const events: RpcRecord[] = [];
@@ -700,6 +701,7 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 	};
 	const owned = candidatePath === OWNED_EXTENSION_PATH;
 	const plannedDialogs: Array<(event: RpcRecord) => void> = (() => {
+		if (probeMode !== "none") return [];
 		if (isInvalidScenario(scenario)) return [];
 		if (scenario === "schema-positive") return [cancelQuestion(QUESTION)];
 		if (scenario === "cancel") return reload ? [cancelStep, cancelStep] : [cancelStep];
@@ -822,6 +824,7 @@ async function runRpc(cliPath: string, candidatePath: string, fixturePath: strin
 		await withTimeout(completion, 30_000, `Pi child ${childPid} completion`);
 		child.stdin?.end();
 		exit = await withTimeout(exited, 5_000, `Pi child ${childPid} exit`);
+		await withTimeout(childClosed, 5_000, `Pi child ${childPid} close`);
 		if (callbackFailure !== undefined) throw callbackFailure;
 		assert.equal(exit.code, 0, `Pi child exited with ${exit.signal ?? exit.code}; stderr: ${stderr}`);
 		if (probeMode === "none") assert.equal(settledCount, reload ? 2 : 1, "hosted questionnaire invocation settlement count changed");
