@@ -1,0 +1,43 @@
+{
+  "schema": "gentle-pi.hosted-main-acquisition/v1",
+  "repository": "https://github.com/Gentleman-Programming/gentle-shell.git",
+  "commit": "43269de359c5052d2cadb72ab4cf2d57ca0211b0",
+  "tree": "f95764d4eff06e34223171b26a9d5493f206bab4",
+  "package": {
+    "name": "gentle-pi",
+    "version": "3.3.0",
+    "packageManager": "pnpm@11.1.1",
+    "dependencies": {
+      "@earendil-works/pi-tui": "0.85.1",
+      "@heyhuynhgiabuu/pi-pretty": "0.6.27"
+    },
+    "peerDependencies": {
+      "@earendil-works/pi-coding-agent": ">=0.85.1",
+      "typebox": "*"
+    },
+    "devDependencies": {
+      "@earendil-works/pi-coding-agent": "0.85.1",
+      "@types/node": "^24.13.3",
+      "typescript": "^5.9.3"
+    }
+  },
+  "lock": {
+    "lockfileVersion": "9.0",
+    "importer": [
+      { "name": "@earendil-works/pi-tui", "specifier": "0.85.1", "versionPrefix": "0.85.1" },
+      { "name": "@heyhuynhgiabuu/pi-pretty", "specifier": "0.6.27", "versionPrefix": "0.6.27(" },
+      { "name": "typebox", "specifier": "*", "versionPrefix": "1.1.38" },
+      { "name": "@earendil-works/pi-coding-agent", "specifier": "0.85.1", "versionPrefix": "0.85.1(" },
+      { "name": "@types/node", "specifier": "^24.13.3", "versionPrefix": "24.13.3" },
+      { "name": "typescript", "specifier": "^5.9.3", "versionPrefix": "5.9.3" }
+    ]
+  },
+  "installedPackages": [
+    { "path": "node_modules/@earendil-works/pi-tui/package.json", "name": "@earendil-works/pi-tui", "version": "0.85.1" },
+    { "path": "node_modules/@heyhuynhgiabuu/pi-pretty/package.json", "name": "@heyhuynhgiabuu/pi-pretty", "version": "0.6.27" },
+    { "path": "node_modules/typebox/package.json", "name": "typebox", "version": "1.1.38" },
+    { "path": "node_modules/@earendil-works/pi-coding-agent/package.json", "name": "@earendil-works/pi-coding-agent", "version": "0.85.1" },
+    { "path": "node_modules/@types/node/package.json", "name": "@types/node", "version": "24.13.3" },
+    { "path": "node_modules/typescript/package.json", "name": "typescript", "version": "5.9.3" }
+  ]
+}

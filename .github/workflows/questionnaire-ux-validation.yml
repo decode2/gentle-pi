@@ -128,6 +128,7 @@ jobs:
             tests/tui-presentation-driver.test.ts \
             tests/rpc-presentation-driver.test.ts \
             tests/hosted-ask-user-question-rpc.test.ts \
+            tests/hosted-questionnaire-main-acquisition.test.ts \
             tests/fixtures/hosted-synthetic-provider.ts
 
   hosted-rpc-cancellation:
@@ -365,3 +366,164 @@ jobs:
             XDG_RUNTIME_DIR=/tmp/hosted-xdg-runtime TMPDIR=/tmp \
             GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
             /usr/local/bin/node --experimental-strip-types --test /workspace/tests/hosted-ask-user-question-rpc.test.ts
+
+  hosted-main-acquisition:
+    name: Hosted pinned main acquisition and offline artifact validation
+    if: github.repository == 'decode2/gentle-pi'
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - name: Checkout exact revision
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Pull and pin Node 24 acquisition image
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          command -v docker >/dev/null
+          docker info >/dev/null
+          docker pull node:24-bookworm
+          image_ref="$(docker image inspect --format '{{index .RepoDigests 0}}' node:24-bookworm)"
+          image_id="$(docker image inspect --format '{{.Id}}' node:24-bookworm)"
+          case "$image_ref" in node@sha256:*) ;; *) echo "missing immutable image digest" >&2; exit 1;; esac
+          test -n "$image_id"
+          printf 'image_ref=%s\nimage_id=%s\n' "$image_ref" "$image_id"
+          printf 'ref=%s\nid=%s\n' "$image_ref" "$image_id" >> "$GITHUB_OUTPUT"
+
+      - name: Acquire exact main and frozen dependencies in networked container
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-main-acquisition"
+          test ! -e "$acquisition_dir"
+          mkdir "$acquisition_dir"
+          chmod 0777 "$acquisition_dir"
+          docker run --rm -i --network=bridge --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$acquisition_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/artifact/home TMPDIR=/artifact/tmp NPM_CONFIG_CACHE=/artifact/npm-cache \
+            NPM_CONFIG_USERCONFIG=/dev/null NPM_CONFIG_GLOBALCONFIG=/dev/null PNPM_HOME=/artifact/pnpm-home \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --input-type=module <<'NODE'
+          import { execFileSync } from "node:child_process";
+          import { mkdir, readFile, writeFile } from "node:fs/promises";
+          import { join } from "node:path";
+
+          const workspace = "/workspace";
+          const artifact = "/artifact";
+          const manifest = JSON.parse(await readFile(
+            `${workspace}/.github/workflows/fixtures/questionnaire-main-acquisition.json`,
+            "utf8",
+          ));
+          const fail = (condition, message) => {
+            if (!condition) throw new Error(message);
+          };
+          const gitEnvironment = {
+            ...process.env,
+            GIT_CONFIG_GLOBAL: "/dev/null",
+            GIT_CONFIG_NOSYSTEM: "1",
+            GIT_CONFIG_SYSTEM: "/dev/null",
+            GIT_OPTIONAL_LOCKS: "0",
+            GIT_TERMINAL_PROMPT: "0",
+          };
+          const main = join(artifact, "main");
+          const artifacts = join(artifact, "artifacts");
+          const git = (args, options = {}) => execFileSync(
+            "git",
+            [
+              "-c", "core.hooksPath=/dev/null",
+              "-c", "diff.external=",
+              "-c", "credential.helper=",
+              "-C", main,
+              ...args,
+            ],
+            { cwd: main, env: gitEnvironment, encoding: "utf8", ...options },
+          );
+
+          fail(manifest.schema === "gentle-pi.hosted-main-acquisition/v1", "invalid acquisition manifest schema");
+          fail(manifest.repository === "https://github.com/Gentleman-Programming/gentle-shell.git", "main repository pin changed");
+          fail(/^[0-9a-f]{40}$/.test(manifest.commit) && /^[0-9a-f]{40}$/.test(manifest.tree), "invalid main Git pin");
+          fail(manifest.package.name === "gentle-pi" && manifest.package.version === "3.3.0" && manifest.package.packageManager === "pnpm@11.1.1", "main package pin changed");
+          fail(!Object.keys(process.env).some((key) => /TOKEN|PASSWORD|SECRET|CREDENTIAL|AWS_|GITHUB_/i.test(key)), "network acquisition received credential-like environment");
+          await mkdir(main, { recursive: true });
+          await mkdir(artifacts, { recursive: true });
+          await mkdir(join(artifact, "home"), { recursive: true });
+          await mkdir(join(artifact, "tmp"), { recursive: true });
+          await mkdir(join(artifact, "npm-cache"), { recursive: true });
+          await mkdir(join(artifact, "pnpm-home"), { recursive: true });
+          execFileSync("git", ["--version"], { env: gitEnvironment, stdio: "ignore" });
+          git(["init", "--initial-branch=main"]);
+          git(["remote", "add", "origin", manifest.repository]);
+          git(["fetch", "--no-tags", "origin", manifest.commit], { stdio: "ignore" });
+          git(["checkout", "--detach", manifest.commit], { stdio: "ignore" });
+          const head = git(["rev-parse", "HEAD"]).trim();
+          const tree = git(["rev-parse", "HEAD^{tree}"]).trim();
+          fail(head === manifest.commit, "Git HEAD does not match the pinned commit");
+          fail(tree === manifest.tree, "Git tree does not match the pinned tree");
+          const sourceBefore = git(["ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
+          const files = sourceBefore.split("\0").filter(Boolean).map((record) => {
+            const separator = record.indexOf("\t");
+            fail(separator >= 0, "Git tree record is malformed");
+            const [mode, type, sha] = record.slice(0, separator).split(" ");
+            fail(type === "blob" && Boolean(mode) && Boolean(sha), "main tree contains an unsupported entry");
+            return { path: record.slice(separator + 1), mode, sha };
+          });
+          await writeFile(join(artifacts, "main-provenance.json"), `${JSON.stringify({ repository: manifest.repository, commit: head, tree, files })}\n`);
+
+          const bootstrap = join(artifact, "pnpm-bootstrap");
+          execFileSync("npm", ["install", "--prefix", bootstrap, "--no-save", "--package-lock=false", "--ignore-scripts", "--no-audit", "--no-fund", "pnpm@11.1.1"], { cwd: artifact, env: process.env, stdio: "ignore" });
+          const pnpm = join(bootstrap, "node_modules/.bin/pnpm");
+          fail(execFileSync(pnpm, ["--version"], { cwd: main, env: process.env, encoding: "utf8" }).trim() === "11.1.1", "pnpm bootstrap version changed");
+          const help = execFileSync(pnpm, ["install", "--help"], { cwd: main, env: process.env, encoding: "utf8" });
+          fail(help.includes("--ignore-pnpmfile"), "pinned pnpm does not document --ignore-pnpmfile");
+          execFileSync(pnpm, ["install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", "--reporter=append-only"], { cwd: main, env: process.env, stdio: "ignore" });
+          const sourceAfter = git(["ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
+          fail(sourceAfter === sourceBefore, "tracked main source changed after dependency installation");
+          fail(git(["status", "--porcelain=v1", "--untracked-files=all"]).trim() === "", "main checkout is not clean after dependency installation");
+          fail(git(["rev-parse", "HEAD"]).trim() === head, "Git HEAD moved during acquisition");
+          fail(git(["rev-parse", "HEAD^{tree}"]).trim() === tree, "Git tree moved during acquisition");
+          console.log(`acquisition-proof repository=${manifest.repository} commit=${head} tree=${tree} tracked-files=${files.length} pnpm=11.1.1 frozen-lockfile=true scripts=false pnpmfile=false`);
+          NODE
+
+      - name: Run offline artifact validation in isolated container
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-main-acquisition"
+          test -r "$acquisition_dir/main/.git/HEAD"
+          test -r "$acquisition_dir/main/package.json"
+          test -r "$acquisition_dir/artifacts/main-provenance.json"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$acquisition_dir/main,target=/acquired-main,readonly" \
+            --mount "type=bind,source=$acquisition_dir/artifacts,target=/acquired-artifacts,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            ACQUIRED_MAIN_ROOT=/acquired-main ACQUIRED_ARTIFACTS_ROOT=/acquired-artifacts \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --test /workspace/tests/hosted-questionnaire-main-acquisition.test.ts
+
+      - name: Verify acquisition lane left candidate checkout clean
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -z "$(git status --porcelain)"
