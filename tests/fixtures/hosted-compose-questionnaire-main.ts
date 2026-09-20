@@ -59,7 +59,7 @@ async function scanTree(root: string, outputRoot?: string, current = "", entries
 		const rawTarget = await readlink(path);
 		const targetPath = isAbsolute(rawTarget) ? resolve(rawTarget) : resolve(dirname(path), rawTarget);
 		let targetReal: string;
-		try { targetReal = await realpath(targetPath); } catch { fail(`dangling source symlink: ${current}`); }
+		try { targetReal = await realpath(targetPath); } catch { return fail(`dangling source symlink: ${current}`); }
 		if (!inside(root, targetPath) || !inside(root, targetReal) || gitMetadata(root, targetPath) || gitMetadata(root, targetReal)) fail(`source symlink escapes allowed root: ${current}`);
 		entries.set(current, { kind: "symlink", mode, target: isAbsolute(rawTarget) ? join(outputRoot!, relative(root, targetPath)) : rawTarget });
 	} else {
