@@ -413,7 +413,7 @@ jobs:
             --security-opt=no-new-privileges --user 1000:1000 "$IMAGE_REF" \
             env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             HOME=/artifact/home TMPDIR=/artifact/tmp NPM_CONFIG_CACHE=/artifact/npm-cache \
-            NPM_CONFIG_USERCONFIG=/dev/null NPM_CONFIG_GLOBALCONFIG=/dev/null PNPM_HOME=/artifact/pnpm-home \
+            NPM_CONFIG_USERCONFIG=/artifact/home/user.npmrc NPM_CONFIG_GLOBALCONFIG=/artifact/home/global.npmrc PNPM_HOME=/artifact/pnpm-home \
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
             /usr/local/bin/node --input-type=module <<'NODE'
@@ -483,7 +483,35 @@ jobs:
           await writeFile(join(artifacts, "main-provenance.json"), `${JSON.stringify({ repository: manifest.repository, commit: head, tree, files })}\n`);
 
           const bootstrap = join(artifact, "pnpm-bootstrap");
-          execFileSync("npm", ["install", "--prefix", bootstrap, "--no-save", "--package-lock=false", "--ignore-scripts", "--no-audit", "--no-fund", "pnpm@11.1.1"], { cwd: artifact, env: process.env, stdio: "ignore" });
+          try {
+            execFileSync(
+              "npm",
+              ["install", "--prefix", bootstrap, "--no-save", "--package-lock=false", "--ignore-scripts", "--no-audit", "--no-fund", "pnpm@11.1.1"],
+              {
+                cwd: artifact,
+                env: process.env,
+                stdio: ["ignore", "pipe", "pipe"],
+                maxBuffer: 256 * 1024,
+              },
+            );
+          } catch (error) {
+            const outputBuffer = (value) => Buffer.isBuffer(value) || typeof value === "string"
+              ? Buffer.from(value)
+              : Buffer.alloc(0);
+            const excerpt = (value) => {
+              const bytes = outputBuffer(value);
+              const marker = Buffer.from("\n...[truncated]");
+              return bytes.length > 4096
+                ? Buffer.concat([bytes.subarray(0, 4096 - marker.length), marker]).toString("utf8")
+                : bytes.toString("utf8");
+            };
+            const status = Number.isInteger(error?.status) ? error.status : "unknown";
+            const signal = typeof error?.signal === "string" ? error.signal : "unknown";
+            console.error(
+              `npm bootstrap failed status=${status} signal=${signal} stdout=${JSON.stringify(excerpt(error?.stdout))} stderr=${JSON.stringify(excerpt(error?.stderr))}`,
+            );
+            throw new Error("npm bootstrap failed");
+          }
           const pnpm = join(bootstrap, "node_modules/.bin/pnpm");
           fail(execFileSync(pnpm, ["--version"], { cwd: main, env: process.env, encoding: "utf8" }).trim() === "11.1.1", "pnpm bootstrap version changed");
           const help = execFileSync(pnpm, ["install", "--help"], { cwd: main, env: process.env, encoding: "utf8" });
