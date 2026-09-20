@@ -129,7 +129,9 @@ jobs:
             tests/rpc-presentation-driver.test.ts \
             tests/hosted-ask-user-question-rpc.test.ts \
             tests/hosted-questionnaire-main-acquisition.test.ts \
-            tests/fixtures/hosted-synthetic-provider.ts
+            tests/hosted-questionnaire-main-composition.test.ts \
+            tests/fixtures/hosted-synthetic-provider.ts \
+            tests/fixtures/hosted-compose-questionnaire-main.ts
 
   hosted-rpc-cancellation:
     name: Hosted RPC cancellation (isolated Docker)
@@ -751,6 +753,70 @@ jobs:
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
             /usr/local/bin/node --experimental-strip-types --test /workspace/tests/hosted-questionnaire-main-acquisition.test.ts
+
+      - name: Compose pinned main and questionnaire artifact in network-none isolation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-main-acquisition"
+          composition_dir="$RUNNER_TEMP/questionnaire-main-composition"
+          test -r "$acquisition_dir/main/package.json"
+          test -r "$acquisition_dir/artifacts/main-provenance.json"
+          test ! -e "$composition_dir"
+          mkdir "$composition_dir"
+          chmod 0777 "$composition_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$acquisition_dir/main,target=/acquired-main,readonly" \
+            --mount "type=bind,source=$acquisition_dir/artifacts,target=/acquired-artifacts,readonly" \
+            --mount "type=bind,source=$composition_dir,target=/composed" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            ACQUIRED_MAIN_ROOT=/acquired-main ACQUIRED_ARTIFACTS_ROOT=/acquired-artifacts COMPOSED_ROOT=/composed \
+            QUESTIONNAIRE_OVERLAY_ROOT=/tmp/qmc-02c-overlay GENTLE_PI_COMPOSE_MAIN=1 \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+          overlay_root=/tmp/qmc-02c-overlay
+          test ! -e "$overlay_root"
+          mkdir -p "$overlay_root/extensions" "$overlay_root/lib"
+          cp -a -- /workspace/extensions/ask-user-question.ts "$overlay_root/extensions/ask-user-question.ts"
+          cp -a -- /workspace/lib/questions "$overlay_root/lib/questions"
+          exec /usr/local/bin/node --experimental-strip-types /workspace/tests/fixtures/hosted-compose-questionnaire-main.ts
+          '
+
+      - name: Verify composed artifact offline in read-only isolation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-main-acquisition"
+          composition_dir="$RUNNER_TEMP/questionnaire-main-composition"
+          test -r "$acquisition_dir/main/package.json"
+          test -r "$acquisition_dir/artifacts/main-provenance.json"
+          test -d "$composition_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$acquisition_dir/main,target=/acquired-main,readonly" \
+            --mount "type=bind,source=$acquisition_dir/artifacts,target=/acquired-artifacts,readonly" \
+            --mount "type=bind,source=$composition_dir,target=/composed,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            ACQUIRED_MAIN_ROOT=/acquired-main ACQUIRED_ARTIFACTS_ROOT=/acquired-artifacts COMPOSED_ROOT=/composed \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --test /workspace/tests/hosted-questionnaire-main-composition.test.ts
 
       - name: Verify acquisition lane left candidate checkout clean
         shell: bash
