@@ -107,9 +107,10 @@ function escapeRegExp(value: string): string {
 
 function assertImporter(lockText: string, entry: LockEntry): void {
 	const key = entry.name.startsWith("@") ? `'${entry.name}'` : entry.name;
+	const specifier = entry.specifier === "*" ? "'*'" : entry.specifier;
 	const pattern = new RegExp(
 		`^ {6}${escapeRegExp(key)}:\\n` +
-			` {8}specifier: ${escapeRegExp(entry.specifier)}\\n` +
+			` {8}specifier: ${escapeRegExp(specifier)}\\n` +
 			` {8}version: ([^\\n]+)$`,
 		"m",
 	);
@@ -131,6 +132,7 @@ test("hosted acquisition uses the bounded offline isolation contract", () => {
 		"GIT_OPTIONAL_LOCKS",
 		"GIT_TERMINAL_PROMPT",
 		"HOME",
+		"NODE_TEST_WORKER_ID",
 		"PATH",
 		"TMPDIR",
 	].sort();
@@ -138,6 +140,7 @@ test("hosted acquisition uses the bounded offline isolation contract", () => {
 		.filter((key) => key !== "NODE_TEST_CONTEXT")
 		.sort();
 	assert.deepEqual(actual, expected);
+	assert.equal(process.env.NODE_TEST_WORKER_ID, "1");
 	assert.deepEqual(
 		Object.keys(process.env).filter((key) => /TOKEN|PASSWORD|SECRET|CREDENTIAL|AWS_|GITHUB_/i.test(key)),
 		[],

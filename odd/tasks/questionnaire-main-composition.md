@@ -48,6 +48,7 @@ No task above is checked off merely because a worker reports source completion. 
 
 ## Acquisition provenance and next step
 
+- Candidate `119ad765985d8f57dd4b28879e27dba47a11ada8`, CI 35482930675: acquisition and 721-file Git provenance passed; 269/OS, TS and 27 RPC passed; offline artifacts 1/3. Exact-source fixture correction admits only worker ID `"1"` and matches the pinned lockfile's quoted `'*'`; all other assertions remain. Isolation/installed metadata/final hosted cleanliness await fresh CI. This correction uses 6 changed lines including this record, bringing cumulative corrective changes to 45 of the authorized 50.
 - Candidate `4f057752b96fcfcddb5f165cc4d0c4710d6865e0`, CI 35481408331: 269 tests per OS, scoped TS and 27 RPC tests passed; npm bootstrap exited 1 with suppressed output, so all three offline artifact tests were unexecuted. No full-main or native approval claim.
 - Exact Node v24.21.0 source bundles npm 11.19.0; its loader rejects identical user/global config paths. This supports the `/dev/null` collision diagnosis but does not recover the discarded runtime exception. Authorized correction: distinct private config paths and bounded bootstrap diagnostics with failure preserved; no speculative pnpm flag changes. Native START consent previously expired without a lineage or mutation; a future attempt requires fresh consent, not replay.
 
