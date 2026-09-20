@@ -39,5 +39,13 @@
     { "path": "node_modules/@earendil-works/pi-coding-agent/package.json", "name": "@earendil-works/pi-coding-agent", "version": "0.85.1" },
     { "path": "node_modules/@types/node/package.json", "name": "@types/node", "version": "24.13.3" },
     { "path": "node_modules/typescript/package.json", "name": "typescript", "version": "5.9.3" }
-  ]
+  ],
+  "native": {
+    "version": "3.4.0",
+    "asset": "gentle-ai_3.4.0_linux_amd64.tar.gz",
+    "url": "https://github.com/Gentleman-Programming/gentle-ai/releases/download/v3.4.0/gentle-ai_3.4.0_linux_amd64.tar.gz",
+    "assetSha256": "c287289a514420381e890991bb3fbea4a2c36d7b4b1774fcf6bc4deb83378915",
+    "binarySha256": "309d9aafb48de5ef90ba0a212e8a98e8fdbb82d0852e24015e36a5ce0fe04c06",
+    "member": "gentle-ai"
+  }
 }

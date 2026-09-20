@@ -417,8 +417,10 @@ jobs:
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
             /usr/local/bin/node --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
           import { execFileSync } from "node:child_process";
           import { mkdir, readFile, writeFile } from "node:fs/promises";
+          import { request } from "node:https";
           import { join } from "node:path";
 
           const workspace = "/workspace";
@@ -451,6 +453,130 @@ jobs:
             ],
             { cwd: main, env: gitEnvironment, encoding: "utf8", ...options },
           );
+          const MAX_NATIVE_ARCHIVE_BYTES = 100 * 1024 * 1024;
+          const MAX_NATIVE_BINARY_BYTES = 64 * 1024 * 1024;
+          const MAX_TAR_LIST_BYTES = 1024 * 1024;
+          const MAX_REDIRECTS = 3;
+          const DOWNLOAD_HEADER_TIMEOUT_MS = 10_000;
+          const DOWNLOAD_BODY_TIMEOUT_MS = 30_000;
+          const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
+          const errorCode = (error) => typeof error?.code === "string" ? error.code : "unknown";
+          const downloadError = (stage, error) => new Error(
+            `native release download ${stage} failed code=${errorCode(error)}`,
+          );
+          const download = (url, destination, redirects = 0) => {
+            const parsed = new URL(url);
+            if (parsed.protocol !== "https:") throw new Error("native release download requires HTTPS");
+            if (redirects > MAX_REDIRECTS) throw new Error("native release download exceeded redirect limit");
+            return new Promise((resolve, reject) => {
+              let settled = false;
+              let headerTimer;
+              const finish = (callback, value) => {
+                if (settled) return;
+                settled = true;
+                clearTimeout(headerTimer);
+                callback(value);
+              };
+              const pending = request(parsed, { headers: { "user-agent": "gentle-pi-hosted-acquisition" } }, (incoming) => {
+                clearTimeout(headerTimer);
+                const status = incoming.statusCode ?? 0;
+                if (status >= 300 && status < 400) {
+                  const location = incoming.headers.location;
+                  incoming.resume();
+                  if (typeof location !== "string" || location.length === 0) {
+                    finish(reject, new Error("native release redirect missing location"));
+                    return;
+                  }
+                  if (redirects >= MAX_REDIRECTS) {
+                    finish(reject, new Error("native release download exceeded redirect limit"));
+                    return;
+                  }
+                  let next;
+                  try {
+                    next = new URL(location, parsed);
+                  } catch {
+                    finish(reject, new Error("native release redirect URL is invalid"));
+                    return;
+                  }
+                  if (next.protocol !== "https:") {
+                    finish(reject, new Error("native release redirect requires HTTPS"));
+                    return;
+                  }
+                  download(next.toString(), destination, redirects + 1).then(
+                    (value) => finish(resolve, value),
+                    (error) => finish(reject, error),
+                  );
+                  return;
+                }
+                if (status !== 200) {
+                  incoming.resume();
+                  finish(reject, new Error(`native release returned HTTP ${status}`));
+                  return;
+                }
+                const rawLength = incoming.headers["content-length"];
+                const contentLength = rawLength === undefined ? undefined : Number(rawLength);
+                if (
+                  contentLength !== undefined &&
+                  (!Number.isSafeInteger(contentLength) ||
+                    contentLength <= 0 ||
+                    contentLength > MAX_NATIVE_ARCHIVE_BYTES)
+                ) {
+                  incoming.resume();
+                  finish(reject, new Error("native release exceeds the archive size bound"));
+                  return;
+                }
+                const chunks = [];
+                let received = 0;
+                let bodyTimer = setTimeout(
+                  () => incoming.destroy(new Error("native release body timed out")),
+                  DOWNLOAD_BODY_TIMEOUT_MS,
+                );
+                const rejectBody = (error) => {
+                  clearTimeout(bodyTimer);
+                  incoming.destroy();
+                  finish(reject, downloadError("body", error));
+                };
+                incoming.on("data", (chunk) => {
+                  received += chunk.length;
+                  if (received > MAX_NATIVE_ARCHIVE_BYTES) {
+                    rejectBody(new Error("archive size bound exceeded"));
+                    return;
+                  }
+                  chunks.push(chunk);
+                  clearTimeout(bodyTimer);
+                  bodyTimer = setTimeout(
+                    () => incoming.destroy(new Error("native release body timed out")),
+                    DOWNLOAD_BODY_TIMEOUT_MS,
+                  );
+                });
+                incoming.on("error", rejectBody);
+                incoming.on("end", () => {
+                  clearTimeout(bodyTimer);
+                  if (contentLength !== undefined && received !== contentLength) {
+                    finish(reject, new Error("native release content length changed"));
+                    return;
+                  }
+                  writeFile(destination, Buffer.concat(chunks), { flag: "wx", mode: 0o600 }).then(
+                    () => finish(resolve),
+                    (error) => finish(reject, downloadError("write", error)),
+                  );
+                });
+              });
+              headerTimer = setTimeout(
+                () => pending.destroy(new Error("native release headers timed out")),
+                DOWNLOAD_HEADER_TIMEOUT_MS,
+              );
+              pending.on("error", (error) => finish(reject, downloadError("request", error)));
+              pending.end();
+            });
+          };
+          const runTar = (arguments_, maxBuffer) => {
+            try {
+              return execFileSync("tar", arguments_, { maxBuffer });
+            } catch (error) {
+              throw new Error(`standard tar operation failed code=${errorCode(error)}`);
+            }
+          };
 
           fail(manifest.schema === "gentle-pi.hosted-main-acquisition/v1", "invalid acquisition manifest schema");
           fail(manifest.repository === "https://github.com/Gentleman-Programming/gentle-shell.git", "main repository pin changed");
@@ -523,6 +649,82 @@ jobs:
           fail(git(["rev-parse", "HEAD"]).trim() === head, "Git HEAD moved during acquisition");
           fail(git(["rev-parse", "HEAD^{tree}"]).trim() === tree, "Git tree moved during acquisition");
           console.log(`acquisition-proof repository=${manifest.repository} commit=${head} tree=${tree} tracked-files=${files.length} pnpm=11.1.1 frozen-lockfile=true scripts=false pnpmfile=false`);
+
+          const native = manifest.native;
+          const expectedNative = {
+            version: "3.4.0",
+            asset: "gentle-ai_3.4.0_linux_amd64.tar.gz",
+            url: "https://github.com/Gentleman-Programming/gentle-ai/releases/download/v3.4.0/gentle-ai_3.4.0_linux_amd64.tar.gz",
+            assetSha256: "c287289a514420381e890991bb3fbea4a2c36d7b4b1774fcf6bc4deb83378915",
+            binarySha256: "309d9aafb48de5ef90ba0a212e8a98e8fdbb82d0852e24015e36a5ce0fe04c06",
+            member: "gentle-ai",
+          };
+          fail(JSON.stringify(native) === JSON.stringify(expectedNative), "native release pin changed");
+          const mainGitignore = await readFile(join(main, ".gitignore"), "utf8");
+          fail(mainGitignore.split(/\r?\n/).includes(".gentle-ai/"), "pinned main gitignore does not permit native artifact layout");
+          let tarVersion;
+          try {
+            tarVersion = execFileSync("tar", ["--version"], { encoding: "utf8", maxBuffer: 4096 });
+          } catch {
+            throw new Error("standard tar is unavailable in the hosted acquisition image");
+          }
+          fail(tarVersion.trim().length > 0, "standard tar returned no version");
+          const nativeArchive = join(artifacts, native.asset);
+          await download(native.url, nativeArchive);
+          const archiveBytes = await readFile(nativeArchive);
+          fail(sha256(archiveBytes) === native.assetSha256, "native release archive checksum mismatch");
+          const listedMembers = runTar(
+            ["--list", "--gzip", "--file", nativeArchive],
+            MAX_TAR_LIST_BYTES,
+          ).toString("utf8").split(/\r?\n/).filter(Boolean);
+          const candidateMembers = listedMembers.filter(
+            (entry) => entry === native.member || entry.endsWith(`/${native.member}`),
+          );
+          fail(candidateMembers.length === 1, "native release archive must contain one known binary member");
+          const member = candidateMembers[0];
+          const memberParts = member.split("/");
+          fail(
+            !member.startsWith("/") &&
+              !member.includes("\\") &&
+              !member.includes("\0") &&
+              memberParts.every((part) => part.length > 0 && part !== "." && part !== ".."),
+            "native release archive member path is unsafe",
+          );
+          const verboseMembers = runTar(
+            ["--list", "--verbose", "--gzip", "--file", nativeArchive, "--", member],
+            64 * 1024,
+          ).toString("utf8").trimEnd().split(/\r?\n/).filter(Boolean);
+          fail(
+            verboseMembers.length === 1 &&
+              verboseMembers[0].startsWith("-") &&
+              verboseMembers[0].endsWith(member),
+            "native release archive member is not one regular file",
+          );
+          const binary = runTar(
+            ["--extract", "--to-stdout", "--gzip", "--file", nativeArchive, "--", member],
+            MAX_NATIVE_BINARY_BYTES + 1,
+          );
+          fail(binary.length > 0 && binary.length <= MAX_NATIVE_BINARY_BYTES, "native binary exceeds the size bound");
+          fail(sha256(binary) === native.binarySha256, "native binary checksum mismatch");
+
+          const nativeRoot = join(main, ".gentle-ai");
+          const nativeVersionRoot = join(nativeRoot, `v${native.version}`);
+          const nativeBinary = join(nativeVersionRoot, "gentle-ai");
+          const nativeIntegrity = join(nativeVersionRoot, "integrity.json");
+          await mkdir(nativeRoot, { mode: 0o700 });
+          await mkdir(nativeVersionRoot, { mode: 0o700 });
+          await writeFile(nativeBinary, binary, { flag: "wx", mode: 0o700 });
+          await writeFile(
+            nativeIntegrity,
+            `${JSON.stringify({ version: native.version, asset: native.asset, assetSha256: native.assetSha256, binarySha256: native.binarySha256 })}\n`,
+            { flag: "wx", mode: 0o600 },
+          );
+          const sourceAfterNative = git(["ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
+          fail(sourceAfterNative === sourceBefore, "tracked main source changed after native publication");
+          fail(git(["status", "--porcelain=v1", "--untracked-files=all"]).trim() === "", "main checkout is not clean after native publication");
+          fail(git(["rev-parse", "HEAD"]).trim() === head, "Git HEAD moved during native publication");
+          fail(git(["rev-parse", "HEAD^{tree}"]).trim() === tree, "Git tree moved during native publication");
+          console.log(`native-acquisition-proof asset=${native.asset} archiveSha256=${native.assetSha256} binarySha256=${native.binarySha256} member=${member} layout=.gentle-ai/v${native.version} archive-hash-before-extraction=true binary-executed=false`);
           NODE
 
       - name: Run offline artifact validation in isolated container

@@ -1,9 +1,10 @@
+import { createHash } from "node:crypto";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { readFileSync } from "node:fs";
-import { readFile } from "node:fs/promises";
+import { lstat, readFile, realpath } from "node:fs/promises";
 import { networkInterfaces } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
 import test from "node:test";
 
 type PackageShape = {
@@ -15,6 +16,14 @@ type PackageShape = {
 	devDependencies: Record<string, string>;
 };
 type LockEntry = { name: string; specifier: string; versionPrefix: string };
+type NativeShape = {
+	version: string;
+	asset: string;
+	url: string;
+	assetSha256: string;
+	binarySha256: string;
+	member: string;
+};
 type Manifest = {
 	schema: string;
 	repository: string;
@@ -23,6 +32,7 @@ type Manifest = {
 	package: PackageShape;
 	lock: { lockfileVersion: string; importer: LockEntry[] };
 	installedPackages: Array<{ path: string; name: string; version: string }>;
+	native: NativeShape;
 };
 type ProvenanceFile = { path: string; mode: string; sha: string };
 type Provenance = { repository: string; commit: string; tree: string; files: ProvenanceFile[] };
@@ -30,6 +40,11 @@ type Provenance = { repository: string; commit: string; tree: string; files: Pro
 const CHECKOUT_ROOT = "/workspace";
 const MAIN_ROOT = "/acquired-main";
 const ARTIFACT_ROOT = "/acquired-artifacts";
+const NATIVE_VERSION = "3.4.0";
+const NATIVE_ROOT = join(MAIN_ROOT, ".gentle-ai");
+const NATIVE_VERSION_ROOT = join(NATIVE_ROOT, `v${NATIVE_VERSION}`);
+const NATIVE_BINARY = join(NATIVE_VERSION_ROOT, "gentle-ai");
+const NATIVE_MANIFEST = join(NATIVE_VERSION_ROOT, "integrity.json");
 const MANIFEST_PATH = join(
 	CHECKOUT_ROOT,
 	".github/workflows/fixtures/questionnaire-main-acquisition.json",
@@ -85,6 +100,7 @@ function assertManifestShape(): void {
 	assert.deepEqual(Object.keys(manifest).sort(), [
 		"commit",
 		"lock",
+		"native",
 		"package",
 		"repository",
 		"schema",
@@ -99,6 +115,22 @@ function assertManifestShape(): void {
 	assert.match(manifest.commit, /^[0-9a-f]{40}$/);
 	assert.match(manifest.tree, /^[0-9a-f]{40}$/);
 	assert.equal(manifest.package.packageManager, "pnpm@11.1.1");
+	assert.deepEqual(Object.keys(manifest.native), [
+		"version",
+		"asset",
+		"url",
+		"assetSha256",
+		"binarySha256",
+		"member",
+	]);
+	assert.deepEqual(manifest.native, {
+		version: "3.4.0",
+		asset: "gentle-ai_3.4.0_linux_amd64.tar.gz",
+		url: "https://github.com/Gentleman-Programming/gentle-ai/releases/download/v3.4.0/gentle-ai_3.4.0_linux_amd64.tar.gz",
+		assetSha256: "c287289a514420381e890991bb3fbea4a2c36d7b4b1774fcf6bc4deb83378915",
+		binarySha256: "309d9aafb48de5ef90ba0a212e8a98e8fdbb82d0852e24015e36a5ce0fe04c06",
+		member: "gentle-ai",
+	});
 }
 
 function escapeRegExp(value: string): string {
@@ -182,6 +214,7 @@ test("hosted acquisition preserves the pinned Git tree and tracked cleanliness",
 	assert.equal(git(["diff", "--cached", "--no-ext-diff", "--exit-code"]), "");
 	assert.equal(records.some((file) => file.path === "extensions/ask-user-question.ts"), false);
 	assert.equal(records.some((file) => file.path === "lib/questions" || file.path.startsWith("lib/questions/")), false);
+	assert.equal(records.some((file) => file.path === ".gentle-ai" || file.path.startsWith(".gentle-ai/")), false);
 	console.log(`artifact-proof repository=${head} tree=${tree} tracked-files=${records.length}`);
 });
 
@@ -208,4 +241,66 @@ test("hosted acquisition preserves exact main package, lock, and selected metada
 		assert.equal(metadata.version, entry.version, `installed metadata version changed: ${entry.name}`);
 	}
 	console.log(`artifact-proof package=${packageJson.name}@${packageJson.version} pnpm=${packageJson.packageManager} lock=${manifest.lock.lockfileVersion} selected-installed-metadata=${manifest.installedPackages.length}`);
+});
+
+test("hosted native artifact preserves exact release hashes and canonical integrity", async () => {
+	const archiveSha256 = createHash("sha256")
+		.update(await readFile(join(ARTIFACT_ROOT, manifest.native.asset)))
+		.digest("hex");
+	const binarySha256 = createHash("sha256")
+		.update(await readFile(NATIVE_BINARY))
+		.digest("hex");
+	assert.equal(archiveSha256, manifest.native.assetSha256);
+	assert.equal(binarySha256, manifest.native.binarySha256);
+	const expected = {
+		version: manifest.native.version,
+		asset: manifest.native.asset,
+		assetSha256: manifest.native.assetSha256,
+		binarySha256: manifest.native.binarySha256,
+	};
+	const contents = await readFile(NATIVE_MANIFEST, "utf8");
+	assert.equal(contents, `${JSON.stringify(expected)}\n`);
+	const parsed = JSON.parse(contents) as Record<string, string>;
+	assert.deepEqual(Object.keys(parsed), ["version", "asset", "assetSha256", "binarySha256"]);
+	assert.deepEqual(parsed, expected);
+	console.log(`native-artifact-proof archiveSha256=${archiveSha256} binarySha256=${binarySha256} manifest=canonical-ordered`);
+});
+
+test("hosted native artifact is regular executable and confined to ignored main runtime path", async () => {
+	for (const [path, label] of [
+		[MAIN_ROOT, "main root"],
+		[NATIVE_ROOT, "native root"],
+		[NATIVE_VERSION_ROOT, "native version directory"],
+	]) {
+		const details = await lstat(path);
+		assert.ok(details.isDirectory(), `${label} must be a directory`);
+		assert.equal(details.isSymbolicLink(), false, `${label} must not be a symlink`);
+	}
+	for (const [path, label] of [
+		[join(ARTIFACT_ROOT, manifest.native.asset), "native archive"],
+		[NATIVE_BINARY, "native binary"],
+		[NATIVE_MANIFEST, "native integrity manifest"],
+	]) {
+		const details = await lstat(path);
+		assert.ok(details.isFile(), `${label} must be a regular file`);
+		assert.equal(details.isSymbolicLink(), false, `${label} must not be a symlink`);
+		if (label === "native binary") assert.notEqual(details.mode & 0o111, 0, "native binary must be executable");
+	}
+	const mainReal = await realpath(MAIN_ROOT);
+	const artifactReal = await realpath(ARTIFACT_ROOT);
+	for (const [path, parent, label] of [
+		[await realpath(NATIVE_ROOT), mainReal, "native root"],
+		[await realpath(NATIVE_VERSION_ROOT), mainReal, "native version directory"],
+		[await realpath(NATIVE_BINARY), mainReal, "native binary"],
+		[await realpath(NATIVE_MANIFEST), mainReal, "native integrity manifest"],
+		[await realpath(join(ARTIFACT_ROOT, manifest.native.asset)), artifactReal, "native archive"],
+	]) {
+		const child = relative(parent, path);
+		assert.notEqual(child, "", `${label} must be below its parent`);
+		assert.equal(isAbsolute(child), false, `${label} escaped its parent`);
+		assert.equal(child.startsWith(".."), false, `${label} escaped its parent`);
+	}
+	const mainGitignore = await readFile(join(MAIN_ROOT, ".gitignore"), "utf8");
+	assert.match(mainGitignore, /(?:^|\r?\n)\.gentle-ai\/(?:\r?\n|$)/);
+	console.log("native-artifact-proof layout=.gentle-ai/v3.4.0 regular=true executable=true confined=true main-gitignore=true");
 });
