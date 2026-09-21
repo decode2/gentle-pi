@@ -129,6 +129,7 @@ test("hosted upstream acquisition uses bounded offline isolation", () => {
 		"HOME",
 		"NODE_TEST_WORKER_ID",
 		"PATH",
+		"PWD",
 		"TMPDIR",
 	].sort();
 	const actual = Object.keys(process.env).filter((key) => key !== "NODE_TEST_CONTEXT").sort();
@@ -136,6 +137,7 @@ test("hosted upstream acquisition uses bounded offline isolation", () => {
 	assert.deepEqual(Object.keys(process.env).filter((key) => /TOKEN|PASSWORD|SECRET|CREDENTIAL|AWS_|GITHUB_/i.test(key)), []);
 	assert.equal(process.env.ACQUIRED_UPSTREAM_ROOT, UPSTREAM_ROOT);
 	assert.equal(process.env.GENTLE_PI_HOSTED_ISOLATION, "docker-network-none-readonly-v1");
+	assert.equal(process.env.PWD, CHECKOUT_ROOT);
 	assert.equal(process.getuid?.(), 1000);
 	for (const mount of ["/", CHECKOUT_ROOT, UPSTREAM_ROOT]) assert.ok(mountOptions(mount).includes("ro"), `${mount} must be read-only`);
 	const status = readFileSync("/proc/self/status", "utf8");
