@@ -1,5 +1,5 @@
 diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
-index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..b5d6e186174024110a80c6033024636b93096a2a 100644
+index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..6b8c7fe8dfbbbe02174f73171134315adafe179c 100644
 --- a/tests/ask-user-question.test.ts
 +++ b/tests/ask-user-question.test.ts
 @@ -86,22 +86,23 @@
@@ -57,7 +57,7 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..b5d6e186174024110a80c6033024636b
  	]);
  });
  
-@@ -433,3 +440,285 @@
+@@ -433,3 +440,515 @@
  	).render(200).join("\n");
  	assert.match(cancelled, /Cancelled/);
  });
@@ -272,14 +272,14 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..b5d6e186174024110a80c6033024636b
 +];
 +const committedFirst = [{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha" }];
 +
-+function startMountedAbort() {
++function startAbort(id: string, questions = abortQuestions) {
 +	const subject = registerQuestionTool();
 +	const controller = new AbortController();
 +	const observed = instrumentAbortSignal(controller.signal);
 +	const mounted = pendingCustom();
 +	const pending = subject.tool.execute(
-+		"abort-mounted",
-+		{ questions: abortQuestions },
++		id,
++		{ questions },
 +		controller.signal,
 +		undefined,
 +		{ mode: "tui", ui: { custom: mounted.custom } },
@@ -327,7 +327,7 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..b5d6e186174024110a80c6033024636b
 +});
 +
 +test("ask_user_question aborts a mounted questionnaire with committed partial answers", async () => {
-+	const subject = startMountedAbort();
++	const subject = startAbort("abort-mounted");
 +	assert.ok(subject.mounted.state.component);
 +	subject.mounted.state.component!.handleInput?.("\r");
 +	subject.controller.abort();
@@ -342,4 +342,234 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..b5d6e186174024110a80c6033024636b
 +		details: { cancelled: true, answers: committedFirst },
 +	});
 +	assertAbortLifecycle(subject.emitted);
++});
++
++async function finishAbort(subject: ReturnType<typeof startAbort>) {
++	const settled = await settleAfterAbort(subject.pending, subject.mounted.cancel);
++	subject.observed.restore();
++	return {
++		...settled,
++		doneCalls: subject.mounted.state.doneCalls,
++		emitted: subject.emitted,
++		listeners: subject.observed.counts(),
++	};
++}
++
++test("ask_user_question aborts during a custom draft without committing the draft", async () => {
++	const subject = startAbort("abort-draft");
++	assert.ok(subject.mounted.state.component);
++	const component = subject.mounted.state.component!;
++	component.handleInput?.("\r");
++	component.handleInput?.("\x1b[B");
++	component.handleInput?.("\x1b[B");
++	component.handleInput?.("\r");
++	component.handleInput?.("draft");
++	subject.controller.abort();
++
++	const result = await finishAbort(subject);
++	assert.deepEqual(
++		[result.fallback, result.doneCalls, result.listeners],
++		[false, 1, { added: 1, removed: 1 }],
++	);
++	assert.deepEqual(result.value, {
++		content: [{ type: "text", text: "User cancelled the questionnaire\nPartial answers:\n1. First? — Alpha" }],
++		details: { cancelled: true, answers: committedFirst },
++	});
++	assert.doesNotMatch(JSON.stringify(result.value) ?? "", /draft/);
++	assertAbortLifecycle(result.emitted);
++});
++
++test("ask_user_question abort wins over later submit, cancel, and repeated abort", async () => {
++	const subject = startAbort("abort-wins");
++	assert.ok(subject.mounted.state.component);
++	const component = subject.mounted.state.component!;
++	component.handleInput?.("\r");
++	subject.controller.abort();
++	component.handleInput?.("\r");
++	component.handleInput?.("\x1b");
++	subject.controller.abort();
++	subject.controller.abort();
++
++	const result = await finishAbort(subject);
++	assert.deepEqual(
++		[result.fallback, result.doneCalls, result.listeners],
++		[false, 1, { added: 1, removed: 1 }],
++	);
++	assert.deepEqual(result.value, {
++		content: [{ type: "text", text: "User cancelled the questionnaire\nPartial answers:\n1. First? — Alpha" }],
++		details: { cancelled: true, answers: committedFirst },
++	});
++	assertAbortLifecycle(result.emitted);
++});
++
++test("ask_user_question keeps a completed submit ahead of later abort and cancel", async () => {
++	const subject = startAbort("submit-wins", single());
++	assert.ok(subject.mounted.state.component);
++	const component = subject.mounted.state.component!;
++	component.handleInput?.("\r");
++	const result = await subject.pending;
++	subject.controller.abort();
++	component.handleInput?.("\x1b");
++	subject.observed.restore();
++
++	assert.deepEqual(result, {
++		content: [{ type: "text", text: "1. Proceed? — Alpha" }],
++		details: {
++			answers: [{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha" }],
++		},
++	});
++	assert.equal(subject.mounted.state.doneCalls, 1);
++	assertAbortLifecycle(subject.emitted);
++	assert.deepEqual(subject.observed.counts(), { added: 1, removed: 1 });
++});
++
++test("ask_user_question keeps a completed cancel ahead of later abort and submit", async () => {
++	const subject = startAbort("cancel-wins", single());
++	assert.ok(subject.mounted.state.component);
++	const component = subject.mounted.state.component!;
++	component.handleInput?.("\x1b");
++	const result = await subject.pending;
++	subject.controller.abort();
++	component.handleInput?.("\r");
++	subject.observed.restore();
++
++	assert.deepEqual(result, {
++		content: [{ type: "text", text: "User cancelled the questionnaire" }],
++		details: { cancelled: true },
++	});
++	assert.equal(subject.mounted.state.doneCalls, 1);
++	assertAbortLifecycle(subject.emitted);
++	assert.deepEqual(subject.observed.counts(), { added: 1, removed: 1 });
++});
++
++test("ask_user_question closes before a deferred custom factory can mount a dock", async () => {
++	const { tool, emitted } = registerQuestionTool();
++	const controller = new AbortController();
++	const observed = instrumentAbortSignal(controller.signal);
++	let component: Renderable | undefined;
++	let releaseMount: (() => void) | undefined;
++	let resolveHost: ((value: unknown) => void) | undefined;
++	let closed = false;
++	let mounted = false;
++	let mountCalls = 0;
++	let doneCalls = 0;
++	const doneSources: string[] = [];
++	let cleanup = false;
++	const pending = tool.execute(
++		"abort-deferred",
++		{ questions: single() },
++		controller.signal,
++		undefined,
++		{
++			mode: "tui",
++			ui: {
++				custom: async (factory: CustomFactory) => new Promise<unknown>((resolve) => {
++					resolveHost = (value) => {
++						if (closed) return;
++						closed = true;
++						resolve(value);
++					};
++					const produced = factory({ requestRender() {} }, theme, {}, (value) => {
++						doneCalls++;
++						doneSources.push(cleanup ? "cleanup" : "producer");
++						resolveHost?.(value);
++					});
++					component = produced;
++					const deferred = new Promise<Renderable>((resolveDeferred) => {
++						releaseMount = () => resolveDeferred(produced);
++					});
++					deferred.then(() => {
++						if (closed) return;
++						mounted = true;
++						mountCalls++;
++					});
++				}),
++			},
++		},
++	);
++	controller.abort();
++	releaseMount?.();
++	const settled = await settleAfterAbort(pending, () => {
++		cleanup = true;
++		component?.handleInput?.("\x1b");
++		resolveHost?.({ cancelled: true, answers: [] });
++	});
++	observed.restore();
++
++	assert.deepEqual(
++		{
++			fallback: settled.fallback,
++			value: settled.value,
++			doneCalls,
++			doneSources,
++			closed,
++			mounted,
++			mountCalls,
++			listeners: observed.counts(),
++			emitted,
++		},
++		{
++			fallback: false,
++			value: {
++				content: [{ type: "text", text: "User cancelled the questionnaire" }],
++				details: { cancelled: true },
++			},
++			doneCalls: 1,
++			doneSources: ["producer"],
++			closed: true,
++			mounted: false,
++			mountCalls: 0,
++			listeners: { added: 1, removed: 1 },
++			emitted: [
++				{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++				{ channel: "rpiv:ask-user:blocked", data: { active: true } },
++				{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++				{ channel: "rpiv:ask-user:blocked", data: { active: false } },
++			],
++		},
++	);
++});
++
++test("ask_user_question removes abort listeners while preserving a custom UI rejection", async () => {
++	const { tool, emitted } = registerQuestionTool();
++	const controller = new AbortController();
++	const observed = instrumentAbortSignal(controller.signal);
++	const failure = new Error("custom UI failed");
++	let customCalls = 0;
++	let doneCalls = 0;
++
++	await assert.rejects(
++		() => tool.execute(
++			"abort-rejection",
++			{ questions: single() },
++			controller.signal,
++			undefined,
++			{
++				mode: "tui",
++				ui: {
++					custom: async (factory: CustomFactory) => {
++						customCalls++;
++						factory({ requestRender() {} }, theme, {}, () => {
++							doneCalls++;
++						});
++						throw failure;
++					},
++				},
++			},
++		),
++		(error: unknown) => error === failure,
++	);
++	controller.abort();
++	await Promise.resolve();
++	observed.restore();
++
++	assert.deepEqual(
++		[customCalls, doneCalls, emitted, observed.counts()],
++		[1, 0, [
++			{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++			{ channel: "rpiv:ask-user:blocked", data: { active: true } },
++			{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++			{ channel: "rpiv:ask-user:blocked", data: { active: false } },
++		], { added: 1, removed: 1 }],
++	);
 +});
