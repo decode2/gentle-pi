@@ -64,7 +64,7 @@ async function validate(options: ComposeUpstreamQuestionnaireOptions): Promise<r
 		if (!/^[0-9a-f]{40}$/.test(patch.preimage) || !/^[0-9a-f]{40}$/.test(patch.postimage)) fail("patch hash invalid");
 		const patchPath = join(options.patchRoot, file);
 		const patchDetails = await lstat(patchPath).catch(() => undefined);
-		if (!patchDetails) fail("missing patch file");
+		if (patchDetails === undefined) return fail("missing patch file");
 		if (!patchDetails.isFile() || patchDetails.isSymbolicLink()) fail("patch file must be regular");
 		const targetPath = join(options.sourceRoot, target);
 		const targetDetails = await lstat(targetPath).catch(() => undefined);
