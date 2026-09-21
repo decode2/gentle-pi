@@ -489,7 +489,7 @@ jobs:
             tree: "6fb42857f728f131da054e592ec5d22c691ce870",
           };
           const expectedInventory = [
-            { file: "006-abort-lifecycle-tests.patch", target: "tests/ask-user-question.test.ts", preimage: "cc439bdc0dcdfa1f8ade309abc63c1f565c64d40", postimage: "6b8c7fe8dfbbbe02174f73171134315adafe179c" },
+            { file: "006-abort-lifecycle-tests.patch", target: "tests/ask-user-question.test.ts", preimage: "cc439bdc0dcdfa1f8ade309abc63c1f565c64d40", postimage: "e0afc181256c503efa3fb3fd2fb54899abe4cc0c" },
             { file: "002-blocked-event-herdr-integration-test.patch", target: "tests/gentle-ai.test.ts", preimage: "81f4a38ecdfd11b97ada81308f036e0d318726fe", postimage: "f379515bae4cdda5d4bd84bafbf761597dd7dfcd" },
             { file: "005-partial-cancellation-producer.patch", target: "extensions/ask-user-question.ts", preimage: "52d6ff35296af67f1f4240ef5fc6df8bfe15dab6", postimage: "4b4db5d2addfc9d4c1ff112b017276d56bcf4a81" },
           ];
@@ -521,7 +521,7 @@ jobs:
           await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest: composition });
           console.log(`abort-red-composition-proof root=${outputRoot} base=${manifest.base.commit} patches=${expectedInventory.map((patch) => patch.file).join(",")} postimage=${expectedInventory[0].postimage}`);
           NODE
-          grep -Fx "abort-red-composition-proof root=/artifact/abort/derived base=f2d9d073ffc2299eb501902753b42789f7cdc461 patches=006-abort-lifecycle-tests.patch,002-blocked-event-herdr-integration-test.patch,005-partial-cancellation-producer.patch postimage=6b8c7fe8dfbbbe02174f73171134315adafe179c" "$compose_log" >/dev/null
+          grep -Fx "abort-red-composition-proof root=/artifact/abort/derived base=f2d9d073ffc2299eb501902753b42789f7cdc461 patches=006-abort-lifecycle-tests.patch,002-blocked-event-herdr-integration-test.patch,005-partial-cancellation-producer.patch postimage=e0afc181256c503efa3fb3fd2fb54899abe4cc0c" "$compose_log" >/dev/null
 
       - name: Verify staged abort RED artifact is read-only
         env:

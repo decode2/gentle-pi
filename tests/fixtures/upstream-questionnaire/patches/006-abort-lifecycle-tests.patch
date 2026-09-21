@@ -1,5 +1,5 @@
 diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
-index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..6b8c7fe8dfbbbe02174f73171134315adafe179c 100644
+index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..e0afc181256c503efa3fb3fd2fb54899abe4cc0c 100644
 --- a/tests/ask-user-question.test.ts
 +++ b/tests/ask-user-question.test.ts
 @@ -86,22 +86,23 @@
@@ -57,7 +57,7 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..6b8c7fe8dfbbbe02174f73171134315a
  	]);
  });
  
-@@ -433,3 +440,515 @@
+@@ -433,3 +440,517 @@
  	).render(200).join("\n");
  	assert.match(cancelled, /Cancelled/);
  });
@@ -200,6 +200,7 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..6b8c7fe8dfbbbe02174f73171134315a
 +		listener: EventListenerOrEventListenerObject | null,
 +		options?: boolean | AddEventListenerOptions,
 +	) => {
++		if (listener === null) return;
 +		if (type === "abort") added++;
 +		return add.call(signal, type, listener, options);
 +	}) as typeof signal.addEventListener;
@@ -208,6 +209,7 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..6b8c7fe8dfbbbe02174f73171134315a
 +		listener: EventListenerOrEventListenerObject | null,
 +		options?: boolean | EventListenerOptions,
 +	) => {
++		if (listener === null) return;
 +		if (type === "abort") removed++;
 +		return remove.call(signal, type, listener, options);
 +	}) as typeof signal.removeEventListener;

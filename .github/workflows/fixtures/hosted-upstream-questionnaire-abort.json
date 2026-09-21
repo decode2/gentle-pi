@@ -15,7 +15,7 @@
         "file": "006-abort-lifecycle-tests.patch",
         "target": "tests/ask-user-question.test.ts",
         "preimage": "cc439bdc0dcdfa1f8ade309abc63c1f565c64d40",
-        "postimage": "6b8c7fe8dfbbbe02174f73171134315adafe179c"
+        "postimage": "e0afc181256c503efa3fb3fd2fb54899abe4cc0c"
       },
       {
         "file": "002-blocked-event-herdr-integration-test.patch",
