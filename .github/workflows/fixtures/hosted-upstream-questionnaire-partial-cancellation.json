@@ -24,10 +24,10 @@
         "postimage": "f379515bae4cdda5d4bd84bafbf761597dd7dfcd"
       },
       {
-        "file": "003-blocked-event-compatibility.patch",
+        "file": "005-partial-cancellation-producer.patch",
         "target": "extensions/ask-user-question.ts",
         "preimage": "52d6ff35296af67f1f4240ef5fc6df8bfe15dab6",
-        "postimage": "abe084bca0b836f88579e23be3ea5b5db5316d42"
+        "postimage": "4b4db5d2addfc9d4c1ff112b017276d56bcf4a81"
       }
     ],
     "allowedTargets": [

@@ -311,7 +311,7 @@ jobs:
               printf "%s\\n" "$output" | grep -Eq "^ok [0-9]+ - ask_user_question keeps the native blocked lifecycle private and balanced$"
             '
 
-      - name: Compose partial-cancellation RED artifact offline
+      - name: Compose partial-cancellation GREEN artifact offline
         env:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -349,7 +349,7 @@ jobs:
           const expected = [
             { file: "004-partial-cancellation-tests.patch", target: "tests/ask-user-question.test.ts", preimage: "cc439bdc0dcdfa1f8ade309abc63c1f565c64d40", postimage: "48018904a33e2dc470ecde770829087c8996c5d5" },
             { file: "002-blocked-event-herdr-integration-test.patch", target: "tests/gentle-ai.test.ts", preimage: "81f4a38ecdfd11b97ada81308f036e0d318726fe", postimage: "f379515bae4cdda5d4bd84bafbf761597dd7dfcd" },
-            { file: "003-blocked-event-compatibility.patch", target: "extensions/ask-user-question.ts", preimage: "52d6ff35296af67f1f4240ef5fc6df8bfe15dab6", postimage: "abe084bca0b836f88579e23be3ea5b5db5316d42" },
+            { file: "005-partial-cancellation-producer.patch", target: "extensions/ask-user-question.ts", preimage: "52d6ff35296af67f1f4240ef5fc6df8bfe15dab6", postimage: "4b4db5d2addfc9d4c1ff112b017276d56bcf4a81" },
           ];
           fail(manifest.schema === "gentle-pi.hosted-upstream-questionnaire-partial-cancellation/v1", "partial manifest schema changed");
           fail(manifest.baseManifest === ".github/workflows/fixtures/hosted-upstream-questionnaire.json", "partial base manifest changed");
@@ -373,7 +373,7 @@ jobs:
           }
           fail(JSON.stringify((await readdir(patchRoot)).sort()) === JSON.stringify(expected.map((patch) => patch.file).sort()), "partial staged patch set changed");
           await composeUpstreamQuestionnaireArtifact({ sourceRoot: "/acquired-upstream", patchRoot, outputRoot, manifest: composition });
-          console.log(`partial-red-composition-proof root=${outputRoot} base=${manifest.base.commit} patches=${expected.map((patch) => patch.file).join(",")} targets=${expected.map((patch) => patch.target).join(",")}`);
+          console.log(`partial-green-composition-proof root=${outputRoot} base=${manifest.base.commit} patches=${expected.map((patch) => patch.file).join(",")} targets=${expected.map((patch) => patch.target).join(",")}`);
           NODE
             '
 
@@ -395,10 +395,10 @@ jobs:
             env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             /bin/sh -eu -c '
               test -f /derived/tests/ask-user-question.test.ts
-              if touch /derived/.red-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /derived/.green-read-only-probe 2>/dev/null; then exit 1; fi
             '
 
-      - name: Run partial-cancellation intentional RED contract
+      - name: Run partial-cancellation GREEN contract
         env:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -420,7 +420,7 @@ jobs:
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
             /bin/sh -eu -c '
-              if touch /derived/.red-test-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /derived/.green-test-read-only-probe 2>/dev/null; then exit 1; fi
               /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
                 --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
                 --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
@@ -430,21 +430,18 @@ jobs:
               output="$(/usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts 2>&1)"
               status=$?
               set -e
-              failures="$(printf "%s\\n" "$output" | awk '\''/^not ok / { showing=1 } showing { print } showing && /^  \.\.\.$/ { showing=0 }'\'')"
-              test -n "$failures"
-              printf "%s\\n" "$failures" | head -c 12000
               printf "%s\\n" "$output" | tail -n 80
-              test "$status" -ne 0
-              test "$(printf "%s\\n" "$output" | grep -Ec "^ok [0-9]+ - ")" -eq 86
-              test "$(printf "%s\\n" "$output" | grep -Ec "^not ok [0-9]+ - ")" -eq 3
+              test "$status" -eq 0
+              test "$(printf "%s\\n" "$output" | grep -Ec "^ok [0-9]+ - ")" -eq 89
+              test "$(printf "%s\\n" "$output" | grep -Ec "^not ok [0-9]+ - ")" -eq 0
               printf "%s\\n" "$output" | grep -Fx "1..89" >/dev/null
               printf "%s\\n" "$output" | grep -Fx "# tests 96" >/dev/null
-              printf "%s\\n" "$output" | grep -Fx "# pass 93" >/dev/null
-              printf "%s\\n" "$output" | grep -Fx "# fail 3" >/dev/null
-              printf "%s\\n" "$output" | grep -Eq "^not ok [0-9]+ - ask_user_question returns partial answers for committed options on cancellation$"
-              printf "%s\\n" "$output" | grep -Eq "^not ok [0-9]+ - ask_user_question preserves custom and multi answers on partial cancellation$"
-              printf "%s\\n" "$output" | grep -Eq "^not ok [0-9]+ - ask_user_question retains committed answers when a replacement draft is cancelled$"
+              printf "%s\\n" "$output" | grep -Fx "# pass 96" >/dev/null
+              printf "%s\\n" "$output" | grep -Fx "# fail 0" >/dev/null
+              printf "%s\\n" "$output" | grep -Eq "^ok [0-9]+ - ask_user_question returns partial answers for committed options on cancellation$"
+              printf "%s\\n" "$output" | grep -Eq "^ok [0-9]+ - ask_user_question preserves custom and multi answers on partial cancellation$"
               printf "%s\\n" "$output" | grep -Eq "^ok [0-9]+ - ask_user_question omits uncommitted state on cancellation$"
+              printf "%s\\n" "$output" | grep -Eq "^ok [0-9]+ - ask_user_question retains committed answers when a replacement draft is cancelled$"
               printf "%s\\n" "$output" | grep -Eq "^ok [0-9]+ - ask_user_question reports cancellation without answers$"
               printf "%s\\n" "$output" | grep -Eq "^ok [0-9]+ - ask_user_question keeps the native blocked lifecycle private and balanced$"
               printf "%s\\n" "$output" | grep -Eq "^ok [0-9]+ - actual questionnaire producer drives Herdr through a private balanced compatibility lifecycle$"
