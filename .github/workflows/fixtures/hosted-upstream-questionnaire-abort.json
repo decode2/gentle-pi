@@ -1,0 +1,44 @@
+{
+  "schema": "gentle-pi.hosted-upstream-questionnaire-abort/v1",
+  "baseManifest": ".github/workflows/fixtures/hosted-upstream-questionnaire.json",
+  "base": {
+    "repository": "https://github.com/Gentleman-Programming/gentle-shell.git",
+    "commit": "f2d9d073ffc2299eb501902753b42789f7cdc461",
+    "tree": "6fb42857f728f131da054e592ec5d22c691ce870"
+  },
+  "composition": {
+    "schema": "gentle-pi.hosted-upstream-questionnaire-composition/v1",
+    "derivedDirectory": "derived",
+    "patchDirectory": "patches/questionnaire-upstream",
+    "patchInventory": [
+      {
+        "file": "006-abort-lifecycle-tests.patch",
+        "target": "tests/ask-user-question.test.ts",
+        "preimage": "cc439bdc0dcdfa1f8ade309abc63c1f565c64d40",
+        "postimage": "b5d6e186174024110a80c6033024636b93096a2a"
+      },
+      {
+        "file": "002-blocked-event-herdr-integration-test.patch",
+        "target": "tests/gentle-ai.test.ts",
+        "preimage": "81f4a38ecdfd11b97ada81308f036e0d318726fe",
+        "postimage": "f379515bae4cdda5d4bd84bafbf761597dd7dfcd"
+      },
+      {
+        "file": "005-partial-cancellation-producer.patch",
+        "target": "extensions/ask-user-question.ts",
+        "preimage": "52d6ff35296af67f1f4240ef5fc6df8bfe15dab6",
+        "postimage": "4b4db5d2addfc9d4c1ff112b017276d56bcf4a81"
+      }
+    ],
+    "allowedTargets": [
+      "extensions/ask-user-question.ts",
+      "tests/ask-user-question.test.ts",
+      "tests/gentle-ai.test.ts",
+      "lib/questionnaire/questionnaire-view.ts"
+    ],
+    "protectedTargets": [
+      "extensions/gentle-ai.ts",
+      "lib/native-fullscreen-interaction.ts"
+    ]
+  }
+}

@@ -1,0 +1,345 @@
+diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
+index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..b5d6e186174024110a80c6033024636b93096a2a 100644
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -86,22 +86,23 @@
+ 	return { tool, slot: target, emitted };
+ }
+ 
+-function tuiContext(inputs: readonly string[], rendered?: { value: string }) {
++function tuiContext(inputs: readonly string[], rendered?: { value: string }, capture?: { value: unknown }) {
+ 	return {
+ 		mode: "tui",
+ 		ui: {
+ 			custom: async (factory: CustomFactory) => {
+ 				let result: unknown;
+ 				const component = factory({ requestRender() {} }, theme, {}, (value) => {
+ 					result = value;
+ 				});
+ 				if (rendered) rendered.value = component.render(100).join("\n");
+ 				for (const input of inputs) component.handleInput?.(input);
++				if (capture) capture.value = result;
+ 				return result;
+ 			},
+ 		},
+ 	};
+ }
+ 
+ function run(tool: RegisteredTool, params: unknown, ctx: unknown): Promise<ToolResult> {
+ 	return tool.execute("call", params, new AbortController().signal, undefined, ctx);
+@@ -200,7 +201,9 @@
+ 	]);
+ 	assert.deepEqual(emitted, [
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
+ 	]);
+ });
+ 
+@@ -337,7 +340,9 @@
+ 	assert.deepEqual(result.details, { cancelled: true });
+ 	assert.deepEqual(emitted, [
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
+ 	]);
+ });
+ 
+@@ -352,7 +357,9 @@
+ 
+ 	assert.deepEqual(emitted, [
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
+ 	]);
+ });
+ 
+@@ -433,3 +440,285 @@
+ 	).render(200).join("\n");
+ 	assert.match(cancelled, /Cancelled/);
+ });
++
++test("ask_user_question keeps the native blocked lifecycle private and balanced", async (t) => {
++	const expected = [
++		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
++		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
++	];
++	for (const [name, inputs] of [["answered", ["\r"]], ["cancelled", ["\x1b"]]] as const) {
++		await t.test(name, async () => {
++			const { tool, emitted } = registerQuestionTool();
++			await run(tool, { questions: single() }, tuiContext(inputs));
++			assert.deepEqual(emitted, expected);
++		});
++	}
++
++	const { tool, emitted } = registerQuestionTool();
++	const failure = new Error("custom UI failed");
++	await assert.rejects(
++		() => run(tool, { questions: single() }, { mode: "tui", ui: { custom: async () => { throw failure; } } }),
++		(error: unknown) => error === failure,
++	);
++	assert.deepEqual(emitted, expected);
++	assert.ok(emitted.every(({ data }) => Object.keys(data).sort().join(",") === "active"));
++});
++
++test("ask_user_question returns partial answers for committed options on cancellation", async () => {
++	const { tool } = registerQuestionTool();
++	const questions = [
++		{ question: "Choose a preview?", header: "Preview", options: [option("Alpha", "First choice", "Preview A"), option("Beta")] },
++		{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
++	];
++
++	const selection = { value: undefined as unknown };
++	const expectedAnswers = [
++		{ questionIndex: 0, question: "Choose a preview?", kind: "option", answer: "Alpha", preview: "Preview A" },
++	];
++	const partialText = "User cancelled the questionnaire\nPartial answers:\n1. Choose a preview? — Alpha\n   selected preview: Preview A";
++	const result = await run(tool, { questions }, tuiContext(["\r", "\x1b"], undefined, selection));
++
++	assert.deepEqual(selection.value, { cancelled: true, answers: expectedAnswers });
++	assert.deepEqual(
++		{ text: result.content[0]?.text, details: result.details },
++		{ text: partialText, details: { cancelled: true, answers: expectedAnswers } },
++	);
++});
++
++test("ask_user_question preserves custom and multi answers on partial cancellation", async () => {
++	const { tool } = registerQuestionTool();
++	const questions = [
++		{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true },
++		{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
++	];
++
++	const selection = { value: undefined as unknown };
++	const expectedAnswers = [
++		{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "free note", selected: ["One"] },
++	];
++	const partialText = "User cancelled the questionnaire\nPartial answers:\n1. Pick? — (custom) free note — selected: One";
++	const result = await run(
++		tool,
++		{ questions },
++		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\r", "\x1b"], undefined, selection),
++	);
++
++	assert.deepEqual(selection.value, { cancelled: true, answers: expectedAnswers });
++	assert.deepEqual(
++		{ text: result.content[0]?.text, details: result.details },
++		{ text: partialText, details: { cancelled: true, answers: expectedAnswers } },
++	);
++});
++
++test("ask_user_question omits uncommitted state on cancellation", async () => {
++	const { tool } = registerQuestionTool();
++	const questions = [
++		{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true },
++	];
++	const views: string[] = [];
++	const result = await run(tool, { questions }, {
++		mode: "tui",
++		ui: {
++			custom: async (factory: CustomFactory) => {
++				let selection: unknown;
++				const component = factory({ requestRender() {} }, theme, {}, (value) => { selection = value; });
++				component.handleInput?.(" ");
++				component.handleInput?.("\x1b[B");
++				component.handleInput?.("\x1b[B");
++				component.handleInput?.("\r");
++				component.handleInput?.("   ");
++				views.push(component.render(100).join("\n"));
++				component.handleInput?.("\x1b");
++				views.push(component.render(100).join("\n"));
++				component.handleInput?.("\x1b");
++				return selection;
++			},
++		},
++	});
++
++	assert.match(views[0] ?? "", /Custom response/);
++	assert.doesNotMatch(views[1] ?? "", /Custom response/);
++	assert.equal(result.content[0]?.text, "User cancelled the questionnaire");
++	assert.deepEqual(result.details, { cancelled: true });
++});
++
++test("ask_user_question retains committed answers when a replacement draft is cancelled", async () => {
++	const { tool } = registerQuestionTool();
++	const questions = [
++		{ question: "First?", header: "First", options: [option("Alpha"), option("Beta")] },
++		{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
++	];
++
++	const selection = { value: undefined as unknown };
++	const expectedAnswers = [
++		{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha" },
++	];
++	const partialText = "User cancelled the questionnaire\nPartial answers:\n1. First? — Alpha";
++	const result = await run(
++		tool,
++		{ questions },
++		tuiContext(["\r", "\t", "\x1b[B", "\x1b[B", "\r", "replacement", "\x1b", "\x1b"], undefined, selection),
++	);
++
++	assert.deepEqual(selection.value, { cancelled: true, answers: expectedAnswers });
++	assert.deepEqual(
++		{ text: result.content[0]?.text, details: result.details },
++		{ text: partialText, details: { cancelled: true, answers: expectedAnswers } },
++	);
++});
++
++function instrumentAbortSignal(signal: AbortSignal) {
++	let added = 0;
++	let removed = 0;
++	const add = signal.addEventListener;
++	const remove = signal.removeEventListener;
++	signal.addEventListener = ((
++		type: string,
++		listener: EventListenerOrEventListenerObject | null,
++		options?: boolean | AddEventListenerOptions,
++	) => {
++		if (type === "abort") added++;
++		return add.call(signal, type, listener, options);
++	}) as typeof signal.addEventListener;
++	signal.removeEventListener = ((
++		type: string,
++		listener: EventListenerOrEventListenerObject | null,
++		options?: boolean | EventListenerOptions,
++	) => {
++		if (type === "abort") removed++;
++		return remove.call(signal, type, listener, options);
++	}) as typeof signal.removeEventListener;
++	return {
++		counts: () => ({ added, removed }),
++		restore: () => {
++			signal.addEventListener = add;
++			signal.removeEventListener = remove;
++		},
++	};
++}
++
++function pendingCustom() {
++	const state = {
++		component: undefined as Renderable | undefined,
++		doneCalls: 0,
++		resolve: undefined as ((value: unknown) => void) | undefined,
++	};
++	const custom = async (factory: CustomFactory) => new Promise<unknown>((resolve) => {
++		state.resolve = (value) => {
++			resolve(value);
++		};
++		state.component = factory({ requestRender() {} }, theme, {}, (value) => {
++			state.doneCalls++;
++			state.resolve?.(value);
++		});
++	});
++	const cancel = () => {
++		state.component?.handleInput?.("\x1b");
++		state.component?.handleInput?.("\x1b");
++		state.resolve?.({ cancelled: true, answers: [] });
++	};
++	return { state, custom, cancel };
++}
++
++function assertAbortLifecycle(emitted: readonly LifecycleEvent[]) {
++	assert.deepEqual(emitted, [
++		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
++		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
++	]);
++}
++
++async function settleAfterAbort<T>(pending: Promise<T>, cleanup: () => void) {
++	let settled = false;
++	pending.then(
++		() => { settled = true; },
++		() => { settled = true; },
++	);
++	for (let turn = 0; turn < 4 && !settled; turn++) {
++		await Promise.resolve();
++	}
++	const fallback = !settled;
++	if (fallback) cleanup();
++	return { value: await pending, fallback };
++}
++
++const abortQuestions = [
++	{ question: "First?", header: "First", options: [option("Alpha"), option("Beta")] },
++	{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
++];
++const committedFirst = [{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha" }];
++
++function startMountedAbort() {
++	const subject = registerQuestionTool();
++	const controller = new AbortController();
++	const observed = instrumentAbortSignal(controller.signal);
++	const mounted = pendingCustom();
++	const pending = subject.tool.execute(
++		"abort-mounted",
++		{ questions: abortQuestions },
++		controller.signal,
++		undefined,
++		{ mode: "tui", ui: { custom: mounted.custom } },
++	);
++	return { ...subject, controller, observed, mounted, pending };
++}
++
++test("ask_user_question returns empty cancellation before mounting an already-aborted request", async () => {
++	const { tool, emitted } = registerQuestionTool();
++	const controller = new AbortController();
++	controller.abort();
++	const observed = instrumentAbortSignal(controller.signal);
++	let customCalls = 0;
++	let doneCalls = 0;
++	const result = await tool.execute(
++		"abort-pre",
++		{ questions: single() },
++		controller.signal,
++		undefined,
++		{
++			mode: "tui",
++			ui: {
++				custom: async (factory: CustomFactory) => {
++					customCalls++;
++					let value: unknown;
++					const component = factory({ requestRender() {} }, theme, {}, (next) => {
++						doneCalls++;
++						value = next;
++					});
++					component.handleInput?.("\x1b");
++					return value;
++				},
++			},
++		},
++	);
++	observed.restore();
++	assert.deepEqual(
++		[customCalls, doneCalls, emitted, observed.counts()],
++		[0, 0, [], { added: 0, removed: 0 }],
++	);
++	assert.deepEqual(result, {
++		content: [{ type: "text", text: "User cancelled the questionnaire" }],
++		details: { cancelled: true },
++	});
++});
++
++test("ask_user_question aborts a mounted questionnaire with committed partial answers", async () => {
++	const subject = startMountedAbort();
++	assert.ok(subject.mounted.state.component);
++	subject.mounted.state.component!.handleInput?.("\r");
++	subject.controller.abort();
++	const observed = await settleAfterAbort(subject.pending, subject.mounted.cancel);
++	subject.observed.restore();
++	assert.deepEqual(
++		[observed.fallback, subject.mounted.state.doneCalls, subject.observed.counts()],
++		[false, 1, { added: 1, removed: 1 }],
++	);
++	assert.deepEqual(observed.value, {
++		content: [{ type: "text", text: "User cancelled the questionnaire\nPartial answers:\n1. First? — Alpha" }],
++		details: { cancelled: true, answers: committedFirst },
++	});
++	assertAbortLifecycle(subject.emitted);
++});
