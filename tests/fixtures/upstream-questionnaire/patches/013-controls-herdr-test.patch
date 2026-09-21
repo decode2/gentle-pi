@@ -1,0 +1,15 @@
+diff --git a/tests/gentle-ai.test.ts b/tests/gentle-ai.test.ts
+index f379515bae4cdda5d4bd84bafbf761597dd7dfcd..c660cb38d4612545db38ce2d11890731de5b3220 100644
+--- a/tests/gentle-ai.test.ts
++++ b/tests/gentle-ai.test.ts
+@@ -2640,7 +2640,9 @@ test("actual questionnaire producer drives Herdr through a private balanced comp
+ 						if (kind === "thrown") throw failure;
+ 						let result: unknown;
+ 						const component = factory({ requestRender() {} }, theme, {}, (value) => { result = value; });
+-						component.handleInput?.(kind === "answered" ? "\r" : "\x1b");
++						for (const input of kind === "answered" ? ["\r", "\r"] : ["\x1b"]) {
++							component.handleInput?.(input);
++						}
+ 						return result;
+ 					},
+ 				},

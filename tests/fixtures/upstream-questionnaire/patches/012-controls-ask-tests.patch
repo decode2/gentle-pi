@@ -1,0 +1,66 @@
+diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
+index e0afc181256c503efa3fb3fd2fb54899abe4cc0c..4534749ee354b4aea1278652c865dcbb3ce3f6ae 100644
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -448,7 +448,7 @@ test("ask_user_question keeps the native blocked lifecycle private and balanced"
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
+ 		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
+ 	];
+-	for (const [name, inputs] of [["answered", ["\r"]], ["cancelled", ["\x1b"]]] as const) {
++	for (const [name, inputs] of [["answered", ["\r", "\r"]], ["cancelled", ["\x1b"]]] as const) {
+ 		await t.test(name, async () => {
+ 			const { tool, emitted } = registerQuestionTool();
+ 			await run(tool, { questions: single() }, tuiContext(inputs));
+@@ -624,6 +624,18 @@ function pendingCustom() {
+ 	return { state, custom, cancel };
+ }
+ 
++function submitWhenRendered(component: Renderable): void {
++	for (let step = 0; step < 8; step++) {
++		const rendered = component.render(100).join("\n").replace(/\x1b\[[0-9;]*m/g, "");
++		if (rendered.includes("❯ Submit")) {
++			component.handleInput?.("\r");
++			return;
++		}
++		component.handleInput?.("\x1b[B");
++	}
++	assert.fail("Submit must be reachable");
++}
++
+ function assertAbortLifecycle(emitted: readonly LifecycleEvent[]) {
+ 	assert.deepEqual(emitted, [
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
+@@ -668,6 +680,25 @@ function startAbort(id: string, questions = abortQuestions) {
+ 	return { ...subject, controller, observed, mounted, pending };
+ }
+ 
++test("ask_user_question submits an empty multi-select through explicit Submit", async () => {
++	const questions = [{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true }];
++	const subject = startAbort("empty-multi", questions);
++	assert.ok(subject.mounted.state.component);
++	submitWhenRendered(subject.mounted.state.component!);
++	const result = await subject.pending;
++	subject.observed.restore();
++
++	assert.deepEqual(result, {
++		content: [{ type: "text", text: "1. Pick? — (no input)" }],
++		details: {
++			answers: [{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: [] }],
++		},
++	});
++	assert.equal(subject.mounted.state.doneCalls, 1);
++	assertAbortLifecycle(subject.emitted);
++	assert.deepEqual(subject.observed.counts(), { added: 1, removed: 1 });
++});
++
+ test("ask_user_question returns empty cancellation before mounting an already-aborted request", async () => {
+ 	const { tool, emitted } = registerQuestionTool();
+ 	const controller = new AbortController();
+@@ -788,6 +819,7 @@ test("ask_user_question keeps a completed submit ahead of later abort and cancel
+ 	assert.ok(subject.mounted.state.component);
+ 	const component = subject.mounted.state.component!;
+ 	component.handleInput?.("\r");
++	submitWhenRendered(component);
+ 	const result = await subject.pending;
+ 	subject.controller.abort();
+ 	component.handleInput?.("\x1b");

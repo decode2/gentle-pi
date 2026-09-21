@@ -1,0 +1,16 @@
+diff --git a/extensions/ask-user-question.ts b/extensions/ask-user-question.ts
+index d7dea145b52cfe446083ca881be088b89f964ea6..716f3f03a4fc42b2f9958cfccb425a23ec2fe1c9 100644
+--- a/extensions/ask-user-question.ts
++++ b/extensions/ask-user-question.ts
+@@ -58,7 +58,10 @@ function unavailableResult(): QuestionnaireToolResult {
+  * custom answers (no selections) stay concise.
+  */
+ function answerBody(answer: AnswerRow): string {
+-	if (answer.kind === "multi") return `selected: ${(answer.selected ?? []).join(", ")}`;
++	if (answer.kind === "multi") {
++		const selected = answer.selected ?? [];
++		return selected.length > 0 ? `selected: ${selected.join(", ")}` : "(no input)";
++	}
+ 	if (answer.kind === "custom") {
+ 		const body = `(custom) ${answer.answer ?? ""}`;
+ 		const selected = answer.selected ?? [];
