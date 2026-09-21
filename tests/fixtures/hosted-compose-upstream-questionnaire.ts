@@ -40,7 +40,8 @@ function safePath(value: string, label: string): string {
 }
 async function validate(options: ComposeUpstreamQuestionnaireOptions): Promise<readonly PatchEntry[]> {
 	const manifest = options.manifest;
-	if (manifest.schema !== "gentle-pi.hosted-upstream-questionnaire-composition/v1") fail("manifest schema changed");
+	const v2 = manifest.schema === "gentle-pi.hosted-upstream-questionnaire-composition/v2";
+	if (!v2 && manifest.schema !== "gentle-pi.hosted-upstream-questionnaire-composition/v1") fail("manifest schema changed");
 	if (manifest.patchDirectory !== "patches/questionnaire-upstream" || manifest.derivedDirectory !== "derived") fail("patch directory identity changed");
 	if (!options.patchRoot.endsWith(`${sep}${manifest.patchDirectory}`) || !options.outputRoot.endsWith(`${sep}${manifest.derivedDirectory}`)) fail("patch directory identity changed");
 	if (!Array.isArray(manifest.patchInventory) || !Array.isArray(manifest.allowedTargets) || !Array.isArray(manifest.protectedTargets)) fail("manifest path policy changed");
@@ -50,15 +51,21 @@ async function validate(options: ComposeUpstreamQuestionnaireOptions): Promise<r
 	const files = await readdir(options.patchRoot);
 	const listed = new Set<string>();
 	const targets = new Set<string>();
+	const postimages = new Map<string, string>();
+	let previousTarget: string | undefined;
 	const patches: PatchEntry[] = [];
 	for (const patch of manifest.patchInventory) {
 		if (!patch || typeof patch.file !== "string" || typeof patch.target !== "string") fail("patch inventory entry invalid");
 		const file = safePath(patch.file, "patch file");
 		const target = safePath(patch.target, "target");
+		const priorPostimage = postimages.get(target);
 		if (listed.has(file)) fail("duplicate patch file");
-		if (targets.has(target)) fail("duplicate target");
+		if (!v2 && targets.has(target)) fail("duplicate target");
+		if (v2 && targets.has(target) && previousTarget !== target) fail("v2 target chain is interleaved and must be contiguous");
+		if (v2 && priorPostimage !== undefined && patch.preimage !== priorPostimage) fail("v2 same-target patch continuity mismatch");
 		listed.add(file);
 		targets.add(target);
+		previousTarget = target;
 		if (manifest.protectedTargets.includes(target)) fail("target is protected");
 		if (!manifest.allowedTargets.includes(target)) fail("target is not allowed");
 		if (!/^[0-9a-f]{40}$/.test(patch.preimage) || !/^[0-9a-f]{40}$/.test(patch.postimage)) fail("patch hash invalid");
@@ -66,13 +73,17 @@ async function validate(options: ComposeUpstreamQuestionnaireOptions): Promise<r
 		const patchDetails = await lstat(patchPath).catch(() => undefined);
 		if (patchDetails === undefined) return fail("missing patch file");
 		if (!patchDetails.isFile() || patchDetails.isSymbolicLink()) fail("patch file must be regular");
+		await realTargetAncestors(options.sourceRoot, target);
 		const targetPath = join(options.sourceRoot, target);
 		const targetDetails = await lstat(targetPath).catch(() => undefined);
 		if (!targetDetails?.isFile() || targetDetails.isSymbolicLink()) fail("target must be regular");
 		const changed = git(["apply", "--numstat", "--summary", "--unsafe-paths", patchPath], options.sourceRoot, "changed path inventory");
+		const summary = changed.replace(/^.*\t.*$/gm, "");
+		if (/\b(?:create mode|delete mode|old mode|new mode|mode change|rename|copy|type change)\b/i.test(summary)) fail("patch metadata side effect is not allowed");
 		const changedPaths = changed.split("\n").filter((line) => line.includes("\t")).map((line) => line.slice(line.lastIndexOf("\t") + 1)).filter(Boolean);
 		if (changedPaths.length !== 1 || changedPaths[0] !== target) fail("changed path inventory mismatch");
-		if (git(["hash-object", "--no-filters", "--", target], options.sourceRoot, "preimage").trim() !== patch.preimage) fail("preimage mismatch");
+		if ((!v2 || priorPostimage === undefined) && git(["hash-object", "--no-filters", "--", target], options.sourceRoot, "preimage").trim() !== patch.preimage) fail("preimage mismatch");
+		postimages.set(target, patch.postimage);
 		patches.push(patch);
 	}
 	for (const file of files) {
@@ -93,6 +104,15 @@ function applyPatch(stage: string, patchRoot: string, patch: PatchEntry): void {
 async function realDirectory(path: string, label: string): Promise<void> {
 	const details = await lstat(path).catch(() => fail(`${label} root is missing`));
 	if (!details.isDirectory() || details.isSymbolicLink()) fail(`${label} root must be a real directory`);
+}
+
+async function realTargetAncestors(root: string, target: string): Promise<void> {
+	let current = root;
+	for (const segment of target.split(sep).slice(0, -1)) {
+		current = join(current, segment);
+		const details = await lstat(current).catch(() => fail("target ancestor is missing"));
+		if (!details.isDirectory() || details.isSymbolicLink()) fail("target ancestor must be a real directory");
+	}
 }
 
 async function copyTree(sourceRoot: string, outputRoot: string, current = ""): Promise<void> {
@@ -130,10 +150,14 @@ export async function composeUpstreamQuestionnaireArtifact(
 		stage = await mkdtemp(join(dirname(options.outputRoot), ".questionnaire-stage-"));
 		await copyTree(options.sourceRoot, stage);
 		for (const patch of patches) {
-			applyPatch(stage, options.patchRoot, patch);
+			await realTargetAncestors(stage, patch.target);
 			const targetPath = join(stage, patch.target);
 			const details = await lstat(targetPath).catch(() => undefined);
 			if (!details?.isFile() || details.isSymbolicLink()) fail("target must be regular");
+			if (git(["hash-object", "--no-filters", "--", patch.target], stage, "preimage").trim() !== patch.preimage) fail("preimage mismatch");
+			applyPatch(stage, options.patchRoot, patch);
+			const finalDetails = await lstat(targetPath).catch(() => undefined);
+			if (!finalDetails?.isFile() || finalDetails.isSymbolicLink()) fail("target must be regular");
 			if (git(["hash-object", "--no-filters", "--", patch.target], stage, "postimage").trim() !== patch.postimage) fail("postimage mismatch");
 		}
 		await rename(stage, options.outputRoot);
