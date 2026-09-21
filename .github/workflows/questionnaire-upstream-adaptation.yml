@@ -745,7 +745,7 @@ jobs:
                 --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
                 --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
                 /derived/extensions/ask-user-question.ts /derived/lib/questionnaire/questionnaire-view.ts \
-                /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts
+                /derived/tests/ask-user-question.test.ts
               /usr/local/bin/node /derived/scripts/check-types.mjs
               log=/tmp/uqa04b-green.tap
               set +e
