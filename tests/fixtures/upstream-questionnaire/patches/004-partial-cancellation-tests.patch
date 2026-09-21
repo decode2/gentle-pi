@@ -2,16 +2,32 @@ diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
 index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..48018904a33e2dc470ecde770829087c8996c5d5 100644
 --- a/tests/ask-user-question.test.ts
 +++ b/tests/ask-user-question.test.ts
-@@ -89 +89 @@
+@@ -86,22 +86,23 @@
+ 	return { tool, slot: target, emitted };
+ }
+ 
 -function tuiContext(inputs: readonly string[], rendered?: { value: string }) {
 +function tuiContext(inputs: readonly string[], rendered?: { value: string }, capture?: { value: unknown }) {
-@@ -99,2 +99,3 @@
--				for (const input of inputs) component.handleInput?.(input);
--				return result;
-+				for (const input of inputs) component.handleInput?.(input);
+ 	return {
+ 		mode: "tui",
+ 		ui: {
+ 			custom: async (factory: CustomFactory) => {
+ 				let result: unknown;
+ 				const component = factory({ requestRender() {} }, theme, {}, (value) => {
+ 					result = value;
+ 				});
+ 				if (rendered) rendered.value = component.render(100).join("\n");
+ 				for (const input of inputs) component.handleInput?.(input);
 +				if (capture) capture.value = result;
-+				return result;
-@@ -200,7 +200,9 @@
+ 				return result;
+ 			},
+ 		},
+ 	};
+ }
+ 
+ function run(tool: RegisteredTool, params: unknown, ctx: unknown): Promise<ToolResult> {
+ 	return tool.execute("call", params, new AbortController().signal, undefined, ctx);
+@@ -200,7 +201,9 @@
  	]);
  	assert.deepEqual(emitted, [
  		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
@@ -21,7 +37,7 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..48018904a33e2dc470ecde770829087c
  	]);
  });
  
-@@ -337,7 +339,9 @@
+@@ -337,7 +340,9 @@
  	assert.deepEqual(result.details, { cancelled: true });
  	assert.deepEqual(emitted, [
  		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
@@ -31,7 +47,7 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..48018904a33e2dc470ecde770829087c
  	]);
  });
  
-@@ -352,7 +356,9 @@
+@@ -352,7 +357,9 @@
  
  	assert.deepEqual(emitted, [
  		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
@@ -41,7 +57,7 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..48018904a33e2dc470ecde770829087c
  	]);
  });
  
-@@ -433,3 +439,131 @@
+@@ -433,3 +440,131 @@
  	).render(200).join("\n");
  	assert.match(cancelled, /Cancelled/);
  });
