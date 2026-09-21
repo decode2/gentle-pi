@@ -301,13 +301,14 @@ jobs:
               set -e
               printf "%s\\n" "$output" | tail -n 240
               test "$status" -eq 0
-              test "$(printf "%s\\n" "$output" | grep -Ec "^ok [0-9]+ - ")" -eq 92
+              test "$(printf "%s\\n" "$output" | grep -Ec "^ok [0-9]+ - ")" -eq 85
               test "$(printf "%s\\n" "$output" | grep -Ec "^not ok ")" -eq 0
-              printf "%s\\n" "$output" | grep -Fx "1..92" >/dev/null
+              printf "%s\\n" "$output" | grep -Fx "1..85" >/dev/null
               printf "%s\\n" "$output" | grep -Fx "# tests 92" >/dev/null
               printf "%s\\n" "$output" | grep -Fx "# pass 92" >/dev/null
               printf "%s\\n" "$output" | grep -Fx "# fail 0" >/dev/null
-              printf "%s\\n" "$output" | grep -Eq "^ok [0-9]+ - actual questionnaire producer drives Herdr through a private balanced compatibility lifecycle$"
+              printf "%s\\n" "$output" | grep -Eq "^ok 85 - actual questionnaire producer drives Herdr through a private balanced compatibility lifecycle$"
+              printf "%s\\n" "$output" | grep -Eq "^ok [0-9]+ - ask_user_question keeps the native blocked lifecycle private and balanced$"
             '
 
       - name: Verify final hosted candidate checkout cleanliness

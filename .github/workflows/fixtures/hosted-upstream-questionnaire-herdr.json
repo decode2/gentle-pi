@@ -15,7 +15,7 @@
         "file": "001-blocked-event-producer-test.patch",
         "target": "tests/ask-user-question.test.ts",
         "preimage": "cc439bdc0dcdfa1f8ade309abc63c1f565c64d40",
-        "postimage": "ced3519f9a9529f644cf5491d792b1f817aa1c84"
+        "postimage": "cc2b1544e8611107c48de8fa85898999b8aec068"
       },
       {
         "file": "002-blocked-event-herdr-integration-test.patch",

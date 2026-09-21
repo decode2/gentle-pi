@@ -1,8 +1,38 @@
 diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
-index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..ced3519f9a9529f644cf5491d792b1f817aa1c84 100644
+index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..cc2b1544e8611107c48de8fa85898999b8aec068 100644
 --- a/tests/ask-user-question.test.ts
 +++ b/tests/ask-user-question.test.ts
-@@ -433,3 +433,26 @@
+@@ -200,7 +200,9 @@
+ 	]);
+ 	assert.deepEqual(emitted, [
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
+ 	]);
+ });
+ 
+@@ -337,7 +339,9 @@
+ 	assert.deepEqual(result.details, { cancelled: true });
+ 	assert.deepEqual(emitted, [
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
+ 	]);
+ });
+ 
+@@ -352,7 +356,9 @@
+ 
+ 	assert.deepEqual(emitted, [
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
+ 	]);
+ });
+ 
+@@ -433,3 +439,28 @@
  	).render(200).join("\n");
  	assert.match(cancelled, /Cancelled/);
  });
@@ -10,7 +40,9 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..ced3519f9a9529f644cf5491d792b1f8
 +test("ask_user_question keeps the native blocked lifecycle private and balanced", async (t) => {
 +	const expected = [
 +		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
 +		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
 +	];
 +	for (const [name, inputs] of [["answered", ["\r"]], ["cancelled", ["\x1b"]]] as const) {
 +		await t.test(name, async () => {
