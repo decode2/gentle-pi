@@ -1,7 +1,16 @@
 diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
-index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..40f19d50b5db03cb5cc5250032400f1844a853c8 100644
+index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..48018904a33e2dc470ecde770829087c8996c5d5 100644
 --- a/tests/ask-user-question.test.ts
 +++ b/tests/ask-user-question.test.ts
+@@ -89 +89 @@
+-function tuiContext(inputs: readonly string[], rendered?: { value: string }) {
++function tuiContext(inputs: readonly string[], rendered?: { value: string }, capture?: { value: unknown }) {
+@@ -99,2 +99,3 @@
+-				for (const input of inputs) component.handleInput?.(input);
+-				return result;
++				for (const input of inputs) component.handleInput?.(input);
++				if (capture) capture.value = result;
++				return result;
 @@ -200,7 +200,9 @@
  	]);
  	assert.deepEqual(emitted, [
@@ -32,7 +41,7 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..40f19d50b5db03cb5cc5250032400f18
  	]);
  });
  
-@@ -433,3 +439,120 @@
+@@ -433,3 +439,131 @@
  	).render(200).join("\n");
  	assert.match(cancelled, /Cancelled/);
  });
@@ -69,15 +78,18 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..40f19d50b5db03cb5cc5250032400f18
 +		{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
 +	];
 +
-+	const result = await run(tool, { questions }, tuiContext(["\r", "\x1b"]));
++	const selection = { value: undefined as unknown };
++	const expectedAnswers = [
++		{ questionIndex: 0, question: "Choose a preview?", kind: "option", answer: "Alpha", preview: "Preview A" },
++	];
++	const partialText = "User cancelled the questionnaire\nPartial answers:\n1. Choose a preview? — Alpha\n   selected preview: Preview A";
++	const result = await run(tool, { questions }, tuiContext(["\r", "\x1b"], undefined, selection));
 +
-+	assert.equal(result.content[0]?.text, "User cancelled the questionnaire\nPartial answers:\n1. Choose a preview? — Alpha\n   selected preview: Preview A");
-+	assert.deepEqual(result.details, {
-+		cancelled: true,
-+		answers: [
-+			{ questionIndex: 0, question: "Choose a preview?", kind: "option", answer: "Alpha", preview: "Preview A" },
-+		],
-+	});
++	assert.deepEqual(selection.value, { cancelled: true, answers: expectedAnswers });
++	assert.deepEqual(
++		{ text: result.content[0]?.text, details: result.details },
++		{ text: partialText, details: { cancelled: true, answers: expectedAnswers } },
++	);
 +});
 +
 +test("ask_user_question preserves custom and multi answers on partial cancellation", async () => {
@@ -87,19 +99,22 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..40f19d50b5db03cb5cc5250032400f18
 +		{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
 +	];
 +
++	const selection = { value: undefined as unknown };
++	const expectedAnswers = [
++		{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "free note", selected: ["One"] },
++	];
++	const partialText = "User cancelled the questionnaire\nPartial answers:\n1. Pick? — (custom) free note — selected: One";
 +	const result = await run(
 +		tool,
 +		{ questions },
-+		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\r", "\x1b"]),
++		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\r", "\x1b"], undefined, selection),
 +	);
 +
-+	assert.equal(result.content[0]?.text, "User cancelled the questionnaire\nPartial answers:\n1. Pick? — (custom) free note — selected: One");
-+	assert.deepEqual(result.details, {
-+		cancelled: true,
-+		answers: [
-+			{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "free note", selected: ["One"] },
-+		],
-+	});
++	assert.deepEqual(selection.value, { cancelled: true, answers: expectedAnswers });
++	assert.deepEqual(
++		{ text: result.content[0]?.text, details: result.details },
++		{ text: partialText, details: { cancelled: true, answers: expectedAnswers } },
++	);
 +});
 +
 +test("ask_user_question omits uncommitted state on cancellation", async () => {
@@ -141,15 +156,20 @@ index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..40f19d50b5db03cb5cc5250032400f18
 +		{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
 +	];
 +
++	const selection = { value: undefined as unknown };
++	const expectedAnswers = [
++		{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha" },
++	];
++	const partialText = "User cancelled the questionnaire\nPartial answers:\n1. First? — Alpha";
 +	const result = await run(
 +		tool,
 +		{ questions },
-+		tuiContext(["\r", "\t", "\x1b[B", "\x1b[B", "\r", "replacement", "\x1b", "\x1b"]),
++		tuiContext(["\r", "\t", "\x1b[B", "\x1b[B", "\r", "replacement", "\x1b", "\x1b"], undefined, selection),
 +	);
 +
-+	assert.equal(result.content[0]?.text, "User cancelled the questionnaire\nPartial answers:\n1. First? — Alpha");
-+	assert.deepEqual(result.details, {
-+		cancelled: true,
-+		answers: [{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha" }],
-+	});
++	assert.deepEqual(selection.value, { cancelled: true, answers: expectedAnswers });
++	assert.deepEqual(
++		{ text: result.content[0]?.text, details: result.details },
++		{ text: partialText, details: { cancelled: true, answers: expectedAnswers } },
++	);
 +});

@@ -15,7 +15,7 @@
         "file": "004-partial-cancellation-tests.patch",
         "target": "tests/ask-user-question.test.ts",
         "preimage": "cc439bdc0dcdfa1f8ade309abc63c1f565c64d40",
-        "postimage": "40f19d50b5db03cb5cc5250032400f1844a853c8"
+        "postimage": "48018904a33e2dc470ecde770829087c8996c5d5"
       },
       {
         "file": "002-blocked-event-herdr-integration-test.patch",
