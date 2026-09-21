@@ -1,0 +1,146 @@
+diff --git a/lib/questionnaire/questionnaire-view.ts b/lib/questionnaire/questionnaire-view.ts
+index bfb3e5d871ac0918aa00c4c6ef8aa9bbd690eac1..5e7f058a727ce84c79b8f5a5571dcaf42163dd48 100644
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -213,7 +213,7 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		}
+ 
+ 		if (this.matches(data, "tui.select.cancel")) {
+-			this.finish({ cancelled: true, answers: this.collectedAnswers() });
++			this.cancel();
+ 			return;
+ 		}
+ 
+@@ -239,7 +239,8 @@ export class QuestionnaireView extends Container implements Focusable {
+ 
+ 		if (matchesKey(data, "space")) {
+ 			const question = this.questions[this.focusedQuestion];
+-			if (question?.multiSelect) {
++			const state = this.states[this.focusedQuestion];
++			if (question?.multiSelect && state && state.cursor <= question.options.length) {
+ 				this.toggleCursor();
+ 				return;
+ 			}
+@@ -388,6 +389,16 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		const customDone = state.answer?.kind === "custom" ? "✓ " : "";
+ 		push(`${customCursor}${customDone}${CUSTOM_ROW_LABEL}`, customOwner);
+ 
++		const submitIndex = customIndex + 1;
++		const submitOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: submitIndex };
++		const submitCursor = state.cursor === submitIndex ? this.accent("❯ ") : "  ";
++		push(`${submitCursor}Submit`, submitOwner);
++
++		const cancelIndex = submitIndex + 1;
++		const cancelOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: cancelIndex };
++		const cancelCursor = state.cursor === cancelIndex ? this.accent("❯ ") : "  ";
++		push(`${cancelCursor}Cancel`, cancelOwner);
++
+ 		return { lines, owners };
+ 	}
+ 
+@@ -429,7 +440,7 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		const question = this.questions[this.focusedQuestion];
+ 		const state = this.states[this.focusedQuestion];
+ 		if (!question || !state) return;
+-		const total = question.options.length + 1;
++		const total = question.options.length + 3;
+ 		state.cursor = Math.max(0, Math.min(total - 1, state.cursor + delta));
+ 		this.invalidate();
+ 	}
+@@ -438,10 +449,12 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		const question = this.questions[this.focusedQuestion];
+ 		const state = this.states[this.focusedQuestion];
+ 		if (!question || !state) return;
+-		if (state.cursor === question.options.length) {
++		const customIndex = question.options.length;
++		if (state.cursor === customIndex) {
+ 			this.openEditor(this.focusedQuestion);
+ 			return;
+ 		}
++		if (state.cursor > customIndex) return;
+ 		if (state.toggled.has(state.cursor)) state.toggled.delete(state.cursor);
+ 		else state.toggled.add(state.cursor);
+ 		this.invalidate();
+@@ -453,7 +466,7 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		if (!question || !state) return false;
+ 		const changed = this.focusedQuestion !== questionIndex || state.cursor !== rowIndex;
+ 		this.focusedQuestion = questionIndex;
+-		state.cursor = Math.max(0, Math.min(question.options.length, rowIndex));
++		state.cursor = Math.max(0, Math.min(question.options.length + 2, rowIndex));
+ 		this.invalidate();
+ 		return changed;
+ 	}
+@@ -463,11 +476,21 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		const state = this.states[this.focusedQuestion];
+ 		if (!question || !state) return;
+ 		const customIndex = question.options.length;
++		const submitIndex = customIndex + 1;
++		const cancelIndex = submitIndex + 1;
+ 
+ 		if (state.cursor === customIndex) {
+ 			this.openEditor(this.focusedQuestion);
+ 			return;
+ 		}
++		if (state.cursor === submitIndex) {
++			this.submitAll();
++			return;
++		}
++		if (state.cursor === cancelIndex) {
++			this.cancel();
++			return;
++		}
+ 
+ 		if (question.multiSelect) {
+ 			const toggled = [...state.toggled]
+@@ -497,6 +520,36 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		this.afterCommit(this.focusedQuestion);
+ 	}
+ 
++	private submitAll(): void {
++		const synthesized: Array<{ state: QuestionState; answer: AnswerRow }> = [];
++		for (const [questionIndex, question] of this.questions.entries()) {
++			const state = this.states[questionIndex];
++			if (!state || state.answer !== undefined) continue;
++			if (!question.multiSelect) {
++				this.focusedQuestion = questionIndex;
++				state.cursor = 0;
++				this.invalidate();
++				return;
++			}
++			const selected = [...state.toggled]
++				.filter((index) => index < question.options.length)
++				.sort((left, right) => left - right)
++				.map((index) => question.options[index]!.label);
++			synthesized.push({
++				state,
++				answer: {
++					questionIndex,
++					question: question.question,
++					kind: "multi",
++					answer: null,
++					selected,
++				},
++			});
++		}
++		for (const { state, answer } of synthesized) state.answer = answer;
++		this.finish({ cancelled: false, answers: this.collectedAnswers() });
++	}
++
+ 	private openEditor(questionIndex: number): void {
+ 		const state = this.states[questionIndex];
+ 		if (!state) return;
+@@ -550,7 +603,13 @@ export class QuestionnaireView extends Container implements Focusable {
+ 
+ 	private afterCommit(questionIndex: number): void {
+ 		if (this.states.every((state) => state.answer !== undefined)) {
+-			this.finish({ cancelled: false, answers: this.collectedAnswers() });
++			const question = this.questions[questionIndex];
++			const state = this.states[questionIndex];
++			if (question && state) {
++				this.focusedQuestion = questionIndex;
++				state.cursor = question.options.length + 1;
++			}
++			this.invalidate();
+ 			return;
+ 		}
+ 		// Advance to the first unanswered question so a commit is visible and the
