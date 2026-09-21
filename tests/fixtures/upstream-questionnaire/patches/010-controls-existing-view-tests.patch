@@ -1,0 +1,66 @@
+diff --git a/tests/questionnaire-view.test.ts b/tests/questionnaire-view.test.ts
+index 158fb1897e21776f3fa798c5e6ce99c51fd0336f..26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d 100644
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -109,6 +109,13 @@ const KEY = {
+ 	escape: "\x1b",
+ } as const;
+ 
++function submitWhenRendered(view: QuestionnaireView): void {
++	for (let step = 0; step < 8 && !plain(render(view)).includes("❯ Submit"); step++) {
++		view.handleInput(KEY.down[0]);
++	}
++	if (plain(render(view)).includes("❯ Submit")) view.handleInput(KEY.enter);
++}
++
+ test("renders exactly one active question plus a tab strip for all questions", () => {
+ 	const { view } = viewWithResult(two());
+ 	const rendered = render(view);
+@@ -161,6 +168,7 @@ test("real key sequences drive the cursor and commit in legacy and application-c
+ 		view.handleInput(down);
+ 		assert.match(render(view), /❯ Beta/, `down sequence ${JSON.stringify(down)} should move the cursor`);
+ 		view.handleInput(KEY.enter);
++		submitWhenRendered(view);
+ 		assert.equal(completed.length, 1, `enter after ${JSON.stringify(down)} should commit`);
+ 		assert.deepEqual(view.getResult().answers, [
+ 			{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Beta" },
+@@ -184,6 +192,7 @@ test("the injected KeybindingsManager drives the same navigation and commit", ()
+ 	view.handleInput(KEY.down[0]);
+ 	assert.match(render(view), /❯ Beta/);
+ 	view.handleInput(KEY.enter);
++	submitWhenRendered(view);
+ 	assert.equal(completed.length, 1);
+ 	assert.equal(view.getResult().answers[0]?.answer, "Beta");
+ });
+@@ -199,6 +208,7 @@ test("single-select commits on Enter and advances to the next unanswered questio
+ 	assert.match(render(view), /❯ Gamma/);
+ 
+ 	view.handleInput(KEY.enter);
++	submitWhenRendered(view);
+ 	assert.equal(completed.length, 1);
+ 	assert.deepEqual(view.getResult().answers, [
+ 		{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha" },
+@@ -227,6 +237,7 @@ test("multi-select toggles with space and requires a non-empty selection to comm
+ 	assert.match(render(view), /\[ \] Two/);
+ 
+ 	view.handleInput(KEY.enter);
++	submitWhenRendered(view);
+ 	assert.equal(completed.length, 1);
+ 	assert.deepEqual(view.getResult().answers, [
+ 		{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: ["One"] },
+@@ -375,6 +386,7 @@ test("pointer press focuses a row and click commits it", () => {
+ 	const afterPress = view.render(100);
+ 	const betaRowAfterPress = afterPress.findIndex((line) => line.includes("Beta"));
+ 	assert.equal(view.handleMouse(mouseEvent(afterPress, betaRowAfterPress, "click"))?.handled, true);
++	submitWhenRendered(view);
+ 	assert.equal(completed.length, 1);
+ 	assert.equal(view.getResult().answers[0]?.answer, "Beta");
+ });
+@@ -404,6 +416,7 @@ test("pointer click toggles a multi-select option instead of committing", () =>
+ 	assert.match(render(view), /\[x\] Two/);
+ 
+ 	view.handleInput(KEY.enter);
++	submitWhenRendered(view);
+ 	assert.equal(completed.length, 1);
+ 	assert.deepEqual(view.getResult().answers, [
+ 		{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: ["One", "Two"] },

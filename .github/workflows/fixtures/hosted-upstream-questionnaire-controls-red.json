@@ -1,0 +1,63 @@
+{
+  "schema": "gentle-pi.hosted-upstream-questionnaire-controls-red/v1",
+  "baseManifest": ".github/workflows/fixtures/hosted-upstream-questionnaire.json",
+  "base": {
+    "repository": "https://github.com/Gentleman-Programming/gentle-shell.git",
+    "commit": "f2d9d073ffc2299eb501902753b42789f7cdc461",
+    "tree": "6fb42857f728f131da054e592ec5d22c691ce870"
+  },
+  "composition": {
+    "schema": "gentle-pi.hosted-upstream-questionnaire-composition/v2",
+    "derivedDirectory": "derived",
+    "patchDirectory": "patches/questionnaire-upstream",
+    "patchInventory": [
+      {
+        "file": "006-abort-lifecycle-tests.patch",
+        "target": "tests/ask-user-question.test.ts",
+        "preimage": "cc439bdc0dcdfa1f8ade309abc63c1f565c64d40",
+        "postimage": "e0afc181256c503efa3fb3fd2fb54899abe4cc0c"
+      },
+      {
+        "file": "002-blocked-event-herdr-integration-test.patch",
+        "target": "tests/gentle-ai.test.ts",
+        "preimage": "81f4a38ecdfd11b97ada81308f036e0d318726fe",
+        "postimage": "f379515bae4cdda5d4bd84bafbf761597dd7dfcd"
+      },
+      {
+        "file": "007-abort-lifecycle-producer.patch",
+        "target": "extensions/ask-user-question.ts",
+        "preimage": "52d6ff35296af67f1f4240ef5fc6df8bfe15dab6",
+        "postimage": "d7dea145b52cfe446083ca881be088b89f964ea6"
+      },
+      {
+        "file": "008-abort-lifecycle-view.patch",
+        "target": "lib/questionnaire/questionnaire-view.ts",
+        "preimage": "61284f0110522f2e65a43271f9e23f5bfe350a72",
+        "postimage": "bfb3e5d871ac0918aa00c4c6ef8aa9bbd690eac1"
+      },
+      {
+        "file": "009-controls-multi-view-tests.patch",
+        "target": "tests/questionnaire-view.test.ts",
+        "preimage": "9ea1ebae3d9a42d3e1281352adb10c337ec9846a",
+        "postimage": "158fb1897e21776f3fa798c5e6ce99c51fd0336f"
+      },
+      {
+        "file": "010-controls-existing-view-tests.patch",
+        "target": "tests/questionnaire-view.test.ts",
+        "preimage": "158fb1897e21776f3fa798c5e6ce99c51fd0336f",
+        "postimage": "26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d"
+      }
+    ],
+    "allowedTargets": [
+      "extensions/ask-user-question.ts",
+      "tests/ask-user-question.test.ts",
+      "tests/gentle-ai.test.ts",
+      "lib/questionnaire/questionnaire-view.ts",
+      "tests/questionnaire-view.test.ts"
+    ],
+    "protectedTargets": [
+      "extensions/gentle-ai.ts",
+      "lib/native-fullscreen-interaction.ts"
+    ]
+  }
+}

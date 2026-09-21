@@ -1,0 +1,85 @@
+diff --git a/tests/questionnaire-view.test.ts b/tests/questionnaire-view.test.ts
+index 9ea1ebae3d9a42d3e1281352adb10c337ec9846a..158fb1897e21776f3fa798c5e6ce99c51fd0336f 100644
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -444,3 +444,80 @@
+ 		assertFits(view, width);
+ 	}
+ });
++
++test("renders explicit Submit and Cancel rows after the custom row", () => {
++	const { view } = viewWithResult(single());
++	const lines = render(view).split("\n").map(plain);
++	const normalizeRow = (line: string) => line.replace(/^❯ /, "").trim();
++	const controlRows = lines
++		.map(normalizeRow)
++		.filter((line) => [CUSTOM_ROW_LABEL, "Submit", "Cancel"].includes(line));
++	assert.deepEqual(controlRows, [CUSTOM_ROW_LABEL, "Submit", "Cancel"]);
++
++	const customRow = lines.findIndex((line) => normalizeRow(line) === CUSTOM_ROW_LABEL);
++	const submitRow = lines.findIndex((line) => normalizeRow(line) === "Submit");
++	const cancelRow = lines.findIndex((line) => normalizeRow(line) === "Cancel");
++	assert.ok(customRow >= 0);
++	assert.equal(submitRow, customRow + 1);
++	assert.equal(cancelRow, submitRow + 1);
++});
++
++test("selecting an option requires explicit submit and cancel remains independently reachable", () => {
++	const { view, completed } = viewWithResult(single());
++	view.handleInput(KEY.enter);
++	assert.equal(completed.length, 0, "selecting an option does not complete the questionnaire");
++	assert.deepEqual(view.getResult(), {
++		cancelled: false,
++		answers: [{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha" }],
++	});
++
++	for (let step = 0; step < 5 && !plain(render(view)).includes("❯ Submit"); step++) {
++		view.handleInput(KEY.down[0]);
++	}
++	assert.match(plain(render(view)), /❯ Submit/);
++	view.handleInput(KEY.enter);
++	assert.equal(completed.length, 1);
++	assert.deepEqual(completed[0], {
++		cancelled: false,
++		answers: [{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha" }],
++	});
++	view.handleInput(KEY.enter);
++	assert.equal(completed.length, 1, "Submit completes only once");
++
++	const fresh = viewWithResult(single());
++	for (let step = 0; step < 6 && !plain(render(fresh.view)).includes("❯ Cancel"); step++) {
++		fresh.view.handleInput(KEY.down[0]);
++	}
++	assert.match(plain(render(fresh.view)), /❯ Cancel/);
++	fresh.view.handleInput(KEY.enter);
++	assert.equal(fresh.completed.length, 1);
++	assert.deepEqual(fresh.completed[0], { cancelled: true, answers: [] });
++	fresh.view.handleInput(KEY.enter);
++	assert.equal(fresh.completed.length, 1, "Cancel completes only once");
++});
++
++test("multi-select submit preserves an empty selection and cancel remains answerless", () => {
++	const questions = [question("Pick?", [option("One"), option("Two")], { multiSelect: true })];
++	const { view, completed } = viewWithResult(questions);
++	for (let step = 0; step < 5 && !plain(render(view)).includes("❯ Submit"); step++) {
++		view.handleInput(KEY.down[0]);
++	}
++	assert.match(plain(render(view)), /❯ Submit/);
++	view.handleInput(KEY.enter);
++	assert.equal(completed.length, 1);
++	assert.deepEqual(completed[0], {
++		cancelled: false,
++		answers: [{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: [] }],
++	});
++	view.handleInput(KEY.enter);
++	assert.equal(completed.length, 1);
++
++	const fresh = viewWithResult(questions);
++	for (let step = 0; step < 6 && !plain(render(fresh.view)).includes("❯ Cancel"); step++) {
++		fresh.view.handleInput(KEY.down[0]);
++	}
++	assert.match(plain(render(fresh.view)), /❯ Cancel/);
++	fresh.view.handleInput(KEY.enter);
++	assert.equal(fresh.completed.length, 1);
++	assert.deepEqual(fresh.completed[0], { cancelled: true, answers: [] });
++});
