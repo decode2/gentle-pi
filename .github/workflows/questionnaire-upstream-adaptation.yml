@@ -144,7 +144,61 @@ jobs:
                 /workspace/tests/hosted-upstream-questionnaire-acquisition.test.ts
             '
 
+      - name: Compose derived questionnaire artifact offline and run strict RED contract
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition"
+          composition_dir="$RUNNER_TEMP/questionnaire-upstream-composition"
+          test ! -e "$composition_dir"
+          mkdir "$composition_dir"
+          chmod 0777 "$composition_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
+            --mount "type=bind,source=$composition_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            ACQUIRED_UPSTREAM_ROOT=/acquired-upstream COMPOSITION_ARTIFACT_ROOT=/artifact GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ES2022 --module NodeNext --moduleResolution NodeNext \
+                --allowImportingTsExtensions --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /workspace/tests/fixtures/hosted-compose-upstream-questionnaire.ts \
+                /workspace/tests/hosted-upstream-questionnaire-composition.test.ts
+              /usr/local/bin/node --experimental-strip-types --test /workspace/tests/hosted-upstream-questionnaire-composition.test.ts
+            '
+
+      - name: Verify staged derived questionnaire artifact is read-only
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          composition_dir="$RUNNER_TEMP/questionnaire-upstream-composition"
+          derived_dir="$composition_dir/zero-patch/derived"
+          test -d "$derived_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=256m --pids-limit=64 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            /bin/sh -eu -c '
+              test -f /derived/package.json
+              if touch /derived/.read-only-probe 2>/dev/null; then exit 1; fi
+            '
+
       - name: Verify final hosted candidate checkout cleanliness
+        if: always()
         shell: bash
         run: |
           set -euo pipefail

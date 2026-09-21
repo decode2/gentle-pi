@@ -51,5 +51,23 @@
     { "path": "node_modules/@earendil-works/pi-coding-agent/package.json", "name": "@earendil-works/pi-coding-agent", "version": "0.85.1" },
     { "path": "node_modules/@types/node/package.json", "name": "@types/node", "version": "24.13.3" },
     { "path": "node_modules/typescript/package.json", "name": "typescript", "version": "5.9.3" }
-  ]
+  ],
+  "composition": {
+    "schema": "gentle-pi.hosted-upstream-questionnaire-composition/v1",
+    "derivedDirectory": "derived",
+    "patchDirectory": "patches/questionnaire-upstream",
+    "patchInventory": [],
+    "allowedTargets": [
+      "extensions/ask-user-choice.ts",
+      "extensions/ask-user-question.ts",
+      "lib/questionnaire/questionnaire-view.ts",
+      "lib/questionnaire/schema.ts",
+      "lib/questionnaire/validate.ts",
+      "tests/ask-user-choice.test.ts",
+      "tests/ask-user-question.test.ts",
+      "tests/questionnaire-schema.test.ts",
+      "tests/questionnaire-view.test.ts"
+    ],
+    "protectedTargets": ["lib/native-fullscreen-interaction.ts"]
+  }
 }
