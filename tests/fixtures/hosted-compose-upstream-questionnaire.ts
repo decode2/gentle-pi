@@ -1,6 +1,7 @@
+import { spawnSync } from "node:child_process";
 import { constants } from "node:fs";
-import { chmod, copyFile, lstat, mkdir, readdir, readlink, symlink } from "node:fs/promises";
-import { join, relative } from "node:path";
+import { chmod, copyFile, lstat, mkdir, mkdtemp, readdir, readlink, rename, rm, symlink } from "node:fs/promises";
+import { dirname, isAbsolute, join, normalize, relative, sep } from "node:path";
 
 export type PatchEntry = {
 	readonly file: string;
@@ -24,6 +25,70 @@ export type ComposeUpstreamQuestionnaireOptions = {
 };
 
 const fail = (message: string): never => { throw new Error(`hosted composition: ${message}`); };
+const outputLimit = 256 * 1024;
+
+function git(args: string[], cwd: string, context: string): string {
+	const result = spawnSync("git", ["-C", cwd, ...args], { encoding: "utf8", maxBuffer: outputLimit });
+	const output = `${result.stdout ?? ""}${result.stderr ?? ""}`;
+	if (result.error || result.status !== 0) fail(`${context}: ${output.slice(0, 4096)}`);
+	return output;
+}
+function safePath(value: string, label: string): string {
+	if (!value || isAbsolute(value)) fail(`${label} path must be relative`);
+	if (value === "." || value === ".." || normalize(value) !== value || value.startsWith(`..${sep}`)) fail(`${label} path escapes root`);
+	return value;
+}
+async function validate(options: ComposeUpstreamQuestionnaireOptions): Promise<readonly PatchEntry[]> {
+	const manifest = options.manifest;
+	if (manifest.schema !== "gentle-pi.hosted-upstream-questionnaire-composition/v1") fail("manifest schema changed");
+	if (manifest.patchDirectory !== "patches/questionnaire-upstream" || manifest.derivedDirectory !== "derived") fail("patch directory identity changed");
+	if (!options.patchRoot.endsWith(`${sep}${manifest.patchDirectory}`) || !options.outputRoot.endsWith(`${sep}${manifest.derivedDirectory}`)) fail("patch directory identity changed");
+	if (!Array.isArray(manifest.patchInventory) || !Array.isArray(manifest.allowedTargets) || !Array.isArray(manifest.protectedTargets)) fail("manifest path policy changed");
+	await realDirectory(options.sourceRoot, "source");
+	await realDirectory(options.patchRoot, "patch");
+	if (await lstat(options.outputRoot).catch(() => undefined)) fail("output root must be initially absent");
+	const files = await readdir(options.patchRoot);
+	const listed = new Set<string>();
+	const targets = new Set<string>();
+	const patches: PatchEntry[] = [];
+	for (const patch of manifest.patchInventory) {
+		if (!patch || typeof patch.file !== "string" || typeof patch.target !== "string") fail("patch inventory entry invalid");
+		const file = safePath(patch.file, "patch file");
+		const target = safePath(patch.target, "target");
+		if (listed.has(file)) fail("duplicate patch file");
+		if (targets.has(target)) fail("duplicate target");
+		listed.add(file);
+		targets.add(target);
+		if (manifest.protectedTargets.includes(target)) fail("target is protected");
+		if (!manifest.allowedTargets.includes(target)) fail("target is not allowed");
+		if (!/^[0-9a-f]{40}$/.test(patch.preimage) || !/^[0-9a-f]{40}$/.test(patch.postimage)) fail("patch hash invalid");
+		const patchPath = join(options.patchRoot, file);
+		const patchDetails = await lstat(patchPath).catch(() => undefined);
+		if (!patchDetails) fail("missing patch file");
+		if (!patchDetails.isFile() || patchDetails.isSymbolicLink()) fail("patch file must be regular");
+		const targetPath = join(options.sourceRoot, target);
+		const targetDetails = await lstat(targetPath).catch(() => undefined);
+		if (!targetDetails?.isFile() || targetDetails.isSymbolicLink()) fail("target must be regular");
+		const changed = git(["apply", "--numstat", "--summary", "--unsafe-paths", patchPath], options.sourceRoot, "changed path inventory");
+		const changedPaths = changed.split("\n").filter((line) => line.includes("\t")).map((line) => line.slice(line.lastIndexOf("\t") + 1)).filter(Boolean);
+		if (changedPaths.length !== 1 || changedPaths[0] !== target) fail("changed path inventory mismatch");
+		if (git(["hash-object", "--no-filters", "--", target], options.sourceRoot, "preimage").trim() !== patch.preimage) fail("preimage mismatch");
+		patches.push(patch);
+	}
+	for (const file of files) {
+		const details = await lstat(join(options.patchRoot, file));
+		if (!details.isFile() || details.isSymbolicLink()) fail("patch file must be regular");
+		if (!listed.has(file)) fail("unlisted patch file");
+	}
+	return patches;
+}
+function applyPatch(stage: string, patchRoot: string, patch: PatchEntry): void {
+	const patchPath = join(patchRoot, patch.file);
+	const args = ["apply", "--check", "--verbose", "--recount", "--whitespace=nowarn", "--unsafe-paths", patchPath];
+	const check = git(args, stage, "patch context/fuzz invalid");
+	if (/\b(offset|fuzz)\b/i.test(check)) fail("patch offset/fuzz is not allowed");
+	git(["apply", "--recount", "--whitespace=nowarn", "--unsafe-paths", patchPath], stage, "patch context/fuzz invalid");
+}
 
 async function realDirectory(path: string, label: string): Promise<void> {
 	const details = await lstat(path).catch(() => fail(`${label} root is missing`));
@@ -54,19 +119,26 @@ async function copyTree(sourceRoot: string, outputRoot: string, current = ""): P
 	}
 }
 
-/** RED scaffold: zero-patch copying is callable; strict manifest and patch validation is omitted. */
 export async function composeUpstreamQuestionnaireArtifact(
 	options: ComposeUpstreamQuestionnaireOptions,
 ): Promise<void> {
-	await realDirectory(options.sourceRoot, "source");
-	void options.patchRoot;
-	void options.manifest;
 	const sourceToOutput = relative(options.sourceRoot, options.outputRoot);
-	if (sourceToOutput === "" || (!sourceToOutput.startsWith("..") && !sourceToOutput.startsWith("/"))) {
-		fail("output root overlaps source root");
+	if (sourceToOutput === "" || (!sourceToOutput.startsWith("..") && !sourceToOutput.startsWith("/"))) fail("output root overlaps source root");
+	const patches = await validate(options);
+	let stage: string | undefined;
+	try {
+		stage = await mkdtemp(join(dirname(options.outputRoot), ".questionnaire-stage-"));
+		await copyTree(options.sourceRoot, stage);
+		for (const patch of patches) {
+			applyPatch(stage, options.patchRoot, patch);
+			const targetPath = join(stage, patch.target);
+			const details = await lstat(targetPath).catch(() => undefined);
+			if (!details?.isFile() || details.isSymbolicLink()) fail("target must be regular");
+			if (git(["hash-object", "--no-filters", "--", patch.target], stage, "postimage").trim() !== patch.postimage) fail("postimage mismatch");
+		}
+		await rename(stage, options.outputRoot);
+		stage = undefined;
+	} finally {
+		if (stage) await rm(stage, { recursive: true, force: true });
 	}
-	const existing = await lstat(options.outputRoot).catch(() => undefined);
-	if (existing !== undefined) fail("output root must be initially absent");
-	await mkdir(options.outputRoot);
-	await copyTree(options.sourceRoot, options.outputRoot);
 }
