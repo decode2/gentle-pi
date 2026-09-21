@@ -1,0 +1,20 @@
+diff --git a/extensions/ask-user-question.ts b/extensions/ask-user-question.ts
+index 52d6ff35296af67f1f4240ef5fc6df8bfe15dab6..abe084bca0b836f88579e23be3ea5b5db5316d42 100644
+--- a/extensions/ask-user-question.ts
++++ b/extensions/ask-user-question.ts
+@@ -150,6 +150,7 @@
+ 			let selection: QuestionnaireResult | undefined;
+ 			try {
+ 				pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: true });
++				pi.events.emit("rpiv:ask-user:blocked", { active: true });
+ 				selection = await ctx.ui.custom<QuestionnaireResult>((tui, theme, keybindings, done) => {
+ 					const view = new QuestionnaireView({
+ 						questions: params.questions,
+@@ -171,6 +172,7 @@
+ 			}
+ 			finally {
+ 				pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: false });
++				pi.events.emit("rpiv:ask-user:blocked", { active: false });
+ 			}
+ 
+ 			if (selection === undefined || selection.cancelled) {

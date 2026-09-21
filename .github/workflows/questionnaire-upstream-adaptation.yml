@@ -240,9 +240,9 @@ jobs:
           const composition = manifest.composition;
           fail(composition.schema === "gentle-pi.hosted-upstream-questionnaire-composition/v1", "Herdr composition schema changed");
           fail(composition.derivedDirectory === "derived" && composition.patchDirectory === "patches/questionnaire-upstream", "Herdr composition directories changed");
-          const expectedFiles = ["001-blocked-event-producer-test.patch", "002-blocked-event-herdr-integration-test.patch"];
-          const expectedTargets = ["tests/ask-user-question.test.ts", "tests/gentle-ai.test.ts"];
-          const expectedAllowed = ["extensions/ask-user-question.ts", ...expectedTargets];
+          const expectedFiles = ["001-blocked-event-producer-test.patch", "002-blocked-event-herdr-integration-test.patch", "003-blocked-event-compatibility.patch"];
+          const expectedTargets = ["tests/ask-user-question.test.ts", "tests/gentle-ai.test.ts", "extensions/ask-user-question.ts"];
+          const expectedAllowed = ["extensions/ask-user-question.ts", "tests/ask-user-question.test.ts", "tests/gentle-ai.test.ts"];
           const expectedProtected = ["extensions/gentle-ai.ts", "lib/native-fullscreen-interaction.ts"];
           fail(JSON.stringify(composition.patchInventory.map((patch) => patch.file)) === JSON.stringify(expectedFiles), "Herdr patch ordering changed");
           fail(JSON.stringify(composition.patchInventory.map((patch) => patch.target)) === JSON.stringify(expectedTargets), "Herdr patch targets changed");
@@ -267,7 +267,7 @@ jobs:
           NODE
             '
 
-      - name: Run Herdr RED regression in read-only isolation
+      - name: Run Herdr GREEN regression in read-only isolation
         env:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -289,7 +289,7 @@ jobs:
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
             /bin/sh -eu -c '
-              if touch /derived/.red-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /derived/.green-read-only-probe 2>/dev/null; then exit 1; fi
               /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
                 --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
                 --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
@@ -299,11 +299,15 @@ jobs:
               output="$(/usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts 2>&1)"
               status=$?
               set -e
-              printf "%s\\n" "$output"
-              test "$status" -ne 0
-              test "$(printf "%s\\n" "$output" | grep -Ec "^not ok ")" -eq 1
-              printf "%s\\n" "$output" | grep -F "actual questionnaire producer drives Herdr through a private balanced compatibility lifecycle" >/dev/null
-              printf "%s\\n" "$output" | grep -Eq "^# fail 1$"
+              printf "%s\\n" "$output" | tail -n 240
+              test "$status" -eq 0
+              test "$(printf "%s\\n" "$output" | grep -Ec "^ok [0-9]+ - ")" -eq 92
+              test "$(printf "%s\\n" "$output" | grep -Ec "^not ok ")" -eq 0
+              printf "%s\\n" "$output" | grep -Fx "1..92" >/dev/null
+              printf "%s\\n" "$output" | grep -Fx "# tests 92" >/dev/null
+              printf "%s\\n" "$output" | grep -Fx "# pass 92" >/dev/null
+              printf "%s\\n" "$output" | grep -Fx "# fail 0" >/dev/null
+              printf "%s\\n" "$output" | grep -Eq "^ok [0-9]+ - actual questionnaire producer drives Herdr through a private balanced compatibility lifecycle$"
             '
 
       - name: Verify final hosted candidate checkout cleanliness

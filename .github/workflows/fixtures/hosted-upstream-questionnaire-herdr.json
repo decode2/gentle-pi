@@ -22,6 +22,12 @@
         "target": "tests/gentle-ai.test.ts",
         "preimage": "81f4a38ecdfd11b97ada81308f036e0d318726fe",
         "postimage": "f379515bae4cdda5d4bd84bafbf761597dd7dfcd"
+      },
+      {
+        "file": "003-blocked-event-compatibility.patch",
+        "target": "extensions/ask-user-question.ts",
+        "preimage": "52d6ff35296af67f1f4240ef5fc6df8bfe15dab6",
+        "postimage": "abe084bca0b836f88579e23be3ea5b5db5316d42"
       }
     ],
     "allowedTargets": [
