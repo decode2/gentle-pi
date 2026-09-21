@@ -35,7 +35,7 @@ type Scratch = {
 const CHECKOUT_ROOT = "/workspace";
 const UPSTREAM_ROOT = "/acquired-upstream";
 const ARTIFACT_ROOT = process.env.COMPOSITION_ARTIFACT_ROOT;
-assert.ok(ARTIFACT_ROOT);
+if (ARTIFACT_ROOT === undefined) throw new Error("missing COMPOSITION_ARTIFACT_ROOT");
 const MANIFEST_PATH = join(CHECKOUT_ROOT, ".github/workflows/fixtures/hosted-upstream-questionnaire.json");
 const manifest = JSON.parse(readFileSync(MANIFEST_PATH, "utf8")) as Manifest;
 const composition = manifest.composition;
