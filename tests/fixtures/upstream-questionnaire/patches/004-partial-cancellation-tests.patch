@@ -1,0 +1,155 @@
+diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
+index cc439bdc0dcdfa1f8ade309abc63c1f565c64d40..40f19d50b5db03cb5cc5250032400f1844a853c8 100644
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -200,7 +200,9 @@
+ 	]);
+ 	assert.deepEqual(emitted, [
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
+ 	]);
+ });
+ 
+@@ -337,7 +339,9 @@
+ 	assert.deepEqual(result.details, { cancelled: true });
+ 	assert.deepEqual(emitted, [
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
+ 	]);
+ });
+ 
+@@ -352,7 +356,9 @@
+ 
+ 	assert.deepEqual(emitted, [
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
+ 		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
+ 	]);
+ });
+ 
+@@ -433,3 +439,120 @@
+ 	).render(200).join("\n");
+ 	assert.match(cancelled, /Cancelled/);
+ });
++
++test("ask_user_question keeps the native blocked lifecycle private and balanced", async (t) => {
++	const expected = [
++		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
++		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
++	];
++	for (const [name, inputs] of [["answered", ["\r"]], ["cancelled", ["\x1b"]]] as const) {
++		await t.test(name, async () => {
++			const { tool, emitted } = registerQuestionTool();
++			await run(tool, { questions: single() }, tuiContext(inputs));
++			assert.deepEqual(emitted, expected);
++		});
++	}
++
++	const { tool, emitted } = registerQuestionTool();
++	const failure = new Error("custom UI failed");
++	await assert.rejects(
++		() => run(tool, { questions: single() }, { mode: "tui", ui: { custom: async () => { throw failure; } } }),
++		(error: unknown) => error === failure,
++	);
++	assert.deepEqual(emitted, expected);
++	assert.ok(emitted.every(({ data }) => Object.keys(data).sort().join(",") === "active"));
++});
++
++test("ask_user_question returns partial answers for committed options on cancellation", async () => {
++	const { tool } = registerQuestionTool();
++	const questions = [
++		{ question: "Choose a preview?", header: "Preview", options: [option("Alpha", "First choice", "Preview A"), option("Beta")] },
++		{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
++	];
++
++	const result = await run(tool, { questions }, tuiContext(["\r", "\x1b"]));
++
++	assert.equal(result.content[0]?.text, "User cancelled the questionnaire\nPartial answers:\n1. Choose a preview? — Alpha\n   selected preview: Preview A");
++	assert.deepEqual(result.details, {
++		cancelled: true,
++		answers: [
++			{ questionIndex: 0, question: "Choose a preview?", kind: "option", answer: "Alpha", preview: "Preview A" },
++		],
++	});
++});
++
++test("ask_user_question preserves custom and multi answers on partial cancellation", async () => {
++	const { tool } = registerQuestionTool();
++	const questions = [
++		{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true },
++		{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
++	];
++
++	const result = await run(
++		tool,
++		{ questions },
++		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\r", "\x1b"]),
++	);
++
++	assert.equal(result.content[0]?.text, "User cancelled the questionnaire\nPartial answers:\n1. Pick? — (custom) free note — selected: One");
++	assert.deepEqual(result.details, {
++		cancelled: true,
++		answers: [
++			{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "free note", selected: ["One"] },
++		],
++	});
++});
++
++test("ask_user_question omits uncommitted state on cancellation", async () => {
++	const { tool } = registerQuestionTool();
++	const questions = [
++		{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true },
++	];
++	const views: string[] = [];
++	const result = await run(tool, { questions }, {
++		mode: "tui",
++		ui: {
++			custom: async (factory: CustomFactory) => {
++				let selection: unknown;
++				const component = factory({ requestRender() {} }, theme, {}, (value) => { selection = value; });
++				component.handleInput?.(" ");
++				component.handleInput?.("\x1b[B");
++				component.handleInput?.("\x1b[B");
++				component.handleInput?.("\r");
++				component.handleInput?.("   ");
++				views.push(component.render(100).join("\n"));
++				component.handleInput?.("\x1b");
++				views.push(component.render(100).join("\n"));
++				component.handleInput?.("\x1b");
++				return selection;
++			},
++		},
++	});
++
++	assert.match(views[0] ?? "", /Custom response/);
++	assert.doesNotMatch(views[1] ?? "", /Custom response/);
++	assert.equal(result.content[0]?.text, "User cancelled the questionnaire");
++	assert.deepEqual(result.details, { cancelled: true });
++});
++
++test("ask_user_question retains committed answers when a replacement draft is cancelled", async () => {
++	const { tool } = registerQuestionTool();
++	const questions = [
++		{ question: "First?", header: "First", options: [option("Alpha"), option("Beta")] },
++		{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
++	];
++
++	const result = await run(
++		tool,
++		{ questions },
++		tuiContext(["\r", "\t", "\x1b[B", "\x1b[B", "\r", "replacement", "\x1b", "\x1b"]),
++	);
++
++	assert.equal(result.content[0]?.text, "User cancelled the questionnaire\nPartial answers:\n1. First? — Alpha");
++	assert.deepEqual(result.details, {
++		cancelled: true,
++		answers: [{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha" }],
++	});
++});
