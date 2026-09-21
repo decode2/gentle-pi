@@ -1,0 +1,15 @@
+diff --git a/lib/questionnaire/questionnaire-view.ts b/lib/questionnaire/questionnaire-view.ts
+index 61284f0110522f2e65a43271f9e23f5bfe350a72..bfb3e5d871ac0918aa00c4c6ef8aa9bbd690eac1 100644
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -184,6 +184,10 @@
+ 		return this.result ?? { cancelled: false, answers: this.collectedAnswers() };
+ 	}
+ 
++	cancel(): void {
++		this.finish({ cancelled: true, answers: this.collectedAnswers() });
++	}
++
+ 	/** Active question index; exposed for tests and for callers that drive the view. */
+ 	get activeQuestion(): number {
+ 		return this.focusedQuestion;

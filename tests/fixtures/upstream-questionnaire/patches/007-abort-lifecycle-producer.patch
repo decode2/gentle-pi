@@ -1,0 +1,84 @@
+diff --git a/extensions/ask-user-question.ts b/extensions/ask-user-question.ts
+index 52d6ff35296af67f1f4240ef5fc6df8bfe15dab6..d7dea145b52cfe446083ca881be088b89f964ea6 100644
+--- a/extensions/ask-user-question.ts
++++ b/extensions/ask-user-question.ts
+@@ -139,7 +139,7 @@
+ 		async execute(
+ 			_toolCallId: string,
+ 			params: QuestionParams,
+-			_signal: AbortSignal | undefined,
++			signal: AbortSignal | undefined,
+ 			_onUpdate: undefined,
+ 			ctx,
+ 		): Promise<QuestionnaireToolResult> {
+@@ -147,16 +147,43 @@
+ 			if (error) return invalidQuestionnaireResult(error);
+ 			if (ctx.mode !== "tui") return unavailableResult();
+ 
++			let view: QuestionnaireView | undefined;
++			let abortRequested = false;
++			let abortListenerRemoved = false;
++			const cancelledResult = (): QuestionnaireToolResult => ({
++				content: [{ type: "text", text: "User cancelled the questionnaire" }],
++				details: { cancelled: true },
++			});
++			const abortListener = () => {
++				abortRequested = true;
++				view?.cancel();
++			};
++			const removeAbortListener = () => {
++				if (!signal || abortListenerRemoved) return;
++				abortListenerRemoved = true;
++				signal.removeEventListener("abort", abortListener);
++			};
++			if (signal?.aborted) return cancelledResult();
++			signal?.addEventListener("abort", abortListener);
++			if (signal?.aborted) {
++				removeAbortListener();
++				return cancelledResult();
++			}
+ 			let selection: QuestionnaireResult | undefined;
+ 			try {
+ 				pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: true });
++				pi.events.emit("rpiv:ask-user:blocked", { active: true });
+ 				selection = await ctx.ui.custom<QuestionnaireResult>((tui, theme, keybindings, done) => {
+-					const view = new QuestionnaireView({
++					view = new QuestionnaireView({
+ 						questions: params.questions,
+ 						theme,
+ 						keybindings,
+-						onComplete: (result) => done(result),
++						onComplete: (result) => {
++							removeAbortListener();
++							done(result);
++						},
+ 					});
++					if (abortRequested) view.cancel();
+ 					// Native dock swap, never an overlay: the transcript stays scrollable
+ 					// while the questionnaire owns focus. No `overlay` option is passed.
+ 					const container = createNativeFullscreenInteraction({
+@@ -170,13 +197,22 @@
+ 				});
+ 			}
+ 			finally {
++				removeAbortListener();
+ 				pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: false });
++				pi.events.emit("rpiv:ask-user:blocked", { active: false });
+ 			}
+ 
+ 			if (selection === undefined || selection.cancelled) {
++				const answers = selection?.answers ?? [];
++				if (answers.length === 0) {
++					return {
++						content: [{ type: "text", text: "User cancelled the questionnaire" }],
++						details: { cancelled: true },
++					};
++				}
+ 				return {
+-					content: [{ type: "text", text: "User cancelled the questionnaire" }],
+-					details: { cancelled: true },
++					content: [{ type: "text", text: `User cancelled the questionnaire\nPartial answers:\n${answersText(answers)}` }],
++					details: { cancelled: true, answers },
+ 				};
+ 			}
+ 			return {

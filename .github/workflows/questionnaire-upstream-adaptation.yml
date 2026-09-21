@@ -617,6 +617,165 @@ jobs:
               grep -E -i "fallback|added|removed|doneCalls|doneSources|mounted|customCalls|abort" "$log" | tail -n 120 || true
             '
 
+      - name: Compose abort GREEN artifact offline
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition"
+          green_dir="$RUNNER_TEMP/questionnaire-upstream-abort-green"
+          test ! -e "$green_dir"
+          mkdir "$green_dir"
+          chmod 0777 "$green_dir"
+          compose_log="$RUNNER_TEMP/questionnaire-upstream-abort-green-composition.log"
+          docker run --rm -i --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
+            --mount "type=bind,source=$green_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            ACQUIRED_UPSTREAM_ROOT=/acquired-upstream ABORT_GREEN_ARTIFACT_ROOT=/artifact/abort-green GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --input-type=module <<'NODE' | tee "$compose_log"
+          import { execFileSync } from "node:child_process";
+          import { copyFile, mkdir, readdir, readFile } from "node:fs/promises";
+          import { join } from "node:path";
+          import { composeUpstreamQuestionnaireArtifact } from "/workspace/tests/fixtures/hosted-compose-upstream-questionnaire.ts";
+
+          const workspace = "/workspace";
+          const source = "/acquired-upstream";
+          const artifact = "/artifact/abort-green";
+          const base = JSON.parse(await readFile(`${workspace}/.github/workflows/fixtures/hosted-upstream-questionnaire.json`, "utf8"));
+          const manifest = JSON.parse(await readFile(`${workspace}/.github/workflows/fixtures/hosted-upstream-questionnaire-abort-green.json`, "utf8"));
+          const fail = (condition, message) => { if (!condition) throw new Error(message); };
+          const expectedBase = {
+            repository: "https://github.com/Gentleman-Programming/gentle-shell.git",
+            commit: "f2d9d073ffc2299eb501902753b42789f7cdc461",
+            tree: "6fb42857f728f131da054e592ec5d22c691ce870",
+          };
+          const expectedInventory = [
+            { file: "006-abort-lifecycle-tests.patch", target: "tests/ask-user-question.test.ts", preimage: "cc439bdc0dcdfa1f8ade309abc63c1f565c64d40", postimage: "e0afc181256c503efa3fb3fd2fb54899abe4cc0c" },
+            { file: "002-blocked-event-herdr-integration-test.patch", target: "tests/gentle-ai.test.ts", preimage: "81f4a38ecdfd11b97ada81308f036e0d318726fe", postimage: "f379515bae4cdda5d4bd84bafbf761597dd7dfcd" },
+            { file: "007-abort-lifecycle-producer.patch", target: "extensions/ask-user-question.ts", preimage: "52d6ff35296af67f1f4240ef5fc6df8bfe15dab6", postimage: "d7dea145b52cfe446083ca881be088b89f964ea6" },
+            { file: "008-abort-lifecycle-view.patch", target: "lib/questionnaire/questionnaire-view.ts", preimage: "61284f0110522f2e65a43271f9e23f5bfe350a72", postimage: "bfb3e5d871ac0918aa00c4c6ef8aa9bbd690eac1" },
+          ];
+          const expectedAllowed = ["extensions/ask-user-question.ts", "tests/ask-user-question.test.ts", "tests/gentle-ai.test.ts", "lib/questionnaire/questionnaire-view.ts"];
+          const expectedProtected = ["extensions/gentle-ai.ts", "lib/native-fullscreen-interaction.ts"];
+          fail(base.schema === "gentle-pi.hosted-upstream-questionnaire-acquisition/v1", "base manifest schema changed");
+          for (const key of Object.keys(expectedBase)) fail(base[key] === expectedBase[key], `base ${key} changed`);
+          fail(manifest.schema === "gentle-pi.hosted-upstream-questionnaire-abort-green/v1", "abort GREEN manifest schema changed");
+          fail(manifest.baseManifest === ".github/workflows/fixtures/hosted-upstream-questionnaire.json", "abort GREEN base manifest changed");
+          for (const key of Object.keys(expectedBase)) fail(manifest.base?.[key] === expectedBase[key], `abort GREEN base ${key} changed`);
+          const composition = manifest.composition;
+          fail(composition.schema === "gentle-pi.hosted-upstream-questionnaire-composition/v1", "abort GREEN composition schema changed");
+          fail(composition.derivedDirectory === "derived" && composition.patchDirectory === "patches/questionnaire-upstream", "abort GREEN composition directories changed");
+          fail(JSON.stringify(composition.patchInventory) === JSON.stringify(expectedInventory), "abort GREEN patch inventory identity changed");
+          fail(JSON.stringify(composition.allowedTargets) === JSON.stringify(expectedAllowed), "abort GREEN allowed targets changed");
+          fail(JSON.stringify(composition.protectedTargets) === JSON.stringify(expectedProtected), "abort GREEN protected targets changed");
+
+          const patchRoot = join(artifact, composition.patchDirectory);
+          const outputRoot = join(artifact, composition.derivedDirectory);
+          await mkdir(patchRoot, { recursive: true });
+          for (const patch of expectedInventory) {
+            const patchPath = join(patchRoot, patch.file);
+            await copyFile(join(workspace, "tests/fixtures/upstream-questionnaire/patches", patch.file), patchPath);
+            const changed = execFileSync("git", ["-C", source, "apply", "--numstat", "--summary", patchPath], { encoding: "utf8" });
+            const changedPaths = changed.split("\n").filter((line) => line.includes("\t")).map((line) => line.slice(line.lastIndexOf("\t") + 1)).filter(Boolean);
+            fail(changedPaths.length === 1 && changedPaths[0] === patch.target, `abort GREEN changed path mismatch: ${patch.file}`);
+          }
+          fail(JSON.stringify((await readdir(patchRoot)).sort()) === JSON.stringify(expectedInventory.map((patch) => patch.file).sort()), "abort GREEN staged patch set changed");
+          await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest: composition });
+          console.log(`abort-green-composition-proof root=${outputRoot} base=${manifest.base.commit} patches=${expectedInventory.map((patch) => patch.file).join(",")} postimages=${expectedInventory.map((patch) => patch.postimage).join(",")}`);
+          NODE
+          grep -Fx "abort-green-composition-proof root=/artifact/abort-green/derived base=f2d9d073ffc2299eb501902753b42789f7cdc461 patches=006-abort-lifecycle-tests.patch,002-blocked-event-herdr-integration-test.patch,007-abort-lifecycle-producer.patch,008-abort-lifecycle-view.patch postimages=e0afc181256c503efa3fb3fd2fb54899abe4cc0c,f379515bae4cdda5d4bd84bafbf761597dd7dfcd,d7dea145b52cfe446083ca881be088b89f964ea6,bfb3e5d871ac0918aa00c4c6ef8aa9bbd690eac1" "$compose_log" >/dev/null
+
+      - name: Verify staged abort GREEN artifact is read-only
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          green_dir="$RUNNER_TEMP/questionnaire-upstream-abort-green"
+          derived_dir="$green_dir/abort-green/derived"
+          test -d "$derived_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=256m --pids-limit=64 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            /bin/sh -eu -c '
+              test -f /derived/tests/ask-user-question.test.ts
+              test -f /derived/tests/gentle-ai.test.ts
+              test -f /derived/extensions/ask-user-question.ts
+              test -f /derived/lib/questionnaire/questionnaire-view.ts
+              if touch /derived/.abort-green-read-only-probe 2>/dev/null; then exit 1; fi
+            '
+
+      - name: Run abort GREEN contract in read-only isolation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition"
+          green_dir="$RUNNER_TEMP/questionnaire-upstream-abort-green"
+          derived_dir="$green_dir/abort-green/derived"
+          test -d "$derived_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              if touch /derived/.abort-green-test-read-only-probe 2>/dev/null; then exit 1; fi
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /derived/extensions/ask-user-question.ts /derived/lib/questionnaire/questionnaire-view.ts \
+                /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts
+              /usr/local/bin/node /derived/scripts/check-types.mjs
+              log=/tmp/uqa04b-green.tap
+              set +e
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts >"$log" 2>&1
+              status=$?
+              set -e
+              tail -n 240 "$log"
+              test "$status" -eq 0
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$log")" -eq 97
+              test "$(grep -Ec "^ok [0-9]+ - " "$log")" -eq 97
+              test "$(grep -Ec "^not ok [0-9]+ - " "$log")" -eq 0
+              grep -Fx "1..97" "$log" >/dev/null
+              grep -Fx "# tests 104" "$log" >/dev/null
+              grep -Fx "# pass 104" "$log" >/dev/null
+              grep -Fx "# fail 0" "$log" >/dev/null
+              grep -Fx "# cancelled 0" "$log" >/dev/null
+              grep -Fx "# skipped 0" "$log" >/dev/null
+              grep -Fx "# todo 0" "$log" >/dev/null
+              printf "%s\n" "ask_user_question returns empty cancellation before mounting an already-aborted request" "ask_user_question aborts a mounted questionnaire with committed partial answers" "ask_user_question aborts during a custom draft without committing the draft" "ask_user_question abort wins over later submit, cancel, and repeated abort" "ask_user_question keeps a completed submit ahead of later abort and cancel" "ask_user_question keeps a completed cancel ahead of later abort and submit" "ask_user_question closes before a deferred custom factory can mount a dock" "ask_user_question removes abort listeners while preserving a custom UI rejection" | while IFS= read -r name; do
+                grep -Eq "^ok [0-9]+ - ${name}$" "$log"
+              done
+              grep -Eq "^ok [0-9]+ - ask_user_question returns partial answers for committed options on cancellation$" "$log"
+              grep -Eq "^ok [0-9]+ - ask_user_question preserves custom and multi answers on partial cancellation$" "$log"
+              grep -Eq "^ok [0-9]+ - ask_user_question omits uncommitted state on cancellation$" "$log"
+              grep -Eq "^ok [0-9]+ - ask_user_question retains committed answers when a replacement draft is cancelled$" "$log"
+              grep -Eq "^ok [0-9]+ - ask_user_question reports cancellation without answers$" "$log"
+              grep -Eq "^ok [0-9]+ - ask_user_question keeps the native blocked lifecycle private and balanced$" "$log"
+              grep -Eq "^ok [0-9]+ - actual questionnaire producer drives Herdr through a private balanced compatibility lifecycle$" "$log"
+            '
+
       - name: Verify final hosted candidate checkout cleanliness
         if: always()
         shell: bash
