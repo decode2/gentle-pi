@@ -98,8 +98,8 @@ jobs:
           git(["remote", "add", "origin", manifest.repository], { stdio: "ignore" });
           git(["fetch", "--no-tags", "origin", manifest.commit], { stdio: "ignore" });
           git(["checkout", "--detach", manifest.commit], { stdio: "ignore" });
-          const head = git(["rev-parse", "HEAD"]);
-          const tree = git(["rev-parse", "HEAD^{tree}"]);
+          const head = git(["rev-parse", "HEAD"]).trim();
+          const tree = git(["rev-parse", "HEAD^{tree}"]).trim();
           fail(head === manifest.commit, "Git HEAD does not match the pinned upstream commit");
           fail(tree === manifest.tree, "Git tree does not match the pinned upstream tree");
           const sourceBefore = git(["ls-tree", "-r", "-z", "--full-tree", "HEAD"]);
@@ -114,7 +114,7 @@ jobs:
           run(pnpm, ["install", "--frozen-lockfile", "--ignore-scripts", "--ignore-pnpmfile", "--reporter=append-only"], { stdio: "ignore" });
           fail(git(["ls-tree", "-r", "-z", "--full-tree", "HEAD"]) === sourceBefore, "tracked upstream source changed after dependency installation");
           fail(git(["status", "--porcelain=v1", "--untracked-files=all"]) === "", "upstream checkout is not clean after dependency installation");
-          fail(git(["rev-parse", "HEAD"]) === head && git(["rev-parse", "HEAD^{tree}"]) === tree, "Git identity moved during dependency installation");
+          fail(git(["rev-parse", "HEAD"]).trim() === head && git(["rev-parse", "HEAD^{tree}"]).trim() === tree, "Git identity moved during dependency installation");
           console.log(`acquisition-proof root=${artifact} repository=${manifest.repository} commit=${head} tree=${tree} tracked-files=${records.length} pnpm=11.1.1 frozen-lockfile=true scripts=false native=false`);
           NODE
 
