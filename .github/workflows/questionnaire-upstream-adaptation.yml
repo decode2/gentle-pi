@@ -282,10 +282,10 @@ jobs:
           docker run --rm --network=none --read-only \
             --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
             --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
-            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
             --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
             env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
-            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
             /bin/sh -eu -c '
