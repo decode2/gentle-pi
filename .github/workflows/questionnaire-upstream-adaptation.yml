@@ -296,7 +296,7 @@ jobs:
                 /derived/extensions/ask-user-question.ts /derived/tests/ask-user-question.test.ts
               /usr/local/bin/node /derived/scripts/check-types.mjs
               set +e
-              output="$(/usr/local/bin/node --experimental-strip-types --test /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts 2>&1)"
+              output="$(/usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts 2>&1)"
               status=$?
               set -e
               printf "%s\\n" "$output"
