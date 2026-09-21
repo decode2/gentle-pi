@@ -1,5 +1,5 @@
 diff --git a/tests/gentle-ai.test.ts b/tests/gentle-ai.test.ts
-index 81f4a38ecdfd11b97ada81308f036e0d318726fe..8ba84a71c6c164c86a6fc630ffbc63d49a0428cd 100644
+index 81f4a38ecdfd11b97ada81308f036e0d318726fe..f379515bae4cdda5d4bd84bafbf761597dd7dfcd 100644
 --- a/tests/gentle-ai.test.ts
 +++ b/tests/gentle-ai.test.ts
 @@ -14,6 +14,7 @@
@@ -113,7 +113,7 @@ index 81f4a38ecdfd11b97ada81308f036e0d318726fe..8ba84a71c6c164c86a6fc630ffbc63d4
 +	let approve!: (value: boolean) => void;
 +	const guarded = overlap.toolCall(
 +		{ toolName: "bash", input: { command: ["git", "rebase main"].join(" ") } },
-+		{ cwd: process.cwd(), hasUI: true, ui: { confirm: async () => new Promise<boolean>((resolve) => { approve = resolve; }) } } as ExtensionContext,
++		{ cwd: process.cwd(), hasUI: true, ui: { confirm: async () => new Promise<boolean>((resolve) => { approve = resolve; }) } } as unknown as ExtensionContext,
 +	);
 +	await Promise.resolve();
 +	release({ cancelled: true });

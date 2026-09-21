@@ -21,7 +21,7 @@
         "file": "002-blocked-event-herdr-integration-test.patch",
         "target": "tests/gentle-ai.test.ts",
         "preimage": "81f4a38ecdfd11b97ada81308f036e0d318726fe",
-        "postimage": "8ba84a71c6c164c86a6fc630ffbc63d49a0428cd"
+        "postimage": "f379515bae4cdda5d4bd84bafbf761597dd7dfcd"
       }
     ],
     "allowedTargets": [
