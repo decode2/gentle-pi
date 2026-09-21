@@ -1,0 +1,142 @@
+diff --git a/tests/gentle-ai.test.ts b/tests/gentle-ai.test.ts
+index 81f4a38ecdfd11b97ada81308f036e0d318726fe..8ba84a71c6c164c86a6fc630ffbc63d49a0428cd 100644
+--- a/tests/gentle-ai.test.ts
++++ b/tests/gentle-ai.test.ts
+@@ -14,6 +14,7 @@
+ 	ToolCallEventResult,
+ } from "@earendil-works/pi-coding-agent";
+ import { __testing, applyModelConfig, applyModelConfigAsync, createGentleAiExtension } from "../extensions/gentle-ai.ts";
++import askUserQuestion from "../extensions/ask-user-question.ts";
+ import { PROFILES_KIND, PROFILES_VERSION } from "../lib/agent-profiles.ts";
+ import { PROFILE_PIN_KIND, PROFILE_PIN_VERSION, setProfilePinWorktreeResolverForTesting, writeProfilePinSync } from "../lib/agent-profile-pin.ts";
+ import { NATIVE_REVIEW_ERROR_CODE, NativeReviewCliError, type NativeReviewCli } from "../lib/native-review-cli.ts";
+@@ -2575,3 +2576,129 @@
+ 		rmSync(base, { recursive: true, force: true });
+ 	}
+ });
++
++
++test("actual questionnaire producer drives Herdr through a private balanced compatibility lifecycle", async () => {
++	type EventHandler = (data: unknown) => void;
++	type EventRecord = { channel: string; data: unknown };
++	type QuestionTool = { name: string; execute: (...args: unknown[]) => Promise<unknown> };
++	type ToolCall = (event: { toolName: string; input: unknown }, ctx: ExtensionContext) => Promise<ToolCallEventResult | undefined>;
++	type CustomFactory = (
++		tui: { requestRender(): void },
++		theme: { fg(color: string, text: string): string; bg(color: string, text: string): string; bold(text: string): string },
++		keybindings: unknown,
++		done: (value: unknown) => void,
++	) => { handleInput?(data: string): void };
++	const input = { questions: [{ question: "Private question?", header: "Private", options: [{ label: "Alpha", description: "First" }, { label: "Beta", description: "Second" }] }] };
++	const theme = {
++		fg: (_color: string, text: string) => text,
++		bg: (_color: string, text: string) => text,
++		bold: (text: string) => text,
++	};
++	const payloads = (events: readonly EventRecord[], channel: string): unknown[] => events.filter((event) => event.channel === channel).map((event) => event.data);
++	const createHarness = () => {
++		const eventHandlers = new Map<string, Set<EventHandler>>();
++		const extensionHandlers = new Map<string, (...args: unknown[]) => unknown>();
++		const tools = new Map<string, QuestionTool>();
++		const events: EventRecord[] = [];
++		const pi = {
++			on(name: string, handler: (...args: unknown[]) => unknown) { extensionHandlers.set(name, handler); },
++			events: {
++				emit(channel: string, data: unknown) {
++					events.push({ channel, data });
++					for (const handler of eventHandlers.get(channel) ?? []) handler(data);
++				},
++				on(channel: string, handler: EventHandler) {
++					const listeners = eventHandlers.get(channel) ?? new Set<EventHandler>();
++					listeners.add(handler);
++					eventHandlers.set(channel, listeners);
++					return () => listeners.delete(handler);
++				},
++			},
++			registerCommand() {},
++			registerTool(candidate: { name: string; execute?: (...args: unknown[]) => Promise<unknown> }) {
++				if (candidate.name === "ask_user_question" && candidate.execute !== undefined) tools.set(candidate.name, candidate as QuestionTool);
++			},
++		};
++		createGentleAiExtension({ nativeReviewCli: null })(pi as unknown as ExtensionAPI);
++		askUserQuestion(pi as unknown as ExtensionAPI);
++		const tool = tools.get("ask_user_question");
++		const toolCall = extensionHandlers.get("tool_call") as ToolCall | undefined;
++		assert.ok(tool);
++		assert.ok(toolCall);
++		return { events, tool: tool!, toolCall: toolCall! };
++	};
++	const runTerminal = async (kind: "answered" | "cancelled" | "thrown") => {
++		const subject = createHarness();
++		const failure = new Error("custom UI failed");
++		let thrown: unknown;
++		try {
++			await subject.tool.execute("uqa03", input, new AbortController().signal, undefined, {
++				mode: "tui",
++				ui: {
++					custom: async (factory: CustomFactory) => {
++						if (kind === "thrown") throw failure;
++						let result: unknown;
++						const component = factory({ requestRender() {} }, theme, {}, (value) => { result = value; });
++						component.handleInput?.(kind === "answered" ? "\r" : "\x1b");
++						return result;
++					},
++				},
++			});
++		} catch (error) {
++			thrown = error;
++		}
++		if (kind === "thrown") assert.equal(thrown, failure);
++		else assert.equal(thrown, undefined);
++		return subject.events;
++	};
++	const terminal: Array<{ kind: "answered" | "cancelled" | "thrown"; compatibility: unknown[]; herdr: unknown[] }> = [];
++	for (const kind of ["answered", "cancelled", "thrown"] as const) {
++		const events = await runTerminal(kind);
++		assert.deepEqual(payloads(events, "gentle-pi:ask-user-question:blocked"), [{ active: true }, { active: false }]);
++		terminal.push({ kind, compatibility: payloads(events, "rpiv:ask-user:blocked"), herdr: payloads(events, "herdr:blocked") });
++	}
++
++	const overlap = createHarness();
++	let release!: (value: unknown) => void;
++	const pending = overlap.tool.execute("uqa03-overlap", input, new AbortController().signal, undefined, {
++		mode: "tui",
++		ui: {
++			custom: async (factory: CustomFactory) => new Promise((resolve) => {
++				factory({ requestRender() {} }, theme, {}, resolve);
++				release = resolve;
++			}),
++		},
++	});
++	await Promise.resolve();
++	assert.deepEqual(payloads(overlap.events, "gentle-pi:ask-user-question:blocked"), [{ active: true }]);
++	let approve!: (value: boolean) => void;
++	const guarded = overlap.toolCall(
++		{ toolName: "bash", input: { command: ["git", "rebase main"].join(" ") } },
++		{ cwd: process.cwd(), hasUI: true, ui: { confirm: async () => new Promise<boolean>((resolve) => { approve = resolve; }) } } as ExtensionContext,
++	);
++	await Promise.resolve();
++	release({ cancelled: true });
++	await pending;
++	approve(true);
++	await guarded;
++	const overlapResult = {
++		compatibility: payloads(overlap.events, "rpiv:ask-user:blocked"),
++		herdr: payloads(overlap.events, "herdr:blocked"),
++	};
++	assert.deepEqual({ terminal, overlap: overlapResult }, {
++		terminal: [
++			{ kind: "answered", compatibility: [{ active: true }, { active: false }], herdr: [{ active: true, label: "Questionnaire awaiting input" }, { active: false }] },
++			{ kind: "cancelled", compatibility: [{ active: true }, { active: false }], herdr: [{ active: true, label: "Questionnaire awaiting input" }, { active: false }] },
++			{ kind: "thrown", compatibility: [{ active: true }, { active: false }], herdr: [{ active: true, label: "Questionnaire awaiting input" }, { active: false }] },
++		],
++		overlap: {
++			compatibility: [{ active: true }, { active: false }],
++			herdr: [{ active: true, label: "Questionnaire awaiting input" }, { active: true, label: "Guarded command confirmation" }, { active: false }],
++		},
++	});
++	for (const data of [...terminal.flatMap((entry) => entry.compatibility), ...overlapResult.compatibility]) {
++		assert.deepEqual(Object.keys(data as Record<string, unknown>).sort(), ["active"]);
++		assert.doesNotMatch(JSON.stringify(data), /Private question|Alpha|Beta/);
++	}
++});
