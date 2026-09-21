@@ -261,3 +261,118 @@ test("rejects symlink and nonregular patch or target entries", async () => {
 	await writePatch(targetDirectory, targetEntry);
 	await expectStrictReject(targetDirectory, [targetEntry], /target must be regular/);
 });
+
+const COMPOSITION_V2 = "gentle-pi.hosted-upstream-questionnaire-composition/v2";
+
+function v2Options(scratchCase: Scratch, patches: readonly PatchEntry[]): ComposeUpstreamQuestionnaireOptions {
+	return {
+		...optionsFor(scratchCase, patches),
+		manifest: { ...composition, schema: COMPOSITION_V2, patchInventory: patches },
+	};
+}
+
+async function writeSourceFile(scratchCase: Scratch, target: string, sourceText = "old\n", mode = 0o644): Promise<void> {
+	const path = join(scratchCase.sourceRoot, target);
+	await mkdir(dirname(path), { recursive: true });
+	await writeFile(path, sourceText, { mode });
+}
+
+function contentAndModePatchText(contentTarget: string, modeTarget: string): string {
+	return `${patchText(contentTarget)}diff --git a/${modeTarget} b/${modeTarget}\nold mode 100644\nnew mode 100755\n`;
+}
+
+async function expectV2Reject(
+	scratchCase: Scratch,
+	patches: readonly PatchEntry[],
+	pattern: RegExp,
+	sourcePaths: readonly string[],
+): Promise<void> {
+	const before = new Map(
+		await Promise.all(sourcePaths.map(async (path) => [path, await readFile(join(scratchCase.sourceRoot, path))] as const)),
+	);
+	await assert.rejects(composeUpstreamQuestionnaireArtifact(v2Options(scratchCase, patches)), pattern);
+	assert.equal(await lstat(scratchCase.outputRoot).catch(() => undefined), undefined);
+	for (const [path, bytes] of before) assert.deepEqual(await readFile(join(scratchCase.sourceRoot, path)), bytes, path);
+}
+
+test("v2 composes contiguous manifest-ordered patch chains with exact bytes", async () => {
+	const scratchCase = await scratch("v2-chain");
+	const firstTarget = "extensions/ask-user-question.ts";
+	const secondTarget = "lib/questionnaire/schema.ts";
+	await writeSourceFile(scratchCase, secondTarget);
+	const first = entry("z-a1.patch", firstTarget, "old\n", "a1\n");
+	const second = entry("a-a2.patch", firstTarget, "a1\n", "a2\n");
+	const third = entry("m-b1.patch", secondTarget, "old\n", "b1\n");
+	await writePatch(scratchCase, first, firstTarget, "old\n", "a1\n");
+	await writePatch(scratchCase, second, firstTarget, "a1\n", "a2\n");
+	await writePatch(scratchCase, third, secondTarget, "old\n", "b1\n");
+	await composeUpstreamQuestionnaireArtifact(v2Options(scratchCase, [first, second, third]));
+	assert.deepEqual(await readFile(join(scratchCase.outputRoot, firstTarget)), Buffer.from("a2\n"));
+	assert.deepEqual(await readFile(join(scratchCase.outputRoot, secondTarget)), Buffer.from("b1\n"));
+});
+
+test("v2 rejects broken same-target continuity before producing output", async () => {
+	const scratchCase = await scratch("v2-broken-continuity");
+	const target = "extensions/ask-user-question.ts";
+	const first = entry("z-a1.patch", target, "old\n", "a1\n");
+	const broken = entry("a-a2.patch", target, "not-a1\n", "a2\n");
+	await writePatch(scratchCase, first, target, "old\n", "a1\n");
+	await writePatch(scratchCase, broken, target, "not-a1\n", "a2\n");
+	await expectV2Reject(scratchCase, [first, broken], /continuity/, [target]);
+});
+
+test("v2 rejects interleaved same-target chains before applying patches", async () => {
+	const scratchCase = await scratch("v2-interleaved-chain");
+	const firstTarget = "extensions/ask-user-question.ts";
+	const secondTarget = "lib/questionnaire/schema.ts";
+	await writeSourceFile(scratchCase, secondTarget);
+	const first = entry("z-a1.patch", firstTarget, "old\n", "a1\n");
+	const interleaved = entry("m-b1.patch", secondTarget, "old\n", "b1\n");
+	const final = entry("a-a2.patch", firstTarget, "a1\n", "a2\n");
+	await writePatch(scratchCase, first, firstTarget, "old\n", "a1\n");
+	await writePatch(scratchCase, interleaved, secondTarget, "old\n", "b1\n");
+	await writePatch(scratchCase, final, firstTarget, "a1\n", "a2\n");
+	await expectV2Reject(scratchCase, [first, interleaved, final], /contiguous|interleav/, [firstTarget, secondTarget]);
+});
+
+test("v2 cleans the stage after a later sequential patch failure", async () => {
+	const scratchCase = await scratch("v2-late-failure");
+	const target = "extensions/ask-user-question.ts";
+	const first = entry("z-a1.patch", target, "old\n", "a1\n");
+	const second = entry("a-a2.patch", target, "a1\n", "a2\n");
+	await writePatch(scratchCase, first, target, "old\n", "a1\n");
+	await writePatch(scratchCase, second, target, "a1\n", "a2\n");
+	await expectV2Reject(scratchCase, [first, { ...second, postimage: "0".repeat(40) }], /postimage/, [target]);
+	assert.deepEqual((await readdir(scratchCase.root)).filter((name) => name.startsWith(".questionnaire-stage-")), []);
+});
+
+test("v2 rejects metadata-only multipath patches before changing source modes", async () => {
+	const scratchCase = await scratch("v2-metadata-multipath");
+	const contentTarget = "extensions/ask-user-question.ts";
+	const modeTarget = "lib/questionnaire/schema.ts";
+	await writeSourceFile(scratchCase, modeTarget, "old\n", 0o644);
+	const patch = entry("metadata.patch", contentTarget);
+	await writeFile(join(scratchCase.patchRoot, patch.file), contentAndModePatchText(contentTarget, modeTarget));
+	const contentPath = join(scratchCase.sourceRoot, contentTarget);
+	const modePath = join(scratchCase.sourceRoot, modeTarget);
+	const beforeContentMode = (await lstat(contentPath)).mode & 0o7777;
+	const beforeMode = (await lstat(modePath)).mode & 0o7777;
+	await expectV2Reject(scratchCase, [patch], /metadata|multiple|changed path/, [contentTarget, modeTarget]);
+	assert.equal((await lstat(contentPath)).mode & 0o7777, beforeContentMode);
+	assert.equal((await lstat(modePath)).mode & 0o7777, beforeMode);
+});
+
+test("v2 rejects targets beneath symlink ancestors before applying", async () => {
+	const scratchCase = await scratch("v2-symlink-ancestor");
+	const target = "extensions/linked/target.ts";
+	const externalRoot = join(scratchCase.root, "external");
+	const externalTarget = join(externalRoot, "target.ts");
+	await mkdir(externalRoot, { recursive: true });
+	await writeFile(externalTarget, "old\n");
+	const ancestor = join(scratchCase.sourceRoot, "extensions", "linked");
+	await symlink(externalRoot, ancestor);
+	const patch = entry("symlink.patch", target);
+	await writePatch(scratchCase, patch, target);
+	await expectV2Reject(scratchCase, [patch], /symlink|ancestor/, [target]);
+	assert.deepEqual(await readFile(externalTarget), Buffer.from("old\n"));
+});
