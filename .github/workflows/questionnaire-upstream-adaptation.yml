@@ -430,7 +430,10 @@ jobs:
               output="$(/usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts 2>&1)"
               status=$?
               set -e
-              printf "%s\\n" "$output" | tail -n 260
+              failures="$(printf "%s\\n" "$output" | awk '\''/^not ok / { showing=1 } showing { print } showing && /^  \.\.\.$/ { showing=0 }'\'')"
+              test -n "$failures"
+              printf "%s\\n" "$failures" | head -c 12000
+              printf "%s\\n" "$output" | tail -n 80
               test "$status" -ne 0
               test "$(printf "%s\\n" "$output" | grep -Ec "^ok [0-9]+ - ")" -eq 86
               test "$(printf "%s\\n" "$output" | grep -Ec "^not ok [0-9]+ - ")" -eq 3
