@@ -56,4 +56,4 @@ Adapt Alan's merged upstream questionnaire instead of transplanting the owned im
 
 ## Current next step
 
-UQA-04b is next. Forecast separate bounded RED and GREEN work units for pre-mount/mounted abort, listener cleanup and abort/submit/cancel races. Build on the immutable partial-cancellation artifact, preserve partial results and balanced UQA-03 events, and use the real SDK `done` path without expanding into notes, RPC or dock controls.
+UQA-05 is active. Close the separately tested `composition/v2` prerequisite, then revise and run the controls/MULTI RED with chained deltas before any producer/view GREEN. Preserve UQA-04b artifacts and do not expand into notes, bindings, viewport, RPC or shared fullscreen interaction.

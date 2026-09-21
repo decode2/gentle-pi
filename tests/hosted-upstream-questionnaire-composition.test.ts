@@ -364,12 +364,13 @@ test("v2 rejects metadata-only multipath patches before changing source modes", 
 
 test("v2 rejects targets beneath symlink ancestors before applying", async () => {
 	const scratchCase = await scratch("v2-symlink-ancestor");
-	const target = "extensions/linked/target.ts";
+	const target = "lib/questionnaire/schema.ts";
 	const externalRoot = join(scratchCase.root, "external");
-	const externalTarget = join(externalRoot, "target.ts");
+	const externalTarget = join(externalRoot, "schema.ts");
 	await mkdir(externalRoot, { recursive: true });
 	await writeFile(externalTarget, "old\n");
-	const ancestor = join(scratchCase.sourceRoot, "extensions", "linked");
+	await mkdir(join(scratchCase.sourceRoot, "lib"), { recursive: true });
+	const ancestor = join(scratchCase.sourceRoot, "lib", "questionnaire");
 	await symlink(externalRoot, ancestor);
 	const patch = entry("symlink.patch", target);
 	await writePatch(scratchCase, patch, target);
