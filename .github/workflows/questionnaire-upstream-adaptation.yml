@@ -1981,24 +1981,24 @@ jobs:
               cat "$log"
               test "$status" -ne 0
               test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$log")" -eq 36
-              test "$(grep -Ec "^ok [0-9]+ - " "$log")" -eq 31
-              test "$(grep -Ec "^not ok [0-9]+ - " "$log")" -eq 5
+              test "$(grep -Ec "^ok [0-9]+ - " "$log")" -eq 32
+              test "$(grep -Ec "^not ok [0-9]+ - " "$log")" -eq 4
               grep -Fx "1..36" "$log" >/dev/null
               grep -Fx "# tests 36" "$log" >/dev/null
-              grep -Fx "# pass 31" "$log" >/dev/null
-              grep -Fx "# fail 5" "$log" >/dev/null
+              grep -Fx "# pass 32" "$log" >/dev/null
+              grep -Fx "# fail 4" "$log" >/dev/null
               grep -Fx "# cancelled 0" "$log" >/dev/null
               grep -Fx "# skipped 0" "$log" >/dev/null
               grep -Fx "# todo 0" "$log" >/dev/null
               cat > /tmp/uqa07a-bindings-editor-red-failures <<EOF
           default editor keys create multiline custom text and visible Submit commits the preserved draft
           remapped newline submit and tab bindings preserve a multiline draft across questions
-          explicit disabled input bindings leave Enter newline aliases and Tab with the editor
           newline wins when configured newline and submit bindings collide
           the multiline editor honors configured editing bindings before custom-answer commit
           EOF
               while IFS= read -r name; do grep -Eq "^not ok [0-9]+ - ${name}$" "$log"; done < /tmp/uqa07a-bindings-editor-red-failures
               grep -Eq "^ok [0-9]+ - configured select bindings remap navigation and explicit disabled arrays do not fall back$" "$log"
+              grep -Eq "^ok [0-9]+ - explicit disabled input bindings leave Enter newline aliases and Tab with the editor$" "$log"
             '
 
       - name: Verify final hosted candidate checkout cleanliness
