@@ -1,0 +1,47 @@
+diff --git a/extensions/ask-user-question.ts b/extensions/ask-user-question.ts
+index 716f3f03a4fc42b2f9958cfccb425a23ec2fe1c9..236ce72f8147a24041c28195235a56ec500256f0 100644
+--- a/extensions/ask-user-question.ts
++++ b/extensions/ask-user-question.ts
+@@ -20,6 +20,7 @@ const CALL_SUMMARY_LIMIT = 120;
+ interface QuestionnaireDetails {
+ 	cancelled?: boolean;
+ 	answers?: AnswerRow[];
++	globalNote?: string;
+ 	error?: QuestionnaireError;
+ 	errorKind?: string;
+ }
+@@ -207,20 +208,31 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
+ 
+ 			if (selection === undefined || selection.cancelled) {
+ 				const answers = selection?.answers ?? [];
++				const globalNote = selection?.globalNote;
+ 				if (answers.length === 0) {
+ 					return {
+ 						content: [{ type: "text", text: "User cancelled the questionnaire" }],
+-						details: { cancelled: true },
++						details: {
++							cancelled: true,
++							...(globalNote === undefined ? {} : { globalNote }),
++						},
+ 					};
+ 				}
+ 				return {
+ 					content: [{ type: "text", text: `User cancelled the questionnaire\nPartial answers:\n${answersText(answers)}` }],
+-					details: { cancelled: true, answers },
++					details: {
++						cancelled: true,
++						answers,
++						...(globalNote === undefined ? {} : { globalNote }),
++					},
+ 				};
+ 			}
+ 			return {
+ 				content: [{ type: "text", text: answersText(selection.answers) }],
+-				details: { answers: selection.answers },
++				details: {
++					answers: selection.answers,
++					...(selection.globalNote === undefined ? {} : { globalNote: selection.globalNote }),
++				},
+ 			};
+ 		},
+ 		renderCall(args: QuestionParams, theme) {
