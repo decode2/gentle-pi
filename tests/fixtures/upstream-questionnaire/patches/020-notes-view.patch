@@ -1,0 +1,362 @@
+diff --git a/lib/questionnaire/questionnaire-view.ts b/lib/questionnaire/questionnaire-view.ts
+index 185fd41bbee0de644fdcc7d493db62e0ff9484ae..e9269108f2fc2644a7bfee638f155836b3ddb4d1 100644
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -35,12 +35,14 @@ export interface AnswerRow {
+ 	answer: string | null;
+ 	selected?: string[];
+ 	preview?: string;
++	notes?: string;
+ }
+ 
+ /** Final questionnaire outcome handed to the caller. */
+ export interface QuestionnaireResult {
+ 	cancelled: boolean;
+ 	answers: AnswerRow[];
++	globalNote?: string;
+ }
+ 
+ /** Construction options for {@link QuestionnaireView}. */
+@@ -56,8 +58,11 @@ interface QuestionState {
+ 	toggled: Set<number>;
+ 	answer: AnswerRow | undefined;
+ 	customDraft: string;
++	noteDraft: string;
+ }
+ 
++type EditorKind = "custom" | "questionNote" | "globalNote";
++
+ interface LineOwner {
+ 	questionIndex: number;
+ 	rowIndex: number;
+@@ -71,6 +76,7 @@ class CustomTextEditor extends Container {
+ 	private readonly onCancel: () => void;
+ 
+ 	constructor(
++		title: string,
+ 		keybindings: KeybindingsManager | undefined,
+ 		onSubmit: (value: string) => void,
+ 		onCancel: () => void,
+@@ -80,7 +86,7 @@ class CustomTextEditor extends Container {
+ 		this.onSubmit = onSubmit;
+ 		this.onCancel = onCancel;
+ 		this.input.focused = false;
+-		this.addChild(new Text("Custom response", 1, 0));
++		this.addChild(new Text(title, 1, 0));
+ 		this.addChild(this.input);
+ 		this.addChild(new Text("Enter to submit • Esc to return to choices", 1, 0));
+ 	}
+@@ -141,9 +147,10 @@ export class QuestionnaireView extends Container implements Focusable {
+ 	private readonly keybindings: KeybindingsManager | undefined;
+ 	private readonly onComplete: ((result: QuestionnaireResult) => void) | undefined;
+ 	private readonly states: QuestionState[];
+-	private readonly editor: CustomTextEditor;
++	private editor: CustomTextEditor | undefined;
+ 	private focusedQuestion = 0;
+-	private editingQuestion: number | undefined;
++	private editing: { questionIndex: number; kind: EditorKind } | undefined;
++	private globalNoteDraft = "";
+ 	private completed = false;
+ 	private result: QuestionnaireResult | undefined;
+ 	private lineOwners: Array<LineOwner | undefined> = [];
+@@ -160,12 +167,8 @@ export class QuestionnaireView extends Container implements Focusable {
+ 			toggled: new Set<number>(),
+ 			answer: undefined,
+ 			customDraft: "",
++			noteDraft: "",
+ 		}));
+-		this.editor = new CustomTextEditor(
+-			options.keybindings,
+-			(value) => this.submitCustom(value),
+-			() => this.closeEditor(),
+-		);
+ 	}
+ 
+ 	/** Focusable: propagate focus so the free-text input gets the IME cursor. */
+@@ -175,17 +178,18 @@ export class QuestionnaireView extends Container implements Focusable {
+ 
+ 	set focused(value: boolean) {
+ 		this._focused = value;
+-		this.editor.setFocused(value);
++		this.editor?.setFocused(value);
+ 		this.invalidate();
+ 	}
+ 
+ 	/** Current committed result. Safe to call before completion. */
+ 	getResult(): QuestionnaireResult {
+-		return this.result ?? { cancelled: false, answers: this.collectedAnswers() };
++		return this.result ?? this.collectedResult(false);
+ 	}
+ 
+ 	cancel(): void {
+-		this.finish({ cancelled: true, answers: this.collectedAnswers() });
++		this.closeEditor();
++		this.finish(this.collectedResult(true));
+ 	}
+ 
+ 	/** Active question index; exposed for tests and for callers that drive the view. */
+@@ -196,7 +200,7 @@ export class QuestionnaireView extends Container implements Focusable {
+ 	handleInput(data: string): void {
+ 		if (this.completed || isKeyRelease(data)) return;
+ 
+-		if (this.editingQuestion !== undefined) {
++		if (this.editing !== undefined && this.editor !== undefined) {
+ 			// Tab still switches questions while editing; the draft is preserved.
+ 			if (this.matchesTab(data, false)) {
+ 				this.closeEditor();
+@@ -253,7 +257,7 @@ export class QuestionnaireView extends Container implements Focusable {
+ 
+ 	override handleMouse(event: TuiMouseEvent) {
+ 		if (this.completed) return undefined;
+-		if (this.editingQuestion !== undefined) return this.editor.handleMouse(event);
++		if (this.editing !== undefined && this.editor !== undefined) return this.editor.handleMouse(event);
+ 
+ 		const owner = this.lineOwners[event.y];
+ 		if (!owner || owner.rowIndex < 0 || event.button !== "left") return undefined;
+@@ -327,7 +331,7 @@ export class QuestionnaireView extends Container implements Focusable {
+ 	override invalidate(): void {
+ 		this.lineOwners = [];
+ 		super.invalidate();
+-		this.editor.setFocused(this._focused);
++		this.editor?.setFocused(this._focused);
+ 	}
+ 
+ 	/** Compact tab strip: every question is a chip, exactly one is active. */
+@@ -362,7 +366,7 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		const headerOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: -1 };
+ 		push(this.accent(question.question), headerOwner);
+ 
+-		if (this.editingQuestion === this.focusedQuestion) {
++		if (this.editing?.questionIndex === this.focusedQuestion && this.editor !== undefined) {
+ 			for (const line of this.editor.render(width)) {
+ 				lines.push(line);
+ 				owners.push(headerOwner);
+@@ -384,19 +388,29 @@ export class QuestionnaireView extends Container implements Focusable {
+ 			}
+ 		}
+ 
++		const controls = this.controlRows(this.focusedQuestion);
++		if (!controls) return { lines, owners };
+ 		const customOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: customIndex };
+ 		const customCursor = state.cursor === customIndex ? this.accent("❯ ") : "  ";
+ 		const customDone = state.answer?.kind === "custom" ? "✓ " : "";
+ 		push(`${customCursor}${customDone}${CUSTOM_ROW_LABEL}`, customOwner);
+ 
+-		const submitIndex = customIndex + 1;
+-		const submitOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: submitIndex };
+-		const submitCursor = state.cursor === submitIndex ? this.accent("❯ ") : "  ";
++		const noteOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: controls.questionNote };
++		const noteCursor = state.cursor === controls.questionNote ? this.accent("❯ ") : "  ";
++		push(`${noteCursor}Question note`, noteOwner);
++
++		if (controls.globalNote !== undefined) {
++			const globalOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: controls.globalNote };
++			const globalCursor = state.cursor === controls.globalNote ? this.accent("❯ ") : "  ";
++			push(`${globalCursor}Global note`, globalOwner);
++		}
++
++		const submitOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: controls.submit };
++		const submitCursor = state.cursor === controls.submit ? this.accent("❯ ") : "  ";
+ 		push(`${submitCursor}Submit`, submitOwner);
+ 
+-		const cancelIndex = submitIndex + 1;
+-		const cancelOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: cancelIndex };
+-		const cancelCursor = state.cursor === cancelIndex ? this.accent("❯ ") : "  ";
++		const cancelOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: controls.cancel };
++		const cancelCursor = state.cursor === controls.cancel ? this.accent("❯ ") : "  ";
+ 		push(`${cancelCursor}Cancel`, cancelOwner);
+ 
+ 		return { lines, owners };
+@@ -421,7 +435,7 @@ export class QuestionnaireView extends Container implements Focusable {
+ 	}
+ 
+ 	private currentPreview(): string | undefined {
+-		if (this.completed || this.editingQuestion !== undefined) return undefined;
++		if (this.completed || this.editing !== undefined) return undefined;
+ 		const question = this.questions[this.focusedQuestion];
+ 		const state = this.states[this.focusedQuestion];
+ 		if (!question || !state) return undefined;
+@@ -436,12 +450,21 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		this.invalidate();
+ 	}
+ 
++	private controlRows(questionIndex: number) {
++		const question = this.questions[questionIndex];
++		if (!question) return undefined;
++		const custom = question.options.length;
++		const questionNote = custom + 1;
++		const globalNote = questionIndex === this.questions.length - 1 ? questionNote + 1 : undefined;
++		const submit = (globalNote ?? questionNote) + 1;
++		return { custom, questionNote, globalNote, submit, cancel: submit + 1 };
++	}
++
+ 	private moveCursor(delta: number): void {
+-		const question = this.questions[this.focusedQuestion];
+ 		const state = this.states[this.focusedQuestion];
+-		if (!question || !state) return;
+-		const total = question.options.length + 3;
+-		state.cursor = Math.max(0, Math.min(total - 1, state.cursor + delta));
++		const controls = this.controlRows(this.focusedQuestion);
++		if (!state || !controls) return;
++		state.cursor = Math.max(0, Math.min(controls.cancel, state.cursor + delta));
+ 		this.invalidate();
+ 	}
+ 
+@@ -451,7 +474,7 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		if (!question || !state) return;
+ 		const customIndex = question.options.length;
+ 		if (state.cursor === customIndex) {
+-			this.openEditor(this.focusedQuestion);
++			this.openEditor(this.focusedQuestion, "custom");
+ 			return;
+ 		}
+ 		if (state.cursor > customIndex) return;
+@@ -461,12 +484,12 @@ export class QuestionnaireView extends Container implements Focusable {
+ 	}
+ 
+ 	private focusRow(questionIndex: number, rowIndex: number): boolean {
+-		const question = this.questions[questionIndex];
+ 		const state = this.states[questionIndex];
+-		if (!question || !state) return false;
++		const controls = this.controlRows(questionIndex);
++		if (!state || !controls) return false;
+ 		const changed = this.focusedQuestion !== questionIndex || state.cursor !== rowIndex;
+ 		this.focusedQuestion = questionIndex;
+-		state.cursor = Math.max(0, Math.min(question.options.length + 2, rowIndex));
++		state.cursor = Math.max(0, Math.min(controls.cancel, rowIndex));
+ 		this.invalidate();
+ 		return changed;
+ 	}
+@@ -476,18 +499,26 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		const state = this.states[this.focusedQuestion];
+ 		if (!question || !state) return;
+ 		const customIndex = question.options.length;
+-		const submitIndex = customIndex + 1;
+-		const cancelIndex = submitIndex + 1;
++		const controls = this.controlRows(this.focusedQuestion);
++		if (!controls) return;
+ 
+ 		if (state.cursor === customIndex) {
+-			this.openEditor(this.focusedQuestion);
++			this.openEditor(this.focusedQuestion, "custom");
++			return;
++		}
++		if (state.cursor === controls.questionNote) {
++			this.openEditor(this.focusedQuestion, "questionNote");
+ 			return;
+ 		}
+-		if (state.cursor === submitIndex) {
++		if (state.cursor === controls.globalNote) {
++			this.openEditor(this.focusedQuestion, "globalNote");
++			return;
++		}
++		if (state.cursor === controls.submit) {
+ 			this.submitAll();
+ 			return;
+ 		}
+-		if (state.cursor === cancelIndex) {
++		if (state.cursor === controls.cancel) {
+ 			this.cancel();
+ 			return;
+ 		}
+@@ -548,30 +579,44 @@ export class QuestionnaireView extends Container implements Focusable {
+ 			});
+ 		}
+ 		for (const { state, answer } of synthesized) state.answer = answer;
+-		this.finish({ cancelled: false, answers: this.collectedAnswers() });
++		this.finish(this.collectedResult(false));
+ 	}
+ 
+-	private openEditor(questionIndex: number): void {
++	private openEditor(questionIndex: number, kind: EditorKind): void {
+ 		const state = this.states[questionIndex];
+ 		if (!state) return;
+-		this.editingQuestion = questionIndex;
+-		this.editor.setValue(state.customDraft);
++		const title = kind === "custom" ? "Custom response"
++			: kind === "questionNote" ? "Question note" : "Global note";
++		const draft = kind === "custom" ? state.customDraft
++			: kind === "questionNote" ? state.noteDraft : this.globalNoteDraft;
++		this.editing = { questionIndex, kind };
++		this.editor = new CustomTextEditor(
++			title,
++			this.keybindings,
++			(value) => kind === "custom" ? this.submitCustom(value) : this.closeEditor(),
++			() => this.closeEditor(),
++		);
++		this.editor.setValue(draft);
+ 		this.editor.setFocused(this._focused);
+ 		this.invalidate();
+ 	}
+ 
+ 	private closeEditor(): void {
+-		if (this.editingQuestion === undefined) return;
+-		const state = this.states[this.editingQuestion];
+-		if (state) state.customDraft = this.editor.getValue();
+-		this.editingQuestion = undefined;
+-		this.editor.setValue("");
++		if (this.editing === undefined || this.editor === undefined) return;
++		const { questionIndex, kind } = this.editing;
++		const state = this.states[questionIndex];
++		const value = this.editor.getValue();
++		if (kind === "globalNote") this.globalNoteDraft = value;
++		else if (state && kind === "questionNote") state.noteDraft = value;
++		else if (state) state.customDraft = value;
++		this.editing = undefined;
+ 		this.editor.setFocused(false);
++		this.editor = undefined;
+ 		this.invalidate();
+ 	}
+ 
+ 	private submitCustom(value: string): void {
+-		const questionIndex = this.editingQuestion;
++		const questionIndex = this.editing?.questionIndex;
+ 		if (questionIndex === undefined) return;
+ 		const question = this.questions[questionIndex];
+ 		const state = this.states[questionIndex];
+@@ -581,7 +626,7 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		}
+ 		if (value.trim().length === 0) {
+ 			// Whitespace-only is treated as empty: discard it so reopening is clean.
+-			this.editor.setValue("");
++			this.editor?.setValue("");
+ 			this.closeEditor();
+ 			return;
+ 		}
+@@ -606,9 +651,10 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		if (this.states.every((state) => state.answer !== undefined)) {
+ 			const question = this.questions[questionIndex];
+ 			const state = this.states[questionIndex];
+-			if (question && state) {
++			const controls = this.controlRows(questionIndex);
++			if (question && state && controls) {
+ 				this.focusedQuestion = questionIndex;
+-				state.cursor = question.options.length + 1;
++				state.cursor = controls.submit;
+ 			}
+ 			this.invalidate();
+ 			return;
+@@ -621,9 +667,20 @@ export class QuestionnaireView extends Container implements Focusable {
+ 	}
+ 
+ 	private collectedAnswers(): AnswerRow[] {
+-		return this.states
+-			.map((state) => state.answer)
+-			.filter((answer): answer is AnswerRow => answer !== undefined);
++		return this.states.flatMap((state) => {
++			if (state.answer === undefined) return [];
++			const notes = state.noteDraft.trim();
++			return [notes.length > 0 ? { ...state.answer, notes } : state.answer];
++		});
++	}
++
++	private collectedResult(cancelled: boolean): QuestionnaireResult {
++		const globalNote = this.globalNoteDraft.trim();
++		return {
++			cancelled,
++			answers: this.collectedAnswers(),
++			...(globalNote.length > 0 ? { globalNote } : {}),
++		};
+ 	}
+ 
+ 	private finish(result: QuestionnaireResult): void {
