@@ -1,0 +1,24 @@
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -393,9 +393,9 @@
+ 		if (lines.length <= maxRows) return { lines, owners };
+ 
+ 		const state = this.states[this.focusedQuestion];
+-		const focusedLine = owners.findIndex((owner) =>
+-			owner?.questionIndex === this.focusedQuestion && owner.rowIndex === state?.cursor
+-		);
++		const focusedLine = this.editing === undefined
++			? owners.findIndex((owner) => owner?.questionIndex === this.focusedQuestion && owner.rowIndex === state?.cursor)
++			: owners.findLastIndex((owner) => owner?.questionIndex === this.focusedQuestion && owner.rowIndex === -2);
+ 		const anchor = focusedLine < 0 ? 0 : focusedLine;
+ 		const start = Math.max(0, Math.min(lines.length - maxRows, anchor - Math.floor(maxRows / 2)));
+ 		return {
+@@ -445,7 +445,7 @@
+ 		if (this.editing?.questionIndex === this.focusedQuestion && this.editor !== undefined) {
+ 			for (const line of this.editor.render(width)) {
+ 				lines.push(line);
+-				owners.push(headerOwner);
++				owners.push({ questionIndex: this.focusedQuestion, rowIndex: -2 });
+ 			}
+ 			return { lines, owners };
+ 		}
