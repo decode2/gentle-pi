@@ -1,0 +1,11 @@
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -21,7 +21,7 @@
+ }
+ 
+ type CustomFactory = (
+-	tui: { terminal: { rows: number }; requestRender(): void },
++	tui: { requestRender(): void },
+ 	theme: Theme,
+ 	keybindings: unknown,
+ 	done: (value: unknown) => void,
