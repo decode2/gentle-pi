@@ -2108,8 +2108,12 @@ jobs:
                 /derived/tests/ask-user-question.test.ts /derived/tests/questionnaire-view.test.ts
               /usr/local/bin/node /derived/scripts/check-types.mjs
               ask_log=/tmp/uqa07a-bindings-editor-green-ask.tap
+              set +e
               /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts >"$ask_log" 2>&1
+              ask_status=$?
+              set -e
               cat "$ask_log"
+              test "$ask_status" -eq 0
               test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$ask_log")" -eq 101
               test "$(grep -Ec "^ok [0-9]+ - " "$ask_log")" -eq 101
               grep -Fx "1..101" "$ask_log" >/dev/null
@@ -2117,8 +2121,12 @@ jobs:
               grep -Fx "# pass 108" "$ask_log" >/dev/null
               grep -Fx "# fail 0" "$ask_log" >/dev/null
               view_log=/tmp/uqa07a-bindings-editor-green-view.tap
+              set +e
               /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/questionnaire-view.test.ts >"$view_log" 2>&1
+              view_status=$?
+              set -e
               cat "$view_log"
+              test "$view_status" -eq 0
               test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$view_log")" -eq 36
               test "$(grep -Ec "^ok [0-9]+ - " "$view_log")" -eq 36
               grep -Fx "1..36" "$view_log" >/dev/null

@@ -57,4 +57,4 @@ Adapt Alan's merged upstream questionnaire instead of transplanting the owned im
 
 ## Current next step
 
-UQA-07a GREEN is next from RED test blob `2c94588545908d1c1bab18e5f0056b3dfdc354f4`; preserve the exact 36-test view and 108-test producer inventories, UQA-06 notes and shared fullscreen interaction. Stop and re-scope before UQA-07b because no public direct external-editor launch API exists at the current non-overlay custom-view boundary.
+Initial GREEN CI 35761049756 passed composition, strict TypeScript and ratchet, then exited on the ask suite before printing TAP; the diagnostic lane now preserves full ask/view output before status assertions. UQA-07a GREEN remains next from RED test blob `2c94588545908d1c1bab18e5f0056b3dfdc354f4`; preserve the exact 36-test view and 108-test producer inventories, UQA-06 notes and shared fullscreen interaction. Stop and re-scope before UQA-07b because no public direct external-editor launch API exists at the current non-overlay custom-view boundary.
