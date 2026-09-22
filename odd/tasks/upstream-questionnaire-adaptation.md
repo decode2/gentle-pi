@@ -57,4 +57,4 @@ Adapt Alan's merged upstream questionnaire instead of transplanting the owned im
 
 ## Current next step
 
-UQA-05 is active. Close the separately tested `composition/v2` prerequisite, then revise and run the controls/MULTI RED with chained deltas before any producer/view GREEN. Preserve UQA-04b artifacts and do not expand into notes, bindings, viewport, RPC or shared fullscreen interaction.
+UQA-06 is next. Add question and global notes to successful and cancelled results with focused hosted RED/GREEN, preserving UQA-05 controls/MULTI behavior and shared fullscreen interaction.
