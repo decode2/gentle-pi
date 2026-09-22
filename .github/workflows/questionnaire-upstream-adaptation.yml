@@ -1456,8 +1456,12 @@ jobs:
             protectedTargets: ["lib/native-fullscreen-interaction.ts"],
           };
           const fail = (condition, message) => { if (!condition) throw new Error(message); };
+          const expectedByTarget = new Map();
           for (const patch of patches) {
-            fail(execFileSync("git", ["-C", source, "hash-object", "--no-filters", "--", patch.target], { encoding: "utf8" }).trim() === patch.preimage, `notes view GREEN preimage changed: ${patch.file}`);
+            const expected = expectedByTarget.get(patch.target)
+              ?? execFileSync("git", ["-C", source, "hash-object", "--no-filters", "--", patch.target], { encoding: "utf8" }).trim();
+            fail(expected === patch.preimage, `notes view GREEN chain preimage changed: ${patch.file}`);
+            expectedByTarget.set(patch.target, patch.postimage);
             const changed = execFileSync("git", ["-C", source, "apply", "--numstat", "--summary", join("/workspace/tests/fixtures/upstream-questionnaire/patches", patch.file)], { encoding: "utf8" });
             const changedPaths = changed.split("\n").filter((line) => line.includes("\t")).map((line) => line.slice(line.lastIndexOf("\t") + 1)).filter(Boolean);
             fail(changedPaths.length === 1 && changedPaths[0] === patch.target, `notes view GREEN changed path mismatch: ${patch.file}`);
