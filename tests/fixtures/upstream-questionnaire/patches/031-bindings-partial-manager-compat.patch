@@ -1,0 +1,13 @@
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -157,8 +157,8 @@
+ 	}
+ 
+ 	private hasExplicit(binding: "tui.input.newLine" | "tui.input.submit"): boolean {
+-		return this.keybindings !== undefined
+-			&& Object.prototype.hasOwnProperty.call(this.keybindings.getUserBindings(), binding);
++		if (this.keybindings === undefined || typeof this.keybindings.getUserBindings !== "function") return false;
++		return Object.prototype.hasOwnProperty.call(this.keybindings.getUserBindings(), binding);
+ 	}
+ 
+ 	private isNativeInputAlias(data: string): boolean {
