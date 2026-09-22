@@ -1,0 +1,28 @@
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -88,16 +88,22 @@
+ /** Small inline multiline editor for custom answers and notes. */
+ class CustomTextEditor extends Container {
+ 	private readonly editor: Editor;
++	private readonly keybindings: KeybindingsManager | undefined;
++	private readonly onSubmit: (value: string) => void;
++	private readonly onCancel: () => void;
+ 
+ 	constructor(
+ 		title: string,
+ 		tui: TUI,
+ 		theme: QuestionnaireTheme,
+-		private readonly keybindings: KeybindingsManager | undefined,
+-		private readonly onSubmit: (value: string) => void,
+-		private readonly onCancel: () => void,
++		keybindings: KeybindingsManager | undefined,
++		onSubmit: (value: string) => void,
++		onCancel: () => void,
+ 	) {
+ 		super();
++		this.keybindings = keybindings;
++		this.onSubmit = onSubmit;
++		this.onCancel = onCancel;
+ 		this.editor = new Editor(tui, editorTheme(theme), { paddingX: 1 });
+ 		this.editor.disableSubmit = true;
+ 		this.editor.onChange = () => this.invalidate();
