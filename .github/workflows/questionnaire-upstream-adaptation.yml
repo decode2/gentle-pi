@@ -1334,7 +1334,7 @@ jobs:
 
           const source = "/base-green";
           const artifact = "/artifact";
-          const patch = { file: "018-notes-view-tests.patch", target: "tests/questionnaire-view.test.ts", preimage: "65d8c01f2857164f2582590a003b7f67144457cd", postimage: "b68faca6036686bc524b28fd3ecd7a6b1904c6a4" };
+          const patch = { file: "018-notes-view-tests.patch", target: "tests/questionnaire-view.test.ts", preimage: "65d8c01f2857164f2582590a003b7f67144457cd", postimage: "eac8474634620cd723ed8775a5c19f3e7f6fe35a" };
           const manifest = {
             schema: "gentle-pi.hosted-upstream-questionnaire-composition/v2",
             derivedDirectory: "derived",
@@ -1356,7 +1356,7 @@ jobs:
           await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest });
           console.log(`notes-view-red-proof root=${outputRoot} base=${patch.preimage} patch=${patch.file} postimage=${patch.postimage}`);
           NODE
-          grep -Fx "notes-view-red-proof root=/artifact/derived base=65d8c01f2857164f2582590a003b7f67144457cd patch=018-notes-view-tests.patch postimage=b68faca6036686bc524b28fd3ecd7a6b1904c6a4" "$compose_log" >/dev/null
+          grep -Fx "notes-view-red-proof root=/artifact/derived base=65d8c01f2857164f2582590a003b7f67144457cd patch=018-notes-view-tests.patch postimage=eac8474634620cd723ed8775a5c19f3e7f6fe35a" "$compose_log" >/dev/null
 
       - name: Run UQA-06a notes view RED in read-only isolation
         env:

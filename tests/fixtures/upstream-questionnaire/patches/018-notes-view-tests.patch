@@ -1,5 +1,5 @@
 diff --git a/tests/questionnaire-view.test.ts b/tests/questionnaire-view.test.ts
-index 65d8c01f2857164f2582590a003b7f67144457cd..b68faca6036686bc524b28fd3ecd7a6b1904c6a4 100644
+index 65d8c01f2857164f2582590a003b7f67144457cd..eac8474634620cd723ed8775a5c19f3e7f6fe35a 100644
 --- a/tests/questionnaire-view.test.ts
 +++ b/tests/questionnaire-view.test.ts
 @@ -600,3 +600,110 @@ test("failed submit leaves synthesized multi answers uncommitted", () => {
@@ -7,7 +7,7 @@ index 65d8c01f2857164f2582590a003b7f67144457cd..b68faca6036686bc524b28fd3ecd7a6b
  	assert.deepEqual(completed, [{ cancelled: true, answers: [] }]);
  });
 +
-+function moveCursorTo(view: QuestionnaireView, label: string, direction = KEY.down[0]): void {
++function moveCursorTo(view: QuestionnaireView, label: string, direction: string = KEY.down[0]): void {
 +	for (let step = 0; step < 10 && !plain(render(view)).includes(`❯ ${label}`); step++) {
 +		view.handleInput(direction);
 +	}
