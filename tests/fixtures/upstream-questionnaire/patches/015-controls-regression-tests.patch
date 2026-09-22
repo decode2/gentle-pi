@@ -1,5 +1,5 @@
 diff --git a/tests/questionnaire-view.test.ts b/tests/questionnaire-view.test.ts
-index 26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d..1613d49846e293e9b082ec3364dd45b6f9406738 100644
+index 26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d..65d8c01f2857164f2582590a003b7f67144457cd 100644
 --- a/tests/questionnaire-view.test.ts
 +++ b/tests/questionnaire-view.test.ts
 @@ -534,3 +534,69 @@ test("multi-select submit preserves an empty selection and cancel remains answer
@@ -17,7 +17,7 @@ index 26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d..1613d49846e293e9b082ec3364dd45b6
 +
 +	view.handleInput(KEY.up[0]);
 +	view.handleInput(KEY.up[0]);
-+	assert.match(plain(render(view)), /❯ Two/);
++	assert.match(plain(render(view)), /❯ \[ \] Two/);
 +	view.handleInput(KEY.space);
 +	view.handleInput(KEY.down[0]);
 +	view.handleInput(KEY.down[0]);

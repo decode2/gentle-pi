@@ -1076,7 +1076,7 @@ jobs:
             schema: "gentle-pi.hosted-upstream-questionnaire-composition/v2",
             derivedDirectory: "derived",
             patchDirectory: "patches/questionnaire-upstream",
-            patchInventory: [{ file: "015-controls-regression-tests.patch", target: "tests/questionnaire-view.test.ts", preimage: "26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d", postimage: "1613d49846e293e9b082ec3364dd45b6f9406738" }],
+            patchInventory: [{ file: "015-controls-regression-tests.patch", target: "tests/questionnaire-view.test.ts", preimage: "26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d", postimage: "65d8c01f2857164f2582590a003b7f67144457cd" }],
             allowedTargets: ["tests/questionnaire-view.test.ts"],
             protectedTargets: ["lib/native-fullscreen-interaction.ts"],
           };
@@ -1099,7 +1099,7 @@ jobs:
           await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest });
           console.log(`controls-correction-red-proof root=${outputRoot} base=${patch.preimage} patch=${patch.file} postimage=${patch.postimage}`);
           NODE
-          grep -Fx "controls-correction-red-proof root=/artifact/derived base=26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d patch=015-controls-regression-tests.patch postimage=1613d49846e293e9b082ec3364dd45b6f9406738" "$compose_log" >/dev/null
+          grep -Fx "controls-correction-red-proof root=/artifact/derived base=26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d patch=015-controls-regression-tests.patch postimage=65d8c01f2857164f2582590a003b7f67144457cd" "$compose_log" >/dev/null
 
       - name: Run controls correction RED contract in read-only isolation
         env:
