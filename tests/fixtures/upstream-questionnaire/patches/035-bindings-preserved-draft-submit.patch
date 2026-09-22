@@ -1,0 +1,11 @@
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -615,7 +615,7 @@
+ 				.sort((left, right) => left - right)
+ 				.map((index) => question.options[index]!.label);
+ 			const customDraft = state.customDraft.trim();
+-			if (state.cursor === question.options.length && customDraft.length > 0) {
++			if (customDraft.length > 0) {
+ 				synthesized.push({
+ 					state,
+ 					answer: {
