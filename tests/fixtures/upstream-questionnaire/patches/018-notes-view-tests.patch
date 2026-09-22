@@ -1,0 +1,115 @@
+diff --git a/tests/questionnaire-view.test.ts b/tests/questionnaire-view.test.ts
+index 65d8c01f2857164f2582590a003b7f67144457cd..b68faca6036686bc524b28fd3ecd7a6b1904c6a4 100644
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -600,3 +600,110 @@ test("failed submit leaves synthesized multi answers uncommitted", () => {
+ 	view.handleInput(KEY.escape);
+ 	assert.deepEqual(completed, [{ cancelled: true, answers: [] }]);
+ });
++
++function moveCursorTo(view: QuestionnaireView, label: string, direction = KEY.down[0]): void {
++	for (let step = 0; step < 10 && !plain(render(view)).includes(`❯ ${label}`); step++) {
++		view.handleInput(direction);
++	}
++	assert.match(plain(render(view)), new RegExp(`❯ ${label}`));
++}
++
++test("renders question and final global note rows before Submit and Cancel", () => {
++	const first = viewWithResult(two());
++	assert.match(plain(render(first.view)), /Question note/);
++	assert.doesNotMatch(plain(render(first.view)), /Global note/);
++
++	first.view.handleInput(KEY.tab);
++	const lines = first.view.render(100);
++	const labels = lines.map((line) => plain(line).replace(/^❯ /, "").trim());
++	const customRow = labels.indexOf(CUSTOM_ROW_LABEL);
++	assert.deepEqual(labels.slice(customRow, customRow + 5), [
++		CUSTOM_ROW_LABEL,
++		"Question note",
++		"Global note",
++		"Submit",
++		"Cancel",
++	]);
++
++	const noteRow = labels.indexOf("Question note");
++	assert.equal(first.view.handleMouse(mouseEvent(lines, noteRow, "click"))?.handled, true);
++	assert.match(plain(render(first.view)), /Question note/);
++	assert.equal(first.completed.length, 0, "opening a note never completes the questionnaire");
++});
++
++test("successful submit attaches a trimmed question note and global note", () => {
++	const { view, completed } = viewWithResult(single());
++	view.handleInput(KEY.enter);
++	moveCursorTo(view, "Question note", KEY.up[0]);
++	view.handleInput(KEY.enter);
++	view.handleInput("  route note  ");
++	view.handleInput(KEY.escape);
++	moveCursorTo(view, "Global note");
++	view.handleInput(KEY.enter);
++	view.handleInput("  global context  ");
++	view.handleInput(KEY.escape);
++	moveCursorTo(view, "Submit");
++	view.handleInput(KEY.enter);
++
++	assert.deepEqual(completed, [{
++		cancelled: false,
++		answers: [{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha", notes: "route note" }],
++		globalNote: "global context",
++	}]);
++});
++
++test("note drafts survive tab switches and cancellation preserves committed notes", () => {
++	const { view, completed } = viewWithResult(two());
++	view.handleInput(KEY.enter);
++	view.handleInput(KEY.shiftTab);
++	moveCursorTo(view, "Question note");
++	view.handleInput(KEY.enter);
++	view.handleInput("route note");
++	view.handleInput(KEY.tab);
++	view.handleInput(KEY.shiftTab);
++	view.handleInput(KEY.enter);
++	assert.match(plain(render(view)), /route note/, "question-note draft is restored after a tab round trip");
++	view.handleInput(KEY.escape);
++
++	view.handleInput(KEY.tab);
++	moveCursorTo(view, "Global note");
++	view.handleInput(KEY.enter);
++	view.handleInput("global context");
++	view.handleInput(KEY.escape);
++	moveCursorTo(view, "Cancel");
++	view.handleInput(KEY.enter);
++
++	assert.deepEqual(completed, [{
++		cancelled: true,
++		answers: [{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha", notes: "route note" }],
++		globalNote: "global context",
++	}]);
++});
++
++test("omits whitespace-only notes and keeps a global note on answerless cancellation", () => {
++	const submitted = viewWithResult(single());
++	submitted.view.handleInput(KEY.enter);
++	moveCursorTo(submitted.view, "Question note", KEY.up[0]);
++	submitted.view.handleInput(KEY.enter);
++	submitted.view.handleInput("   ");
++	submitted.view.handleInput(KEY.escape);
++	moveCursorTo(submitted.view, "Global note");
++	submitted.view.handleInput(KEY.enter);
++	submitted.view.handleInput("  \t  ");
++	submitted.view.handleInput(KEY.escape);
++	moveCursorTo(submitted.view, "Submit");
++	submitted.view.handleInput(KEY.enter);
++	assert.deepEqual(submitted.completed, [{
++		cancelled: false,
++		answers: [{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha" }],
++	}]);
++
++	const cancelled = viewWithResult(single());
++	moveCursorTo(cancelled.view, "Global note");
++	cancelled.view.handleInput(KEY.enter);
++	cancelled.view.handleInput("  context only  ");
++	cancelled.view.handleInput(KEY.escape);
++	moveCursorTo(cancelled.view, "Cancel");
++	cancelled.view.handleInput(KEY.enter);
++	assert.deepEqual(cancelled.completed, [{ cancelled: true, answers: [], globalNote: "context only" }]);
++});
