@@ -1,0 +1,70 @@
+diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
+index a09fb580406dff77e7093863b36c658a384393b4..55149f3a1656b0eea71d6b6005f4a22113529662 100644
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -986,3 +986,65 @@ test("ask_user_question removes abort listeners while preserving a custom UI rej
+ 		], { added: 1, removed: 1 }],
+ 	);
+ });
++
++function resolvedSelectionContext(selection: unknown) {
++	return {
++		mode: "tui",
++		ui: {
++			custom: async (factory: CustomFactory) => {
++				factory({ requestRender() {} }, theme, {}, () => {});
++				return selection;
++			},
++		},
++	};
++}
++
++test("ask_user_question preserves answer notes and a global note on success", async () => {
++	const { tool } = registerQuestionTool();
++	const answers = [{
++		questionIndex: 0,
++		question: "Proceed?",
++		kind: "option",
++		answer: "Alpha",
++		notes: "route note",
++	}];
++	const result = await run(tool, { questions: single() }, resolvedSelectionContext({
++		cancelled: false,
++		answers,
++		globalNote: "global context",
++	}));
++
++	assert.equal(result.content[0]?.text, "1. Proceed? — Alpha", "UQA-09 still owns note text formatting");
++	assert.deepEqual(result.details, { answers, globalNote: "global context" });
++});
++
++test("ask_user_question preserves answer notes and a global note on partial cancellation", async () => {
++	const { tool } = registerQuestionTool();
++	const answers = [{
++		questionIndex: 0,
++		question: "Proceed?",
++		kind: "option",
++		answer: "Alpha",
++		notes: "route note",
++	}];
++	const result = await run(tool, { questions: single() }, resolvedSelectionContext({
++		cancelled: true,
++		answers,
++		globalNote: "global context",
++	}));
++
++	assert.equal(result.content[0]?.text, "User cancelled the questionnaire\nPartial answers:\n1. Proceed? — Alpha");
++	assert.deepEqual(result.details, { cancelled: true, answers, globalNote: "global context" });
++});
++
++test("ask_user_question preserves a global note on answerless cancellation", async () => {
++	const { tool } = registerQuestionTool();
++	const result = await run(tool, { questions: single() }, resolvedSelectionContext({
++		cancelled: true,
++		answers: [],
++		globalNote: "context only",
++	}));
++
++	assert.equal(result.content[0]?.text, "User cancelled the questionnaire");
++	assert.deepEqual(result.details, { cancelled: true, globalNote: "context only" });
++});
