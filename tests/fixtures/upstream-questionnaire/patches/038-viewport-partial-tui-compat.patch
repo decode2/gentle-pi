@@ -1,0 +1,13 @@
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -387,7 +387,9 @@
+ 		lines: string[],
+ 		owners: Array<LineOwner | undefined>,
+ 	): { lines: string[]; owners: Array<LineOwner | undefined> } {
+-		const maxRows = Math.max(1, this.tui.terminal.rows);
++		const terminalRows = this.tui.terminal?.rows;
++		if (terminalRows === undefined) return { lines, owners };
++		const maxRows = Math.max(1, terminalRows);
+ 		if (lines.length <= maxRows) return { lines, owners };
+ 
+ 		const state = this.states[this.focusedQuestion];
