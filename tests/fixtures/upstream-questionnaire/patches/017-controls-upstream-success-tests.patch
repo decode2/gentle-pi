@@ -1,0 +1,49 @@
+diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
+index 4534749ee354b4aea1278652c865dcbb3ce3f6ae..a09fb580406dff77e7093863b36c658a384393b4 100644
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -190,7 +190,7 @@ test("ask_user_question commits a single-select answer end-to-end", async () =>
+ 	const { tool, emitted } = registerQuestionTool();
+ 	const rendered = { value: "" };
+ 
+-	const result = await run(tool, { questions: single() }, tuiContext(["\r"], rendered));
++	const result = await run(tool, { questions: single() }, tuiContext(["\r", "\r"], rendered));
+ 
+ 	assert.match(rendered.value, /\[1\/1\]/);
+ 	assert.match(rendered.value, /▸ Proceed/);
+@@ -272,7 +272,7 @@ test("ask_user_question echoes an option preview beside the answer", async () =>
+ 		{ question: "Proceed?", header: "Proceed", options: [option("Alpha", "First choice", "Preview A"), option("Beta")] },
+ 	];
+ 
+-	const result = await run(tool, { questions }, tuiContext(["\r"]));
++	const result = await run(tool, { questions }, tuiContext(["\r", "\r"]));
+ 
+ 	assert.equal(result.content[0]?.text, "1. Proceed? — Alpha\n   selected preview: Preview A");
+ 	assert.deepEqual(result.details.answers, [
+@@ -286,7 +286,7 @@ test("ask_user_question commits a multiSelect answer with every toggled option",
+ 		{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true },
+ 	];
+ 
+-	const result = await run(tool, { questions }, tuiContext([" ", "\r"]));
++	const result = await run(tool, { questions }, tuiContext([" ", "\r", "\r"]));
+ 
+ 	assert.equal(result.content[0]?.text, "1. Pick? — selected: One");
+ 	assert.deepEqual(result.details.answers, [
+@@ -300,7 +300,7 @@ test("ask_user_question commits a free-text custom answer", async () => {
+ 	const result = await run(
+ 		tool,
+ 		{ questions: single() },
+-		tuiContext(["\x1b[B", "\x1b[B", "\r", "custom text", "\r"]),
++		tuiContext(["\x1b[B", "\x1b[B", "\r", "custom text", "\r", "\r"]),
+ 	);
+ 
+ 	assert.equal(result.content[0]?.text, "1. Proceed? — (custom) custom text");
+@@ -319,7 +319,7 @@ test("ask_user_question keeps toggled options in a multiSelect custom answer", a
+ 	const result = await run(
+ 		tool,
+ 		{ questions },
+-		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\r"]),
++		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\r", "\r"]),
+ 	);
+ 
+ 	assert.equal(result.content[0]?.text, "1. Pick? — (custom) free note — selected: One");

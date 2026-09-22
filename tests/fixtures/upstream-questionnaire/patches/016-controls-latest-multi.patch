@@ -1,0 +1,14 @@
+diff --git a/lib/questionnaire/questionnaire-view.ts b/lib/questionnaire/questionnaire-view.ts
+index 5e7f058a727ce84c79b8f5a5571dcaf42163dd48..185fd41bbee0de644fdcc7d493db62e0ff9484ae 100644
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -524,7 +524,8 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		const synthesized: Array<{ state: QuestionState; answer: AnswerRow }> = [];
+ 		for (const [questionIndex, question] of this.questions.entries()) {
+ 			const state = this.states[questionIndex];
+-			if (!state || state.answer !== undefined) continue;
++			if (!state) continue;
++			if (state.answer !== undefined && (!question.multiSelect || state.answer.kind !== "multi")) continue;
+ 			if (!question.multiSelect) {
+ 				this.focusedQuestion = questionIndex;
+ 				state.cursor = 0;
