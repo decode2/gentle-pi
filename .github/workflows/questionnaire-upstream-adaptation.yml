@@ -2001,6 +2001,132 @@ jobs:
               grep -Eq "^ok [0-9]+ - explicit disabled input bindings leave Enter newline aliases and Tab with the editor$" "$log"
             '
 
+      - name: Compose UQA-07a bindings editor GREEN artifact offline
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          source_dir="$RUNNER_TEMP/questionnaire-upstream-bindings-editor-red/derived"
+          green_dir="$RUNNER_TEMP/questionnaire-upstream-bindings-editor-green"
+          test -d "$source_dir"
+          test ! -e "$green_dir"
+          mkdir "$green_dir"
+          chmod 0777 "$green_dir"
+          compose_log="$RUNNER_TEMP/questionnaire-upstream-bindings-editor-green-composition.log"
+          docker run --rm -i --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$source_dir,target=/base-red,readonly" \
+            --mount "type=bind,source=$green_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --input-type=module <<'NODE' | tee "$compose_log"
+          import { execFileSync } from "node:child_process";
+          import { copyFile, mkdir, readdir } from "node:fs/promises";
+          import { join } from "node:path";
+          import { composeUpstreamQuestionnaireArtifact } from "/workspace/tests/fixtures/hosted-compose-upstream-questionnaire.ts";
+
+          const source = "/base-red";
+          const artifact = "/artifact";
+          const patches = [
+            { file: "025-bindings-existing-view-tests.patch", target: "tests/questionnaire-view.test.ts", preimage: "2c94588545908d1c1bab18e5f0056b3dfdc354f4", postimage: "c23951e9214b8105c238fc1612a2e8e5168603b7" },
+            { file: "029-bindings-editor-hint-test.patch", target: "tests/questionnaire-view.test.ts", preimage: "c23951e9214b8105c238fc1612a2e8e5168603b7", postimage: "9988467feaca781109c411c7498e13d5eda21018" },
+            { file: "026-bindings-ask-drivers.patch", target: "tests/ask-user-question.test.ts", preimage: "55149f3a1656b0eea71d6b6005f4a22113529662", postimage: "0361e28618c1cf797a98b1491602e431532d0009" },
+            { file: "027-bindings-editor-view.patch", target: "lib/questionnaire/questionnaire-view.ts", preimage: "e9269108f2fc2644a7bfee638f155836b3ddb4d1", postimage: "9b5c03d47b4be985a2b2772f47a987fb3b3ee49b" },
+            { file: "028-bindings-editor-producer.patch", target: "extensions/ask-user-question.ts", preimage: "236ce72f8147a24041c28195235a56ec500256f0", postimage: "037574cd331f6ebb4cfb001bc0f6df5d905783d9" },
+          ];
+          const manifest = {
+            schema: "gentle-pi.hosted-upstream-questionnaire-composition/v2",
+            derivedDirectory: "derived",
+            patchDirectory: "patches/questionnaire-upstream",
+            patchInventory: patches,
+            allowedTargets: [...new Set(patches.map((patch) => patch.target))],
+            protectedTargets: ["lib/native-fullscreen-interaction.ts"],
+          };
+          const fail = (condition, message) => { if (!condition) throw new Error(message); };
+          const expectedByTarget = new Map();
+          for (const patch of patches) {
+            const expected = expectedByTarget.get(patch.target)
+              ?? execFileSync("git", ["-C", source, "hash-object", "--no-filters", "--", patch.target], { encoding: "utf8" }).trim();
+            fail(expected === patch.preimage, `bindings editor GREEN chain preimage changed: ${patch.file}`);
+            expectedByTarget.set(patch.target, patch.postimage);
+            const patchPath = join("/workspace/tests/fixtures/upstream-questionnaire/patches", patch.file);
+            const changed = execFileSync("git", ["-C", source, "apply", "--numstat", "--summary", patchPath], { encoding: "utf8" });
+            const changedPaths = changed.split("\n").filter((line) => line.includes("\t")).map((line) => line.slice(line.lastIndexOf("\t") + 1)).filter(Boolean);
+            fail(changedPaths.length === 1 && changedPaths[0] === patch.target, `bindings editor GREEN changed path mismatch: ${patch.file}`);
+          }
+          const patchRoot = join(artifact, manifest.patchDirectory);
+          const outputRoot = join(artifact, manifest.derivedDirectory);
+          await mkdir(patchRoot, { recursive: true });
+          for (const patch of patches) await copyFile(join("/workspace/tests/fixtures/upstream-questionnaire/patches", patch.file), join(patchRoot, patch.file));
+          fail(JSON.stringify((await readdir(patchRoot)).sort()) === JSON.stringify(patches.map((patch) => patch.file).sort()), "bindings editor GREEN staged patch set changed");
+          await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest });
+          console.log(`bindings-editor-green-proof root=${outputRoot} patches=${patches.map((patch) => patch.file).join(",")} postimages=${patches.map((patch) => patch.postimage).join(",")}`);
+          NODE
+          grep -Fx "bindings-editor-green-proof root=/artifact/derived patches=025-bindings-existing-view-tests.patch,029-bindings-editor-hint-test.patch,026-bindings-ask-drivers.patch,027-bindings-editor-view.patch,028-bindings-editor-producer.patch postimages=c23951e9214b8105c238fc1612a2e8e5168603b7,9988467feaca781109c411c7498e13d5eda21018,0361e28618c1cf797a98b1491602e431532d0009,9b5c03d47b4be985a2b2772f47a987fb3b3ee49b,037574cd331f6ebb4cfb001bc0f6df5d905783d9" "$compose_log" >/dev/null
+
+      - name: Run UQA-07a bindings editor GREEN in read-only isolation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition"
+          red_dir="$RUNNER_TEMP/questionnaire-upstream-bindings-editor-red/derived"
+          derived_dir="$RUNNER_TEMP/questionnaire-upstream-bindings-editor-green/derived"
+          test -d "$red_dir" && test -d "$derived_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --mount "type=bind,source=$red_dir,target=/red,readonly" \
+            --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              if touch /derived/.bindings-editor-green-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /red/.bindings-editor-red-read-only-probe 2>/dev/null; then exit 1; fi
+              cmp /red/lib/native-fullscreen-interaction.ts /derived/lib/native-fullscreen-interaction.ts
+              grep "^test(\"" /red/tests/questionnaire-view.test.ts | cut -d\" -f2 >/tmp/red-view-names
+              grep "^test(\"" /derived/tests/questionnaire-view.test.ts | cut -d\" -f2 >/tmp/green-view-names
+              cmp /tmp/red-view-names /tmp/green-view-names
+              grep "^test(\"" /red/tests/ask-user-question.test.ts | cut -d\" -f2 >/tmp/red-ask-names
+              grep "^test(\"" /derived/tests/ask-user-question.test.ts | cut -d\" -f2 >/tmp/green-ask-names
+              cmp /tmp/red-ask-names /tmp/green-ask-names
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /derived/extensions/ask-user-question.ts /derived/lib/questionnaire/questionnaire-view.ts \
+                /derived/tests/ask-user-question.test.ts /derived/tests/questionnaire-view.test.ts
+              /usr/local/bin/node /derived/scripts/check-types.mjs
+              ask_log=/tmp/uqa07a-bindings-editor-green-ask.tap
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts >"$ask_log" 2>&1
+              cat "$ask_log"
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$ask_log")" -eq 101
+              test "$(grep -Ec "^ok [0-9]+ - " "$ask_log")" -eq 101
+              grep -Fx "1..101" "$ask_log" >/dev/null
+              grep -Fx "# tests 108" "$ask_log" >/dev/null
+              grep -Fx "# pass 108" "$ask_log" >/dev/null
+              grep -Fx "# fail 0" "$ask_log" >/dev/null
+              view_log=/tmp/uqa07a-bindings-editor-green-view.tap
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/questionnaire-view.test.ts >"$view_log" 2>&1
+              cat "$view_log"
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$view_log")" -eq 36
+              test "$(grep -Ec "^ok [0-9]+ - " "$view_log")" -eq 36
+              grep -Fx "1..36" "$view_log" >/dev/null
+              grep -Fx "# tests 36" "$view_log" >/dev/null
+              grep -Fx "# pass 36" "$view_log" >/dev/null
+              grep -Fx "# fail 0" "$view_log" >/dev/null
+            '
+
       - name: Verify final hosted candidate checkout cleanliness
         if: always()
         shell: bash

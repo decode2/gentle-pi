@@ -1,0 +1,13 @@
+diff --git a/tests/questionnaire-view.test.ts b/tests/questionnaire-view.test.ts
+index c23951e9214b8105c238fc1612a2e8e5168603b7..9988467feaca781109c411c7498e13d5eda21018 100644
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -276,7 +276,7 @@ test("custom row opens the editor, empty submit returns, and the draft survives
+ 	view.handleInput(KEY.down[0]);
+ 	view.handleInput(KEY.enter);
+ 	assert.match(render(view), /Custom response/);
+-	assert.match(render(view), /> /);
++	assert.match(render(view), /Enter for newline/);
+ 
+ 	view.handleInput("   ");
+ 	view.handleInput("\x13");
