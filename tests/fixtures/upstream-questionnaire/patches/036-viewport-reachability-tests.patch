@@ -1,0 +1,38 @@
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -881,3 +881,35 @@
+ 		assert.equal(view.getResult().answers[0]?.answer, "alpha\ntail");
+ 	});
+ });
++
++test("narrow short viewport bounds output and keeps Submit and Cancel reachable", () => {
++	const tui = { terminal: { rows: 10 }, requestRender() {} } as TUI;
++	const view = new QuestionnaireView({
++		questions: [question(
++			"Choose the safest deployment path for this deliberately long prompt?",
++			[
++				option("Alpha route", "First deliberately long description", "A deliberately long preview that wraps inline"),
++				option("Beta route", "Second deliberately long description"),
++				option("Gamma route", "Third deliberately long description"),
++				option("Delta route", "Fourth deliberately long description"),
++			],
++		)],
++		theme,
++		tui,
++	});
++	const assertViewport = (label: string) => {
++		const lines = view.render(20);
++		assert.ok(lines.length <= 10, `${label} exceeded the 10-row viewport: ${lines.length}`);
++		assertFits(view, 20);
++	};
++
++	assertViewport("initial selection");
++	for (let step = 0; step < 7; step++) {
++		view.handleInput(KEY.down[0]);
++		assertViewport(`step ${step + 1}`);
++	}
++	assert.match(plain(render(view, 20)), /❯ Submit/);
++	view.handleInput(KEY.down[0]);
++	assertViewport("Cancel");
++	assert.match(plain(render(view, 20)), /❯ Cancel/);
++});
