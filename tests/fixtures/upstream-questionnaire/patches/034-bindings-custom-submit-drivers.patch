@@ -1,0 +1,30 @@
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -320,7 +320,12 @@
+ 	const result = await run(
+ 		tool,
+ 		{ questions: single() },
+-		tuiContext(["\x1b[B", "\x1b[B", "\r", "custom text", "\x1b", "\x1b[B", "\x1b[B", "\r"]),
++		tuiContext(
++			["\x1b[B", "\x1b[B", "\r", "custom text", "\x13", "\r"],
++			undefined,
++			undefined,
++			customSubmitKeybindings,
++		),
+ 	);
+ 
+ 	assert.equal(result.content[0]?.text, "1. Proceed? — (custom) custom text");
+@@ -339,7 +344,12 @@
+ 	const result = await run(
+ 		tool,
+ 		{ questions },
+-		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\x1b", "\x1b[B", "\x1b[B", "\r"]),
++		tuiContext(
++			[" ", "\x1b[B", "\x1b[B", "\r", "free note", "\x13", "\r"],
++			undefined,
++			undefined,
++			customSubmitKeybindings,
++		),
+ 	);
+ 
+ 	assert.equal(result.content[0]?.text, "1. Pick? — (custom) free note — selected: One");
