@@ -1,0 +1,74 @@
+diff --git a/tests/questionnaire-view.test.ts b/tests/questionnaire-view.test.ts
+index 26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d..1613d49846e293e9b082ec3364dd45b6f9406738 100644
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -534,3 +534,69 @@ test("multi-select submit preserves an empty selection and cancel remains answer
+ 	assert.equal(fresh.completed.length, 1);
+ 	assert.deepEqual(fresh.completed[0], { cancelled: true, answers: [] });
+ });
++
++test("multi-select submit uses the latest toggles after an earlier commit", () => {
++	const questions = [question("Pick?", [option("One"), option("Two")], { multiSelect: true })];
++	const { view, completed } = viewWithResult(questions);
++	view.handleInput(KEY.space);
++	view.handleInput(KEY.enter);
++	assert.equal(completed.length, 0);
++	assert.match(plain(render(view)), /❯ Submit/);
++
++	view.handleInput(KEY.up[0]);
++	view.handleInput(KEY.up[0]);
++	assert.match(plain(render(view)), /❯ Two/);
++	view.handleInput(KEY.space);
++	view.handleInput(KEY.down[0]);
++	view.handleInput(KEY.down[0]);
++	assert.match(plain(render(view)), /❯ Submit/);
++	view.handleInput(KEY.enter);
++
++	assert.equal(completed.length, 1);
++	assert.deepEqual(completed[0], {
++		cancelled: false,
++		answers: [{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: ["One", "Two"] }],
++	});
++});
++
++test("direct mouse clicks on Submit and Cancel are independent and idempotent", () => {
++	const submitted = viewWithResult(single());
++	submitted.view.handleInput(KEY.enter);
++	const submitLines = submitted.view.render(100);
++	const submitRow = submitLines.findIndex((line) => plain(line).replace(/^❯ /, "").trim() === "Submit");
++	assert.ok(submitRow >= 0);
++	submitted.view.handleMouse(mouseEvent(submitLines, submitRow, "click"));
++	submitted.view.handleMouse(mouseEvent(submitLines, submitRow, "click"));
++	assert.deepEqual(submitted.completed, [{
++		cancelled: false,
++		answers: [{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha" }],
++	}]);
++
++	const cancelled = viewWithResult(single());
++	const cancelLines = cancelled.view.render(100);
++	const cancelRow = cancelLines.findIndex((line) => plain(line).replace(/^❯ /, "").trim() === "Cancel");
++	assert.ok(cancelRow >= 0);
++	cancelled.view.handleMouse(mouseEvent(cancelLines, cancelRow, "click"));
++	cancelled.view.handleMouse(mouseEvent(cancelLines, cancelRow, "click"));
++	assert.deepEqual(cancelled.completed, [{ cancelled: true, answers: [] }]);
++});
++
++test("failed submit leaves synthesized multi answers uncommitted", () => {
++	const questions = [
++		question("Pick?", [option("One"), option("Two")], { multiSelect: true }),
++		question("Proceed?", [option("Alpha"), option("Beta")]),
++	];
++	const { view, completed } = viewWithResult(questions);
++	view.handleInput(KEY.space);
++	view.handleInput(KEY.down[0]);
++	view.handleInput(KEY.down[0]);
++	view.handleInput(KEY.down[0]);
++	assert.match(plain(render(view)), /❯ Submit/);
++	view.handleInput(KEY.enter);
++
++	assert.equal(completed.length, 0);
++	assert.equal(view.activeQuestion, 1);
++	assert.deepEqual(view.getResult().answers, []);
++	view.handleInput(KEY.escape);
++	assert.deepEqual(completed, [{ cancelled: true, answers: [] }]);
++});
