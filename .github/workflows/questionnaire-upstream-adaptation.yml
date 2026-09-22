@@ -1070,8 +1070,12 @@ jobs:
                 /derived/tests/ask-user-question.test.ts /derived/tests/questionnaire-view.test.ts
               /usr/local/bin/node /derived/scripts/check-types.mjs
               ask_log=/tmp/uqa05-green-ask.tap
+              set +e
               /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts >"$ask_log" 2>&1
+              ask_status=$?
+              set -e
               tail -n 240 "$ask_log"
+              test "$ask_status" -eq 0
               test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$ask_log")" -eq 98
               test "$(grep -Ec "^ok [0-9]+ - " "$ask_log")" -eq 98
               test "$(grep -Ec "^not ok [0-9]+ - " "$ask_log")" -eq 0
