@@ -937,6 +937,203 @@ jobs:
           EOF
             '
 
+      - name: Compose controls GREEN artifact offline
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition"
+          green_dir="$RUNNER_TEMP/questionnaire-upstream-controls-green"
+          test ! -e "$green_dir"
+          mkdir "$green_dir"
+          chmod 0777 "$green_dir"
+          compose_log="$RUNNER_TEMP/questionnaire-upstream-controls-green-composition.log"
+          docker run --rm -i --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
+            --mount "type=bind,source=$green_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            ACQUIRED_UPSTREAM_ROOT=/acquired-upstream CONTROLS_GREEN_ARTIFACT_ROOT=/artifact/controls-green GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --input-type=module <<'NODE' | tee "$compose_log"
+          import { execFileSync } from "node:child_process";
+          import { copyFile, mkdir, readdir, readFile } from "node:fs/promises";
+          import { join } from "node:path";
+          import { composeUpstreamQuestionnaireArtifact } from "/workspace/tests/fixtures/hosted-compose-upstream-questionnaire.ts";
+
+          const workspace = "/workspace";
+          const source = "/acquired-upstream";
+          const artifact = "/artifact/controls-green";
+          const base = JSON.parse(await readFile(`${workspace}/.github/workflows/fixtures/hosted-upstream-questionnaire.json`, "utf8"));
+          const manifest = JSON.parse(await readFile(`${workspace}/.github/workflows/fixtures/hosted-upstream-questionnaire-controls-green.json`, "utf8"));
+          const fail = (condition, message) => { if (!condition) throw new Error(message); };
+          const expectedBase = { repository: "https://github.com/Gentleman-Programming/gentle-shell.git", commit: "f2d9d073ffc2299eb501902753b42789f7cdc461", tree: "6fb42857f728f131da054e592ec5d22c691ce870" };
+          const expectedInventory = [
+            { file: "006-abort-lifecycle-tests.patch", target: "tests/ask-user-question.test.ts", preimage: "cc439bdc0dcdfa1f8ade309abc63c1f565c64d40", postimage: "e0afc181256c503efa3fb3fd2fb54899abe4cc0c" },
+            { file: "012-controls-ask-tests.patch", target: "tests/ask-user-question.test.ts", preimage: "e0afc181256c503efa3fb3fd2fb54899abe4cc0c", postimage: "4534749ee354b4aea1278652c865dcbb3ce3f6ae" },
+            { file: "002-blocked-event-herdr-integration-test.patch", target: "tests/gentle-ai.test.ts", preimage: "81f4a38ecdfd11b97ada81308f036e0d318726fe", postimage: "f379515bae4cdda5d4bd84bafbf761597dd7dfcd" },
+            { file: "013-controls-herdr-test.patch", target: "tests/gentle-ai.test.ts", preimage: "f379515bae4cdda5d4bd84bafbf761597dd7dfcd", postimage: "c660cb38d4612545db38ce2d11890731de5b3220" },
+            { file: "007-abort-lifecycle-producer.patch", target: "extensions/ask-user-question.ts", preimage: "52d6ff35296af67f1f4240ef5fc6df8bfe15dab6", postimage: "d7dea145b52cfe446083ca881be088b89f964ea6" },
+            { file: "014-controls-producer.patch", target: "extensions/ask-user-question.ts", preimage: "d7dea145b52cfe446083ca881be088b89f964ea6", postimage: "716f3f03a4fc42b2f9958cfccb425a23ec2fe1c9" },
+            { file: "008-abort-lifecycle-view.patch", target: "lib/questionnaire/questionnaire-view.ts", preimage: "61284f0110522f2e65a43271f9e23f5bfe350a72", postimage: "bfb3e5d871ac0918aa00c4c6ef8aa9bbd690eac1" },
+            { file: "011-controls-view.patch", target: "lib/questionnaire/questionnaire-view.ts", preimage: "bfb3e5d871ac0918aa00c4c6ef8aa9bbd690eac1", postimage: "5e7f058a727ce84c79b8f5a5571dcaf42163dd48" },
+            { file: "009-controls-multi-view-tests.patch", target: "tests/questionnaire-view.test.ts", preimage: "9ea1ebae3d9a42d3e1281352adb10c337ec9846a", postimage: "158fb1897e21776f3fa798c5e6ce99c51fd0336f" },
+            { file: "010-controls-existing-view-tests.patch", target: "tests/questionnaire-view.test.ts", preimage: "158fb1897e21776f3fa798c5e6ce99c51fd0336f", postimage: "26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d" },
+          ];
+          const expectedAllowed = ["extensions/ask-user-question.ts", "tests/ask-user-question.test.ts", "tests/gentle-ai.test.ts", "lib/questionnaire/questionnaire-view.ts", "tests/questionnaire-view.test.ts"];
+          const expectedProtected = ["extensions/gentle-ai.ts", "lib/native-fullscreen-interaction.ts"];
+          fail(base.schema === "gentle-pi.hosted-upstream-questionnaire-acquisition/v1", "base manifest schema changed");
+          for (const key of Object.keys(expectedBase)) fail(base[key] === expectedBase[key], `base ${key} changed`);
+          fail(manifest.schema === "gentle-pi.hosted-upstream-questionnaire-controls-green/v1", "controls GREEN manifest schema changed");
+          fail(manifest.baseManifest === ".github/workflows/fixtures/hosted-upstream-questionnaire.json", "controls GREEN base manifest changed");
+          for (const key of Object.keys(expectedBase)) fail(manifest.base?.[key] === expectedBase[key], `controls GREEN base ${key} changed`);
+          const composition = manifest.composition;
+          fail(composition.schema === "gentle-pi.hosted-upstream-questionnaire-composition/v2", "controls GREEN composition schema changed");
+          fail(composition.derivedDirectory === "derived" && composition.patchDirectory === "patches/questionnaire-upstream", "controls GREEN composition directories changed");
+          fail(JSON.stringify(composition.patchInventory) === JSON.stringify(expectedInventory), "controls GREEN patch inventory identity changed");
+          fail(JSON.stringify(composition.allowedTargets) === JSON.stringify(expectedAllowed), "controls GREEN allowed targets changed");
+          fail(JSON.stringify(composition.protectedTargets) === JSON.stringify(expectedProtected), "controls GREEN protected targets changed");
+          const patchRoot = join(artifact, composition.patchDirectory);
+          const outputRoot = join(artifact, composition.derivedDirectory);
+          await mkdir(patchRoot, { recursive: true });
+          for (const patch of expectedInventory) {
+            const patchPath = join(patchRoot, patch.file);
+            await copyFile(join(workspace, "tests/fixtures/upstream-questionnaire/patches", patch.file), patchPath);
+            const changed = execFileSync("git", ["-C", source, "apply", "--numstat", "--summary", patchPath], { encoding: "utf8" });
+            const changedPaths = changed.split("\n").filter((line) => line.includes("\t")).map((line) => line.slice(line.lastIndexOf("\t") + 1)).filter(Boolean);
+            fail(changedPaths.length === 1 && changedPaths[0] === patch.target, `controls GREEN changed path mismatch: ${patch.file}`);
+          }
+          fail(JSON.stringify((await readdir(patchRoot)).sort()) === JSON.stringify(expectedInventory.map((patch) => patch.file).sort()), "controls GREEN staged patch set changed");
+          await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest: composition });
+          console.log(`controls-green-composition-proof root=${outputRoot} base=${manifest.base.commit} patches=${expectedInventory.map((patch) => patch.file).join(",")} postimages=${expectedInventory.map((patch) => patch.postimage).join(",")}`);
+          NODE
+          grep -Fx "controls-green-composition-proof root=/artifact/controls-green/derived base=f2d9d073ffc2299eb501902753b42789f7cdc461 patches=006-abort-lifecycle-tests.patch,012-controls-ask-tests.patch,002-blocked-event-herdr-integration-test.patch,013-controls-herdr-test.patch,007-abort-lifecycle-producer.patch,014-controls-producer.patch,008-abort-lifecycle-view.patch,011-controls-view.patch,009-controls-multi-view-tests.patch,010-controls-existing-view-tests.patch postimages=e0afc181256c503efa3fb3fd2fb54899abe4cc0c,4534749ee354b4aea1278652c865dcbb3ce3f6ae,f379515bae4cdda5d4bd84bafbf761597dd7dfcd,c660cb38d4612545db38ce2d11890731de5b3220,d7dea145b52cfe446083ca881be088b89f964ea6,716f3f03a4fc42b2f9958cfccb425a23ec2fe1c9,bfb3e5d871ac0918aa00c4c6ef8aa9bbd690eac1,5e7f058a727ce84c79b8f5a5571dcaf42163dd48,158fb1897e21776f3fa798c5e6ce99c51fd0336f,26f9ff873cc88ee7f00c6d0eb78a3c34c33e546d" "$compose_log" >/dev/null
+
+      - name: Verify staged controls GREEN artifact is read-only
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          green_dir="$RUNNER_TEMP/questionnaire-upstream-controls-green"
+          derived_dir="$green_dir/controls-green/derived"
+          test -d "$derived_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=256m --pids-limit=64 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            /bin/sh -eu -c '
+              test -f /derived/tests/ask-user-question.test.ts
+              test -f /derived/tests/gentle-ai.test.ts
+              test -f /derived/extensions/ask-user-question.ts
+              test -f /derived/lib/questionnaire/questionnaire-view.ts
+              test -f /derived/tests/questionnaire-view.test.ts
+              if touch /derived/.controls-green-read-only-probe 2>/dev/null; then exit 1; fi
+            '
+
+      - name: Run controls GREEN contract in read-only isolation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition"
+          green_dir="$RUNNER_TEMP/questionnaire-upstream-controls-green"
+          derived_dir="$green_dir/controls-green/derived"
+          test -d "$derived_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              if touch /derived/.controls-green-test-read-only-probe 2>/dev/null; then exit 1; fi
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /derived/extensions/ask-user-question.ts /derived/lib/questionnaire/questionnaire-view.ts \
+                /derived/tests/ask-user-question.test.ts /derived/tests/questionnaire-view.test.ts
+              /usr/local/bin/node /derived/scripts/check-types.mjs
+              ask_log=/tmp/uqa05-green-ask.tap
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts >"$ask_log" 2>&1
+              tail -n 240 "$ask_log"
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$ask_log")" -eq 98
+              test "$(grep -Ec "^ok [0-9]+ - " "$ask_log")" -eq 98
+              test "$(grep -Ec "^not ok [0-9]+ - " "$ask_log")" -eq 0
+              grep -Fx "1..98" "$ask_log" >/dev/null
+              grep -Fx "# tests 105" "$ask_log" >/dev/null
+              grep -Fx "# pass 105" "$ask_log" >/dev/null
+              grep -Fx "# fail 0" "$ask_log" >/dev/null
+              grep -Fx "# cancelled 0" "$ask_log" >/dev/null
+              grep -Fx "# skipped 0" "$ask_log" >/dev/null
+              grep -Fx "# todo 0" "$ask_log" >/dev/null
+              cat > /tmp/uqa05-green-ask-names <<EOF
+          ask_user_question submits an empty multi-select through explicit Submit
+          ask_user_question returns partial answers for committed options on cancellation
+          ask_user_question preserves custom and multi answers on partial cancellation
+          ask_user_question omits uncommitted state on cancellation
+          ask_user_question retains committed answers when a replacement draft is cancelled
+          ask_user_question reports cancellation without answers
+          ask_user_question keeps the native blocked lifecycle private and balanced
+          ask_user_question returns empty cancellation before mounting an already-aborted request
+          ask_user_question aborts a mounted questionnaire with committed partial answers
+          ask_user_question aborts during a custom draft without committing the draft
+          ask_user_question abort wins over later submit, cancel, and repeated abort
+          ask_user_question keeps a completed submit ahead of later abort and cancel
+          ask_user_question keeps a completed cancel ahead of later abort and submit
+          ask_user_question closes before a deferred custom factory can mount a dock
+          ask_user_question removes abort listeners while preserving a custom UI rejection
+          actual questionnaire producer drives Herdr through a private balanced compatibility lifecycle
+          EOF
+              while IFS= read -r name; do
+                test -n "$name"
+                grep -Eq "^ok [0-9]+ - ${name}$" "$ask_log"
+              done < /tmp/uqa05-green-ask-names
+              view_log=/tmp/uqa05-green-view.tap
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/questionnaire-view.test.ts >"$view_log" 2>&1
+              tail -n 160 "$view_log"
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$view_log")" -eq 23
+              test "$(grep -Ec "^ok [0-9]+ - " "$view_log")" -eq 23
+              test "$(grep -Ec "^not ok [0-9]+ - " "$view_log")" -eq 0
+              grep -Fx "1..23" "$view_log" >/dev/null
+              grep -Fx "# tests 23" "$view_log" >/dev/null
+              grep -Fx "# pass 23" "$view_log" >/dev/null
+              grep -Fx "# fail 0" "$view_log" >/dev/null
+              grep -Fx "# cancelled 0" "$view_log" >/dev/null
+              grep -Fx "# skipped 0" "$view_log" >/dev/null
+              grep -Fx "# todo 0" "$view_log" >/dev/null
+              cat > /tmp/uqa05-green-view-names <<EOF
+          renders explicit Submit and Cancel rows after the custom row
+          selecting an option requires explicit submit and cancel remains independently reachable
+          multi-select submit preserves an empty selection and cancel remains answerless
+          real key sequences drive the cursor and commit in legacy and application-cursor form
+          the injected KeybindingsManager drives the same navigation and commit
+          single-select commits on Enter and advances to the next unanswered question
+          multi-select toggles with space and requires a non-empty selection to commit
+          pointer press focuses a row and click commits it
+          pointer click toggles a multi-select option instead of committing
+          EOF
+              while IFS= read -r name; do
+                test -n "$name"
+                grep -Eq "^ok [0-9]+ - ${name}$" "$view_log"
+              done < /tmp/uqa05-green-view-names
+            '
+
       - name: Verify final hosted candidate checkout cleanliness
         if: always()
         shell: bash
