@@ -2245,6 +2245,119 @@ jobs:
               grep -Fx "# fail 1" "$log" >/dev/null
             '
 
+      - name: Compose UQA-08a viewport reachability GREEN artifact offline
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          source_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-reachability-red/derived"
+          green_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-reachability-green"
+          test -d "$source_dir"
+          test ! -e "$green_dir"
+          mkdir "$green_dir"
+          chmod 0777 "$green_dir"
+          docker run --rm -i --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$source_dir,target=/base-red,readonly" \
+            --mount "type=bind,source=$green_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --input-type=module <<'NODE'
+          import { execFileSync } from "node:child_process";
+          import { copyFile, mkdir } from "node:fs/promises";
+          import { join } from "node:path";
+          import { composeUpstreamQuestionnaireArtifact } from "/workspace/tests/fixtures/hosted-compose-upstream-questionnaire.ts";
+
+          const source = "/base-red";
+          const artifact = "/artifact";
+          const patch = {
+            file: "037-viewport-reachability-view.patch",
+            target: "lib/questionnaire/questionnaire-view.ts",
+            preimage: "77d168d7ac7ff31baa48998136c43f2a40ba895b",
+            postimage: "f778b55a526396535a349af68a2f1066064edaf8",
+          };
+          const actual = execFileSync("git", ["-C", source, "hash-object", "--no-filters", "--", patch.target], { encoding: "utf8" }).trim();
+          if (actual !== patch.preimage) throw new Error(`viewport GREEN preimage changed: ${actual}`);
+          const patchRoot = join(artifact, "patches/questionnaire-upstream");
+          await mkdir(patchRoot, { recursive: true });
+          await copyFile(join("/workspace/tests/fixtures/upstream-questionnaire/patches", patch.file), join(patchRoot, patch.file));
+          await composeUpstreamQuestionnaireArtifact({
+            sourceRoot: source,
+            patchRoot,
+            outputRoot: join(artifact, "derived"),
+            manifest: {
+              schema: "gentle-pi.hosted-upstream-questionnaire-composition/v2",
+              derivedDirectory: "derived",
+              patchDirectory: "patches/questionnaire-upstream",
+              patchInventory: [patch],
+              allowedTargets: [patch.target],
+              protectedTargets: ["lib/native-fullscreen-interaction.ts"],
+            },
+          });
+          console.log(`viewport-reachability-green-proof preimage=${patch.preimage} postimage=${patch.postimage}`);
+          NODE
+
+      - name: Run UQA-08a viewport reachability GREEN in read-only isolation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition"
+          red_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-reachability-red/derived"
+          derived_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-reachability-green/derived"
+          test -d "$red_dir" && test -d "$derived_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --mount "type=bind,source=$red_dir,target=/red,readonly" \
+            --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              if touch /derived/.viewport-green-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /red/.viewport-red-read-only-probe 2>/dev/null; then exit 1; fi
+              cmp /red/lib/native-fullscreen-interaction.ts /derived/lib/native-fullscreen-interaction.ts
+              grep "^test(\"" /red/tests/questionnaire-view.test.ts | cut -d\" -f2 >/tmp/red-view-names
+              grep "^test(\"" /derived/tests/questionnaire-view.test.ts | cut -d\" -f2 >/tmp/green-view-names
+              cmp /tmp/red-view-names /tmp/green-view-names
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /derived/extensions/ask-user-question.ts /derived/lib/questionnaire/questionnaire-view.ts \
+                /derived/tests/ask-user-question.test.ts /derived/tests/questionnaire-view.test.ts
+              /usr/local/bin/node /derived/scripts/check-types.mjs
+              ask_log=/tmp/uqa08a-viewport-green-ask.tap
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap \
+                /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts >"$ask_log" 2>&1
+              cat "$ask_log"
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$ask_log")" -eq 101
+              test "$(grep -Ec "^ok [0-9]+ - " "$ask_log")" -eq 101
+              grep -Fx "# tests 108" "$ask_log" >/dev/null
+              grep -Fx "# pass 108" "$ask_log" >/dev/null
+              grep -Fx "# fail 0" "$ask_log" >/dev/null
+              view_log=/tmp/uqa08a-viewport-green-view.tap
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap \
+                /derived/tests/questionnaire-view.test.ts >"$view_log" 2>&1
+              cat "$view_log"
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$view_log")" -eq 37
+              test "$(grep -Ec "^ok [0-9]+ - " "$view_log")" -eq 37
+              grep -Fx "1..37" "$view_log" >/dev/null
+              grep -Fx "# tests 37" "$view_log" >/dev/null
+              grep -Fx "# pass 37" "$view_log" >/dev/null
+              grep -Fx "# fail 0" "$view_log" >/dev/null
+            '
+
       - name: Verify final hosted candidate checkout cleanliness
         if: always()
         shell: bash

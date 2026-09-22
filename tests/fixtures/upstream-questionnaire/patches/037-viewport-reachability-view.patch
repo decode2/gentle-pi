@@ -1,0 +1,34 @@
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -377,8 +377,29 @@
+ 		push("");
+ 		push(this.hint());
+ 
+-		this.lineOwners = owners;
+-		return lines;
++		const bounded = this.boundViewport(lines, owners);
++		this.lineOwners = bounded.owners;
++		return bounded.lines;
++	}
++
++	/** Keep the keyboard-focused row reachable without growing beyond the terminal. */
++	private boundViewport(
++		lines: string[],
++		owners: Array<LineOwner | undefined>,
++	): { lines: string[]; owners: Array<LineOwner | undefined> } {
++		const maxRows = Math.max(1, this.tui.terminal.rows);
++		if (lines.length <= maxRows) return { lines, owners };
++
++		const state = this.states[this.focusedQuestion];
++		const focusedLine = owners.findIndex((owner) =>
++			owner?.questionIndex === this.focusedQuestion && owner.rowIndex === state?.cursor
++		);
++		const anchor = focusedLine < 0 ? 0 : focusedLine;
++		const start = Math.max(0, Math.min(lines.length - maxRows, anchor - Math.floor(maxRows / 2)));
++		return {
++			lines: lines.slice(start, start + maxRows),
++			owners: owners.slice(start, start + maxRows),
++		};
+ 	}
+ 
+ 	override invalidate(): void {
