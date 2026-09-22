@@ -1,0 +1,88 @@
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -21,7 +21,7 @@
+ }
+ 
+ type CustomFactory = (
+-	tui: { requestRender(): void },
++	tui: { terminal: { rows: number }; requestRender(): void },
+ 	theme: Theme,
+ 	keybindings: unknown,
+ 	done: (value: unknown) => void,
+@@ -86,13 +86,33 @@
+ 	return { tool, slot: target, emitted };
+ }
+ 
+-function tuiContext(inputs: readonly string[], rendered?: { value: string }, capture?: { value: unknown }) {
++const testTui = { terminal: { rows: 24 }, requestRender() {} };
++
++const customSubmitKeybindings = {
++	getUserBindings: () => ({ "tui.input.submit": "ctrl+s" }),
++	matches(data: string, binding: string): boolean {
++		if (binding === "tui.input.submit") return data === "\x13";
++		if (binding === "tui.select.down") return data === "\x1b[B";
++		if (binding === "tui.select.up") return data === "\x1b[A";
++		if (binding === "tui.select.confirm") return data === "\r";
++		if (binding === "tui.select.cancel") return data === "\x1b";
++		if (binding === "tui.input.tab") return data === "\t";
++		return false;
++	},
++};
++
++function tuiContext(
++	inputs: readonly string[],
++	rendered?: { value: string },
++	capture?: { value: unknown },
++	keybindings: unknown = {},
++) {
+ 	return {
+ 		mode: "tui",
+ 		ui: {
+ 			custom: async (factory: CustomFactory) => {
+ 				let result: unknown;
+-				const component = factory({ requestRender() {} }, theme, {}, (value) => {
++				const component = factory(testTui, theme, keybindings, (value) => {
+ 					result = value;
+ 				});
+ 				if (rendered) rendered.value = component.render(100).join("\n");
+@@ -300,7 +320,7 @@
+ 	const result = await run(
+ 		tool,
+ 		{ questions: single() },
+-		tuiContext(["\x1b[B", "\x1b[B", "\r", "custom text", "\x1b", "\x1b[B", "\x1b[B", "\x1b[B", "\r"]),
++		tuiContext(["\x1b[B", "\x1b[B", "\r", "custom text", "\x1b", "\x1b[B", "\x1b[B", "\r"]),
+ 	);
+ 
+ 	assert.equal(result.content[0]?.text, "1. Proceed? — (custom) custom text");
+@@ -319,7 +339,7 @@
+ 	const result = await run(
+ 		tool,
+ 		{ questions },
+-		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\x1b", "\x1b[B", "\x1b[B", "\x1b[B", "\r"]),
++		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\x1b", "\x1b[B", "\x1b[B", "\r"]),
+ 	);
+ 
+ 	assert.equal(result.content[0]?.text, "1. Pick? — (custom) free note — selected: One");
+@@ -502,7 +522,12 @@
+ 	const result = await run(
+ 		tool,
+ 		{ questions },
+-		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\r", "\x1b"], undefined, selection),
++		tuiContext(
++			[" ", "\x1b[B", "\x1b[B", "\r", "free note", "\x13", "\x1b"],
++			undefined,
++			selection,
++			customSubmitKeybindings,
++		),
+ 	);
+ 
+ 	assert.deepEqual(selection.value, { cancelled: true, answers: expectedAnswers });
+@@ -523,7 +548,7 @@
+ 		ui: {
+ 			custom: async (factory: CustomFactory) => {
+ 				let selection: unknown;
+-				const component = factory({ requestRender() {} }, theme, {}, (value) => { selection = value; });
++				const component = factory(testTui, theme, {}, (value) => { selection = value; });
+ 				component.handleInput?.(" ");
+ 				component.handleInput?.("\x1b[B");
+ 				component.handleInput?.("\x1b[B");
