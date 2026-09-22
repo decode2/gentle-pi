@@ -1,0 +1,21 @@
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -913,3 +913,18 @@
+ 	assertViewport("Cancel");
+ 	assert.match(plain(render(view, 20)), /❯ Cancel/);
+ });
++
++test("short viewport keeps the active editor visible under a long wrapped question", () => {
++	const view = new QuestionnaireView({
++		questions: [question("A deliberately long question ".repeat(18), [option("Only route")])],
++		theme,
++		tui: { terminal: { rows: 10 }, requestRender() {} } as TUI,
++	});
++	view.handleInput(KEY.down[0]); // custom response
++	view.handleInput(KEY.enter);
++	view.handleInput("draft-visible");
++	const lines = view.render(20);
++	assert.ok(lines.length <= 10);
++	assertFits(view, 20);
++	assert.match(plain(lines.join("\n")), /draft-visible/);
++});
