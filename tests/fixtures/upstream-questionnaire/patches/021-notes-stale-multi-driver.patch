@@ -1,0 +1,14 @@
+diff --git a/tests/questionnaire-view.test.ts b/tests/questionnaire-view.test.ts
+index bafb34ee73d201eaaedceda404efe874e461d331..c84be45f48c13771135a698db4f1a6a79f4be13e 100644
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -552,8 +552,7 @@ test("multi-select submit uses the latest toggles after an earlier commit", () =
+ 	}
+ 	assert.match(plain(render(view)), /❯ \[ \] Two/);
+ 	view.handleInput(KEY.space);
+-	view.handleInput(KEY.down[0]);
+-	view.handleInput(KEY.down[0]);
++	moveCursorTo(view, "Submit");
+ 	assert.match(plain(render(view)), /❯ Submit/);
+ 	view.handleInput(KEY.enter);
+ 
