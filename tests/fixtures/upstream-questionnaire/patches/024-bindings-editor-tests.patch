@@ -1,0 +1,200 @@
+diff --git a/tests/questionnaire-view.test.ts b/tests/questionnaire-view.test.ts
+index c84be45f48c13771135a698db4f1a6a79f4be13e..2c94588545908d1c1bab18e5f0056b3dfdc354f4 100644
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -2,9 +2,13 @@ import assert from "node:assert/strict";
+ import test from "node:test";
+ import {
+ 	CURSOR_MARKER,
++	getKeybindings,
+ 	KeybindingsManager,
++	setKeybindings,
+ 	TUI_KEYBINDINGS,
+ 	visibleWidth,
++	type KeybindingsConfig,
++	type TUI,
+ 	type TuiMouseEvent,
+ } from "@earendil-works/pi-tui";
+ import {
+@@ -43,6 +47,8 @@ const two = (): QuestionData[] => [
+ 	question("Second?", [option("Gamma"), option("Delta")], { header: "Second" }),
+ ];
+ 
++const testTui = { terminal: { rows: 24 }, requestRender() {} } as TUI;
++
+ function createView(
+ 	questions: QuestionData[],
+ 	options: { onComplete?: (result: QuestionnaireResult) => void; keybindings?: KeybindingsManager } = {},
+@@ -50,9 +56,26 @@ function createView(
+ 	return new QuestionnaireView({
+ 		questions,
+ 		theme,
++		tui: testTui,
+ 		onComplete: options.onComplete,
+ 		...(options.keybindings === undefined ? {} : { keybindings: options.keybindings }),
+-	});
++	} as ConstructorParameters<typeof QuestionnaireView>[0] & { tui: TUI });
++}
++
++function withInstalledKeybindings(
++	userBindings: KeybindingsConfig,
++	exercise: (keybindings: KeybindingsManager) => void,
++): void {
++	const previous = getKeybindings();
++	const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, userBindings);
++	try {
++		setKeybindings(keybindings);
++		assert.strictEqual(getKeybindings(), keybindings);
++		exercise(keybindings);
++	} finally {
++		setKeybindings(previous);
++	}
++	assert.strictEqual(getKeybindings(), previous);
+ }
+ 
+ function viewWithResult(questions: QuestionData[], keybindings?: KeybindingsManager) {
+@@ -712,3 +735,144 @@ test("omits whitespace-only notes and keeps a global note on answerless cancella
+ 	cancelled.view.handleInput(KEY.enter);
+ 	assert.deepEqual(cancelled.completed, [{ cancelled: true, answers: [], globalNote: "context only" }]);
+ });
++
++test("configured select bindings remap navigation and explicit disabled arrays do not fall back", () => {
++	const remapped = new KeybindingsManager(TUI_KEYBINDINGS, {
++		"tui.select.down": "ctrl+n",
++		"tui.select.confirm": "ctrl+y",
++	});
++	const { view, completed } = viewWithResult(single(), remapped);
++	view.handleInput(KEY.down[0]);
++	assert.match(render(view), /❯ Alpha/);
++	view.handleInput("\x0e");
++	assert.match(render(view), /❯ Beta/);
++	view.handleInput(KEY.enter);
++	assert.deepEqual(view.getResult().answers, []);
++	view.handleInput("\x19");
++	moveCursorTo(view, "Submit", "\x0e");
++	view.handleInput("\x19");
++	assert.equal(completed[0]?.answers[0]?.answer, "Beta");
++
++	const disabled = viewWithResult(single(), new KeybindingsManager(TUI_KEYBINDINGS, {
++		"tui.select.down": [],
++	}));
++	disabled.view.handleInput(KEY.down[0]);
++	assert.match(render(disabled.view), /❯ Alpha/);
++});
++
++test("default editor keys create multiline custom text and visible Submit commits the preserved draft", () => {
++	withInstalledKeybindings({}, (keybindings) => {
++		const { view, completed } = viewWithResult(single(), keybindings);
++		view.handleInput(KEY.down[0]);
++		view.handleInput(KEY.down[0]);
++		view.handleInput(KEY.enter);
++		view.handleInput("alpha");
++		view.handleInput(KEY.enter);
++		view.handleInput("beta");
++		view.handleInput("\x1b[13;2~");
++		view.handleInput("gamma");
++		view.handleInput("\x0a");
++		view.handleInput("delta");
++		assert.match(plain(render(view)), /alpha[\s\S]*beta[\s\S]*gamma[\s\S]*delta/);
++		view.handleInput(KEY.escape);
++		moveCursorTo(view, "Submit");
++		view.handleInput(KEY.enter);
++		assert.deepEqual(completed, [{
++			cancelled: false,
++			answers: [{
++				questionIndex: 0,
++				question: "Proceed?",
++				kind: "custom",
++				answer: "alpha\nbeta\ngamma\ndelta",
++			}],
++		}]);
++	});
++});
++
++test("remapped newline submit and tab bindings preserve a multiline draft across questions", () => {
++	withInstalledKeybindings({
++		"tui.input.newLine": "ctrl+n",
++		"tui.input.submit": "ctrl+s",
++		"tui.input.tab": "ctrl+t",
++	}, (keybindings) => {
++		const { view } = viewWithResult(two(), keybindings);
++		view.handleInput(KEY.down[0]);
++		view.handleInput(KEY.down[0]);
++		view.handleInput(KEY.enter);
++		view.handleInput("first");
++		view.handleInput("\x0e");
++		view.handleInput("second");
++		view.handleInput("\x14");
++		assert.equal(view.activeQuestion, 1);
++		view.handleInput(KEY.shiftTab);
++		view.handleInput(KEY.enter);
++		assert.match(plain(render(view)), /first[\s\S]*second/);
++		view.handleInput("\x13");
++		assert.deepEqual(view.getResult().answers, [{
++			questionIndex: 0,
++			question: "First?",
++			kind: "custom",
++			answer: "first\nsecond",
++		}]);
++	});
++});
++
++test("explicit disabled input bindings leave Enter newline aliases and Tab with the editor", () => {
++	withInstalledKeybindings({
++		"tui.input.newLine": [],
++		"tui.input.submit": [],
++		"tui.input.tab": [],
++	}, (keybindings) => {
++		const { view, completed } = viewWithResult(two(), keybindings);
++		view.handleInput(KEY.down[0]);
++		view.handleInput(KEY.down[0]);
++		view.handleInput(KEY.enter);
++		view.handleInput("draft");
++		view.handleInput(KEY.enter);
++		view.handleInput("\x1b[13;2~");
++		view.handleInput("\x0a");
++		view.handleInput(KEY.tab);
++		assert.equal(view.activeQuestion, 0);
++		assert.match(plain(render(view)), /draft/);
++		assert.equal(completed.length, 0);
++		view.handleInput(KEY.escape);
++		assert.match(render(view), /❯ Type something\./);
++	});
++});
++
++test("newline wins when configured newline and submit bindings collide", () => {
++	withInstalledKeybindings({
++		"tui.input.newLine": "ctrl+x",
++		"tui.input.submit": "ctrl+x",
++	}, (keybindings) => {
++		const { view } = viewWithResult(single(), keybindings);
++		view.handleInput(KEY.down[0]);
++		view.handleInput(KEY.down[0]);
++		view.handleInput(KEY.enter);
++		view.handleInput("left");
++		view.handleInput("\x18");
++		view.handleInput("right");
++		assert.match(plain(render(view)), /left[\s\S]*right/);
++		assert.deepEqual(view.getResult().answers, []);
++	});
++});
++
++test("the multiline editor honors configured editing bindings before custom-answer commit", () => {
++	withInstalledKeybindings({
++		"tui.editor.deleteToLineStart": "ctrl+d",
++		"tui.input.newLine": "ctrl+n",
++		"tui.input.submit": "ctrl+s",
++	}, (keybindings) => {
++		const { view } = viewWithResult(single(), keybindings);
++		view.handleInput(KEY.down[0]);
++		view.handleInput(KEY.down[0]);
++		view.handleInput(KEY.enter);
++		view.handleInput("alpha");
++		view.handleInput("\x0e");
++		view.handleInput("beta");
++		view.handleInput("\x04");
++		view.handleInput("tail");
++		view.handleInput("\x13");
++		assert.equal(view.getResult().answers[0]?.answer, "alpha\ntail");
++	});
++});
