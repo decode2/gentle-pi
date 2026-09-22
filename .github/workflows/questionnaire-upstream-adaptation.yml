@@ -1395,7 +1395,7 @@ jobs:
           renders explicit Submit and Cancel rows after the custom row
           selecting an option requires explicit submit and cancel remains independently reachable
           multi-select submit preserves an empty selection and cancel remains answerless
-          real key sequences drive the cursor and commit in legacy and application-configured keybindings
+          real key sequences drive the cursor and commit in legacy and application-cursor form
           the injected KeybindingsManager drives the same navigation and commit
           single-select commits on Enter and advances to the next unanswered question
           multi-select toggles with space and requires a non-empty selection to commit
