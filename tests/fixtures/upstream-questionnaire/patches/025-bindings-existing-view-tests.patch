@@ -1,0 +1,54 @@
+diff --git a/tests/questionnaire-view.test.ts b/tests/questionnaire-view.test.ts
+index 2c94588545908d1c1bab18e5f0056b3dfdc354f4..c23951e9214b8105c238fc1612a2e8e5168603b7 100644
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -268,7 +268,8 @@ test("multi-select toggles with space and requires a non-empty selection to comm
+ });
+ 
+ test("custom row opens the editor, empty submit returns, and the draft survives a tab switch", () => {
+-	const { view, completed } = viewWithResult(two());
++	const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.input.submit": "ctrl+s" });
++	const { view, completed } = viewWithResult(two(), keybindings);
+ 
+ 	// Move to the custom row on question one and open the editor.
+ 	view.handleInput(KEY.down[0]);
+@@ -278,7 +279,7 @@ test("custom row opens the editor, empty submit returns, and the draft survives
+ 	assert.match(render(view), /> /);
+ 
+ 	view.handleInput("   ");
+-	view.handleInput(KEY.enter);
++	view.handleInput("\x13");
+ 	assert.equal(completed.length, 0, "a whitespace-only submission stays uncommitted");
+ 	assert.doesNotMatch(render(view), /Custom response/);
+ 
+@@ -292,7 +293,7 @@ test("custom row opens the editor, empty submit returns, and the draft survives
+ 	view.handleInput(KEY.enter); // still on the custom row
+ 	assert.match(plain(render(view)), /draft text/, "the custom draft is restored on reopen");
+ 
+-	view.handleInput(KEY.enter);
++	view.handleInput("\x13");
+ 	assert.equal(completed.length, 0, "one of two questions answered is not completion");
+ 	assert.deepEqual(view.getResult().answers, [
+ 		{ questionIndex: 0, question: "First?", kind: "custom", answer: "draft text" },
+@@ -300,7 +301,11 @@ test("custom row opens the editor, empty submit returns, and the draft survives
+ });
+ 
+ test("multi-select can commit a custom answer with the toggled options", () => {
+-	const { view } = viewWithResult([question("Pick?", [option("One"), option("Two")], { multiSelect: true })]);
++	const keybindings = new KeybindingsManager(TUI_KEYBINDINGS, { "tui.input.submit": "ctrl+s" });
++	const { view } = viewWithResult(
++		[question("Pick?", [option("One"), option("Two")], { multiSelect: true })],
++		keybindings,
++	);
+ 	view.handleInput(KEY.space);
+ 	view.handleInput(KEY.down[0]);
+ 	view.handleInput(KEY.down[0]);
+@@ -308,7 +313,7 @@ test("multi-select can commit a custom answer with the toggled options", () => {
+ 
+ 	assert.match(render(view), /Custom response/);
+ 	view.handleInput("free note");
+-	view.handleInput(KEY.enter);
++	view.handleInput("\x13");
+ 
+ 	assert.deepEqual(view.getResult().answers, [
+ 		{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "free note", selected: ["One"] },

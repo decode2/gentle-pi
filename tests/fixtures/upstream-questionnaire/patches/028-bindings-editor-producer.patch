@@ -1,0 +1,12 @@
+diff --git a/extensions/ask-user-question.ts b/extensions/ask-user-question.ts
+index 236ce72f8147a24041c28195235a56ec500256f0..037574cd331f6ebb4cfb001bc0f6df5d905783d9 100644
+--- a/extensions/ask-user-question.ts
++++ b/extensions/ask-user-question.ts
+@@ -181,6 +181,7 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
+ 					view = new QuestionnaireView({
+ 						questions: params.questions,
+ 						theme,
++						tui,
+ 						keybindings,
+ 						onComplete: (result) => {
+ 							removeAbortListener();

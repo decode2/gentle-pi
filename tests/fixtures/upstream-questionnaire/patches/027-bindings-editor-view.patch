@@ -1,0 +1,216 @@
+diff --git a/lib/questionnaire/questionnaire-view.ts b/lib/questionnaire/questionnaire-view.ts
+index e9269108f2fc2644a7bfee638f155836b3ddb4d1..9b5c03d47b4be985a2b2772f47a987fb3b3ee49b 100644
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -1,12 +1,14 @@
+ import {
+ 	Container,
+-	Input,
++	Editor,
+ 	isKeyRelease,
+ 	matchesKey,
+ 	Text,
+ 	visibleWidth,
++	type EditorTheme,
+ 	type Focusable,
+ 	type KeybindingsManager,
++	type TUI,
+ 	type TuiMouseEvent,
+ } from "@earendil-works/pi-tui";
+ import { CUSTOM_ROW_LABEL, type QuestionData } from "./schema.ts";
+@@ -49,6 +51,7 @@ export interface QuestionnaireResult {
+ export interface QuestionnaireViewOptions {
+ 	questions: QuestionData[];
+ 	theme: QuestionnaireTheme;
++	tui: TUI;
+ 	keybindings?: KeybindingsManager;
+ 	onComplete?: (result: QuestionnaireResult) => void;
+ }
+@@ -68,41 +71,51 @@ interface LineOwner {
+ 	rowIndex: number;
+ }
+ 
+-/** Small inline text editor for the free-text row; owns an {@link Input}. */
++function editorTheme(theme: QuestionnaireTheme): EditorTheme {
++	const color = (name: string) => (text: string) => theme.fg(name, text);
++	return {
++		borderColor: color("border"),
++		selectList: {
++			selectedPrefix: color("accent"),
++			selectedText: color("accent"),
++			description: color("dim"),
++			scrollInfo: color("dim"),
++			noMatch: color("muted"),
++		},
++	};
++}
++
++/** Small inline multiline editor for custom answers and notes. */
+ class CustomTextEditor extends Container {
+-	private readonly input = new Input({ prompt: "> ", placeholder: "Type your response" });
+-	private readonly keybindings: KeybindingsManager | undefined;
+-	private readonly onSubmit: (value: string) => void;
+-	private readonly onCancel: () => void;
++	private readonly editor: Editor;
+ 
+ 	constructor(
+ 		title: string,
+-		keybindings: KeybindingsManager | undefined,
+-		onSubmit: (value: string) => void,
+-		onCancel: () => void,
++		tui: TUI,
++		theme: QuestionnaireTheme,
++		private readonly keybindings: KeybindingsManager | undefined,
++		private readonly onSubmit: (value: string) => void,
++		private readonly onCancel: () => void,
+ 	) {
+ 		super();
+-		this.keybindings = keybindings;
+-		this.onSubmit = onSubmit;
+-		this.onCancel = onCancel;
+-		this.input.focused = false;
++		this.editor = new Editor(tui, editorTheme(theme), { paddingX: 1 });
++		this.editor.disableSubmit = true;
++		this.editor.onChange = () => this.invalidate();
+ 		this.addChild(new Text(title, 1, 0));
+-		this.addChild(this.input);
+-		this.addChild(new Text("Enter to submit • Esc to return to choices", 1, 0));
++		this.addChild(this.editor);
++		this.addChild(new Text("Enter for newline • configured submit saves • Esc returns", 1, 0));
+ 	}
+ 
+ 	setFocused(focused: boolean): void {
+-		this.input.focused = focused;
++		this.editor.focused = focused;
+ 	}
+ 
+ 	getValue(): string {
+-		return this.input.getValue();
++		return this.editor.getText();
+ 	}
+ 
+ 	setValue(value: string): void {
+-		this.input.setValue(value);
+-		// Place the caret at the end of a restored draft so typing appends to it.
+-		this.input.handleInput("\x1b[F");
++		this.editor.setText(value);
+ 		this.invalidate();
+ 	}
+ 
+@@ -112,18 +125,50 @@ class CustomTextEditor extends Container {
+ 			this.onCancel();
+ 			return;
+ 		}
+-		if (this.matches(data, "tui.input.submit")) {
+-			this.onSubmit(this.input.getValue());
++
++		const configured = this.hasExplicit("tui.input.newLine") || this.hasExplicit("tui.input.submit");
++		if (!configured && (matchesKey(data, "enter") || this.matches(data, "tui.input.newLine"))) {
++			this.insertNewline();
++			return;
++		}
++		if (configured && this.matches(data, "tui.input.newLine")) {
++			this.insertNewline();
++			return;
++		}
++		if (configured && this.matches(data, "tui.input.submit")) {
++			this.onSubmit(this.editor.getText());
+ 			return;
+ 		}
+-		this.input.handleInput(data);
++		if (configured && this.isNativeInputAlias(data)) return;
++
++		this.editor.handleInput(data);
++		this.invalidate();
++	}
++
++	private insertNewline(): void {
++		this.editor.insertTextAtCursor("\n");
+ 		this.invalidate();
+ 	}
+ 
+-	private matches(data: string, binding: "tui.select.cancel" | "tui.input.submit"): boolean {
++	private hasExplicit(binding: "tui.input.newLine" | "tui.input.submit"): boolean {
++		return this.keybindings !== undefined
++			&& Object.prototype.hasOwnProperty.call(this.keybindings.getUserBindings(), binding);
++	}
++
++	private isNativeInputAlias(data: string): boolean {
++		return matchesKey(data, "enter") || matchesKey(data, "shift+enter") || matchesKey(data, "ctrl+j")
++			|| data === "\x1b\r" || data === "\x1b[13;2~"
++			|| (data.length > 1 && data.includes("\x1b") && data.includes("\r"));
++	}
++
++	private matches(
++		data: string,
++		binding: "tui.select.cancel" | "tui.input.newLine" | "tui.input.submit",
++	): boolean {
+ 		if (this.keybindings?.matches) return this.keybindings.matches(data, binding);
+-		const key = binding === "tui.select.cancel" ? "escape" : "enter";
+-		return matchesKey(data, key);
++		if (binding === "tui.select.cancel") return matchesKey(data, "escape");
++		if (binding === "tui.input.newLine") return matchesKey(data, "shift+enter") || matchesKey(data, "ctrl+j");
++		return matchesKey(data, "enter");
+ 	}
+ }
+ 
+@@ -144,6 +189,7 @@ class CustomTextEditor extends Container {
+ export class QuestionnaireView extends Container implements Focusable {
+ 	private readonly questions: QuestionData[];
+ 	private readonly theme: QuestionnaireTheme;
++	private readonly tui: TUI;
+ 	private readonly keybindings: KeybindingsManager | undefined;
+ 	private readonly onComplete: ((result: QuestionnaireResult) => void) | undefined;
+ 	private readonly states: QuestionState[];
+@@ -160,6 +206,7 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		super();
+ 		this.questions = options.questions;
+ 		this.theme = options.theme;
++		this.tui = options.tui;
+ 		this.keybindings = options.keybindings;
+ 		this.onComplete = options.onComplete;
+ 		this.states = options.questions.map(() => ({
+@@ -557,16 +604,30 @@ export class QuestionnaireView extends Container implements Focusable {
+ 			const state = this.states[questionIndex];
+ 			if (!state) continue;
+ 			if (state.answer !== undefined && (!question.multiSelect || state.answer.kind !== "multi")) continue;
++			const selected = [...state.toggled]
++				.filter((index) => index < question.options.length)
++				.sort((left, right) => left - right)
++				.map((index) => question.options[index]!.label);
++			const customDraft = state.customDraft.trim();
++			if (state.cursor === question.options.length && customDraft.length > 0) {
++				synthesized.push({
++					state,
++					answer: {
++						questionIndex,
++						question: question.question,
++						kind: "custom",
++						answer: customDraft,
++						...(question.multiSelect && selected.length > 0 ? { selected } : {}),
++					},
++				});
++				continue;
++			}
+ 			if (!question.multiSelect) {
+ 				this.focusedQuestion = questionIndex;
+ 				state.cursor = 0;
+ 				this.invalidate();
+ 				return;
+ 			}
+-			const selected = [...state.toggled]
+-				.filter((index) => index < question.options.length)
+-				.sort((left, right) => left - right)
+-				.map((index) => question.options[index]!.label);
+ 			synthesized.push({
+ 				state,
+ 				answer: {
+@@ -592,6 +653,8 @@ export class QuestionnaireView extends Container implements Focusable {
+ 		this.editing = { questionIndex, kind };
+ 		this.editor = new CustomTextEditor(
+ 			title,
++			this.tui,
++			this.theme,
+ 			this.keybindings,
+ 			(value) => kind === "custom" ? this.submitCustom(value) : this.closeEditor(),
+ 			() => this.closeEditor(),
