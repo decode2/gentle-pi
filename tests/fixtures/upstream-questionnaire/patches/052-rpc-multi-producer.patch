@@ -1,0 +1,55 @@
+diff --git a/extensions/ask-user-question.ts b/extensions/ask-user-question.ts
+index 2bcedddd299eab8e0161ac072e6f7ff9a36cff14..315abb27bf471a15b21a99a84f65660bbcebdebe 100644
+--- a/extensions/ask-user-question.ts
++++ b/extensions/ask-user-question.ts
+@@ -184,8 +184,7 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
+ 			let selection: QuestionnaireResult | undefined;
+ 			if (ctx.mode === "rpc") {
+ 				if (ctx.hasUI !== true || typeof ctx.ui.select !== "function" ||
+-					(typeof ctx.ui.editor !== "function" && typeof ctx.ui.input !== "function") ||
+-					params.questions.some((question) => question.multiSelect)) return unavailableResult();
++					(typeof ctx.ui.editor !== "function" && typeof ctx.ui.input !== "function")) return unavailableResult();
+ 				if (signal?.aborted) return {
+ 					content: [{ type: "text", text: "User cancelled the questionnaire" }],
+ 					details: { cancelled: true },
+@@ -196,6 +195,40 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
+ 					const answers: AnswerRow[] = [];
+ 					for (const [questionIndex, question] of params.questions.entries()) {
+ 						if (signal?.aborted) break;
++						if (question.multiSelect) {
++							const toggled = new Set<number>();
++							let custom: string | undefined;
++							let committed = false;
++							while (!signal?.aborted) {
++								const action = await withAbort(signal, () => ctx.ui.select(question.question,
++									["Toggle an option", "Use custom text", "Submit", "Cancel"], { signal }));
++								if (signal?.aborted || action === undefined || action === "Cancel") break;
++								if (action === "Toggle an option") {
++									const label = await withAbort(signal, () => ctx.ui.select(question.question,
++										question.options.map((option) => option.label), { signal }));
++									if (signal?.aborted || label === undefined) break;
++									const index = question.options.findIndex((option) => option.label === label);
++									if (index < 0) break;
++									if (toggled.has(index)) toggled.delete(index);
++									else toggled.add(index);
++								} else if (action === "Use custom text") {
++									const text = await withAbort(signal, () => typeof ctx.ui.editor === "function"
++										? ctx.ui.editor(question.question)
++										: ctx.ui.input(question.question, undefined, { signal }));
++									if (signal?.aborted || text === undefined) break;
++									custom = text.trim().length > 0 ? text : undefined;
++								} else if (action === "Submit") {
++									const selected = question.options.filter((_, index) => toggled.has(index)).map((option) => option.label);
++									answers.push(custom === undefined
++										? { questionIndex, question: question.question, kind: "multi", answer: null, selected }
++										: { questionIndex, question: question.question, kind: "custom", answer: custom, selected });
++									committed = true;
++									break;
++								} else break;
++							}
++							if (!committed) break;
++							continue;
++						}
+ 						const action = await withAbort(signal, () => ctx.ui.select(question.question, ["Choose an option", "Use custom text", "Cancel"], { signal }));
+ 						if (signal?.aborted || action === undefined || action === "Cancel") break;
+ 						let answer: AnswerRow | undefined;
