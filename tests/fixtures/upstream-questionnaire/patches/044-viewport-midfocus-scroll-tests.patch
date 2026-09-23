@@ -1,0 +1,34 @@
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -1003,6 +1003,31 @@
+ 	assert.match(plain(afterLines.join("\n")), /Body-preview-anchor/);
+ });
+ 
++test("wheel over a mid-list focus claims body scrolling only when the rendered body moves", () => {
++	const options = Array.from({ length: 12 }, (_, index) => {
++		const suffix = String(index).padStart(2, "0");
++		return option(`Mid-${suffix}`, `Description-${suffix}`);
++	});
++	const view = new QuestionnaireView({
++		questions: [question("Choose a middle row?", options)],
++		theme,
++		tui: { terminal: { rows: 10 }, requestRender() {} } as TUI,
++	});
++	for (let step = 0; step < 4; step++) view.handleInput(KEY.down[0]);
++	const lines = view.render(100);
++	const before = plain(lines.join("\n"));
++	const beforeResult = view.getResult();
++	assert.match(before, /❯ Mid-04/);
++	const point = renderedPoint(lines, "Mid-04");
++
++	const result = view.handleMouse(wheelEvent(lines, point.x, point.y, "down"));
++	const after = plain(render(view, 100));
++	assert.equal(result?.handled, true, "a scrollable body wheel is claimed");
++	assert.notEqual(after, before, "a claimed body wheel must change the rendered body");
++	assert.match(after, /❯ Mid-04/, "wheel scrolling must preserve the focused option");
++	assert.deepEqual(view.getResult(), beforeResult, "wheel scrolling must not change the answer");
++});
++
+ test("unclaimed wheel input falls through without claiming transcript scrolling", () => {
+ 	const { view } = viewWithResult(single());
+ 	const lines = view.render(100);

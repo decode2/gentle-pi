@@ -3085,6 +3085,123 @@ jobs:
               grep -Fx "# fail 0" "$view_log" >/dev/null
             '
 
+      - name: Compose UQA-08b mid-focus scroll RED artifact offline
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          source_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-scroll-corrected/derived"
+          red_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-scroll-midfocus-red"
+          test -d "$source_dir"
+          test ! -e "$red_dir"
+          mkdir "$red_dir"
+          chmod 0777 "$red_dir"
+          compose_log="$RUNNER_TEMP/questionnaire-upstream-viewport-scroll-midfocus-red-composition.log"
+          docker run --rm -i --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$source_dir,target=/base-corrected,readonly" \
+            --mount "type=bind,source=$red_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --input-type=module <<'NODE' | tee "$compose_log"
+          import { execFileSync } from "node:child_process";
+          import { copyFile, mkdir, readdir } from "node:fs/promises";
+          import { join } from "node:path";
+          import { composeUpstreamQuestionnaireArtifact } from "/workspace/tests/fixtures/hosted-compose-upstream-questionnaire.ts";
+
+          const source = "/base-corrected";
+          const artifact = "/artifact";
+          const manifest = {
+            schema: "gentle-pi.hosted-upstream-questionnaire-composition/v2",
+            derivedDirectory: "derived",
+            patchDirectory: "patches/questionnaire-upstream",
+            patchInventory: [{
+              file: "044-viewport-midfocus-scroll-tests.patch",
+              target: "tests/questionnaire-view.test.ts",
+              preimage: "90088a79d8756da2e9a7533e32531be1c9ddf127",
+              postimage: "8cae509d3c38b6c47651808ee0d14b157905cbb7",
+            }],
+            allowedTargets: ["tests/questionnaire-view.test.ts"],
+            protectedTargets: ["lib/native-fullscreen-interaction.ts"],
+          };
+          const patch = manifest.patchInventory[0];
+          const actual = execFileSync("git", ["-C", source, "hash-object", "--no-filters", "--", patch.target], { encoding: "utf8" }).trim();
+          if (actual !== patch.preimage) throw new Error(`UQA-08b mid-focus preimage changed: ${actual}`);
+          const patchRoot = join(artifact, manifest.patchDirectory);
+          const outputRoot = join(artifact, manifest.derivedDirectory);
+          await mkdir(patchRoot, { recursive: true });
+          const patchPath = join(patchRoot, patch.file);
+          await copyFile(join("/workspace/tests/fixtures/upstream-questionnaire/patches", patch.file), patchPath);
+          const changed = execFileSync("git", ["-C", source, "apply", "--numstat", "--summary", patchPath], { encoding: "utf8" });
+          const changedPaths = changed.split("\n").filter((line) => line.includes("\t")).map((line) => line.slice(line.lastIndexOf("\t") + 1)).filter(Boolean);
+          if (JSON.stringify(changedPaths) !== JSON.stringify([patch.target])) throw new Error("UQA-08b mid-focus patch target changed");
+          if (JSON.stringify((await readdir(patchRoot)).sort()) !== JSON.stringify([patch.file])) throw new Error("UQA-08b mid-focus staged patch set changed");
+          await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest });
+          console.log(`uqa-08b-midfocus-red-proof root=${outputRoot} patch=${patch.file} target=${patch.target} preimage=${patch.preimage} postimage=${patch.postimage} protected=${manifest.protectedTargets.join(",")}`);
+          NODE
+          grep -Fx "uqa-08b-midfocus-red-proof root=/artifact/derived patch=044-viewport-midfocus-scroll-tests.patch target=tests/questionnaire-view.test.ts preimage=90088a79d8756da2e9a7533e32531be1c9ddf127 postimage=8cae509d3c38b6c47651808ee0d14b157905cbb7 protected=lib/native-fullscreen-interaction.ts" "$compose_log" >/dev/null
+
+      - name: Run UQA-08b mid-focus scroll RED in read-only isolation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition"
+          source_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-scroll-corrected/derived"
+          derived_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-scroll-midfocus-red/derived"
+          test -d "$source_dir" && test -d "$derived_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --mount "type=bind,source=$source_dir,target=/base-corrected,readonly" \
+            --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              if touch /derived/.uqa08b-midfocus-red-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /base-corrected/.uqa08b-midfocus-red-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /acquired-upstream/.uqa08b-midfocus-red-read-only-probe 2>/dev/null; then exit 1; fi
+              cmp /base-corrected/lib/native-fullscreen-interaction.ts /derived/lib/native-fullscreen-interaction.ts
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /derived/lib/questionnaire/questionnaire-view.ts /derived/tests/questionnaire-view.test.ts
+              /usr/local/bin/node /derived/scripts/check-types.mjs
+              log=/tmp/uqa08b-midfocus-red-view.tap
+              set +e
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap \
+                /derived/tests/questionnaire-view.test.ts >"$log" 2>&1
+              status=$?
+              set -e
+              tail -n 200 "$log"
+              test "$status" -ne 0
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$log")" -eq 43
+              test "$(grep -Ec "^ok [0-9]+ - " "$log")" -eq 42
+              test "$(grep -Ec "^not ok [0-9]+ - " "$log")" -eq 1
+              grep -Fx "1..43" "$log" >/dev/null
+              grep -Fx "# tests 43" "$log" >/dev/null
+              grep -Fx "# pass 42" "$log" >/dev/null
+              grep -Fx "# fail 1" "$log" >/dev/null
+              grep -Fx "# cancelled 0" "$log" >/dev/null
+              grep -Fx "# skipped 0" "$log" >/dev/null
+              grep -Fx "# todo 0" "$log" >/dev/null
+              grep -Eq "^not ok [0-9]+ - wheel over a mid-list focus claims body scrolling only when the rendered body moves$" "$log"
+              grep -F "a claimed body wheel must change the rendered body" "$log" >/dev/null
+              grep -F "ERR_ASSERTION" "$log" >/dev/null
+              grep -Eq "operator: .?notStrictEqual" "$log"
+            '
+
       - name: Verify final hosted candidate checkout cleanliness
         if: always()
         shell: bash
