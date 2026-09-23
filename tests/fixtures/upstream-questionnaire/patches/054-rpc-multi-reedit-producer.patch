@@ -1,0 +1,13 @@
+diff --git a/extensions/ask-user-question.ts b/extensions/ask-user-question.ts
+index 315abb2..b2ec2a3 100644
+--- a/extensions/ask-user-question.ts
++++ b/extensions/ask-user-question.ts
+@@ -213,7 +213,7 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
+ 									else toggled.add(index);
+ 								} else if (action === "Use custom text") {
+ 									const text = await withAbort(signal, () => typeof ctx.ui.editor === "function"
+-										? ctx.ui.editor(question.question)
++										? ctx.ui.editor(question.question, custom)
+ 										: ctx.ui.input(question.question, undefined, { signal }));
+ 									if (signal?.aborted || text === undefined) break;
+ 									custom = text.trim().length > 0 ? text : undefined;
