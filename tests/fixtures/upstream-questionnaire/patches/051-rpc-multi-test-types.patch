@@ -1,0 +1,18 @@
+diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
+index 4c0d54a0..f917898d 100644
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -354,11 +354,12 @@ test("ask_user_question RPC empty multiSelect Submit commits no input instead of
+ 		},
+ 	});
+ 
++	const wasCancelled = result.details.cancelled;
+ 	assert.deepEqual(result.details, {
+ 		answers: [{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: [] }],
+ 	});
+ 	assert.equal(result.content[0]?.text, "1. Pick? — (no input)");
+-	assert.equal(result.details.cancelled ?? false, false);
++	assert.equal(wasCancelled ?? false, false);
+ 	assert.deepEqual(choices, []);
+ 	assert.deepEqual([customCalls, editorCalls], [0, 0]);
+ 	assertAbortLifecycle(emitted);

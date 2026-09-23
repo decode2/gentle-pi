@@ -3913,6 +3913,8 @@ jobs:
           NODE
 
       - name: Run UQA-09b1 RPC MULTI RED in read-only isolation
+        id: uqa09b1_original_red
+        continue-on-error: true
         env:
           IMAGE_REF: ${{ steps.image.outputs.ref }}
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -3974,6 +3976,167 @@ jobs:
                 grep -F -A 24 -- "- $name" "$ask_log" | grep -F "unavailable_outside_tui" >/dev/null
               done
               printf "%s\n" "uqa-09b1-rpc-multi-red-failure-diagnostics"
+              grep -E -A 22 "^not ok [0-9]+ - ask_user_question RPC (multiSelect|empty multiSelect)" "$ask_log"
+            '
+
+      - name: Diagnose frozen UQA-09b1 pre-TAP type failure
+        id: uqa09b1_type_diagnostic
+        if: always()
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "${{ steps.uqa09b1_original_red.outcome }}" = failure
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          derived_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-multi-red/derived"
+          acquired_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition/upstream"
+          test -d "$derived_dir" && test -d "$acquired_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --mount "type=bind,source=$acquired_dir,target=/acquired-upstream,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              if touch /derived/.uqa09b1-type-diagnostic-probe 2>/dev/null; then exit 1; fi
+              test "$(git hash-object --no-filters /derived/tests/ask-user-question.test.ts)" = 4c0d54a0f2159964effd789e0736d15a064dd2cb
+              log=/tmp/uqa09b1-original-types.log
+              set +e
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /derived/extensions/ask-user-question.ts /derived/tests/ask-user-question.test.ts >"$log" 2>&1
+              status=$?
+              set -e
+              cat "$log"
+              test "$status" -ne 0
+              test "$(wc -l < "$log")" -eq 1
+              grep -Eq "^tests/ask-user-question\\.test\\.ts\\(361,30\\): error TS2339: Property '\''cancelled'\'' does not exist on type " "$log"
+            '
+
+      - name: Compose UQA-09b1 type-corrected RED offline
+        if: steps.uqa09b1_type_diagnostic.outcome == 'success'
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          source_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-multi-red/derived"
+          corrected_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-multi-types/derived"
+          test -d "$source_dir" && test ! -e "$corrected_dir"
+          mkdir -p "$corrected_dir"
+          chmod 0777 "$corrected_dir"
+          docker run --rm -i --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$source_dir,target=/base-red,readonly" \
+            --mount "type=bind,source=$corrected_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { execFileSync } from "node:child_process";
+          import { copyFile, mkdir, readFile } from "node:fs/promises";
+          import { join } from "node:path";
+          import { composeUpstreamQuestionnaireArtifact } from "/workspace/tests/fixtures/hosted-compose-upstream-questionnaire.ts";
+
+          const source = "/base-red";
+          const patch = { file: "051-rpc-multi-test-types.patch", target: "tests/ask-user-question.test.ts",
+            preimage: "4c0d54a0f2159964effd789e0736d15a064dd2cb", postimage: "f917898dda9eef1ca300df3cb09579890417e824" };
+          const manifest = { schema: "gentle-pi.hosted-upstream-questionnaire-composition/v2",
+            derivedDirectory: "derived", patchDirectory: "patches/questionnaire-upstream",
+            patchInventory: [patch], allowedTargets: [patch.target],
+            protectedTargets: ["extensions/ask-user-question.ts", "lib/native-fullscreen-interaction.ts"] };
+          const hash = (root, path) => execFileSync("git", ["-C", root, "hash-object", "--no-filters", "--", path], { encoding: "utf8" }).trim();
+          const fail = (condition, message) => { if (!condition) throw new Error(message); };
+          fail(hash(source, patch.target) === patch.preimage, "frozen 050 test postimage changed");
+          fail(hash(source, "extensions/ask-user-question.ts") === "2bcedddd299eab8e0161ac072e6f7ff9a36cff14", "producer changed");
+          const patchRoot = join("/artifact", manifest.patchDirectory);
+          const outputRoot = join("/artifact", manifest.derivedDirectory);
+          await mkdir(patchRoot, { recursive: true });
+          const patchPath = join(patchRoot, patch.file);
+          await copyFile(join("/workspace/tests/fixtures/upstream-questionnaire/patches", patch.file), patchPath);
+          fail(createHash("sha256").update(await readFile(patchPath)).digest("hex") === "2ac3969f72e84f82c8ab50d1e653527ddbc904b7f018a025c1ad5536e5f78c6c", "051 patch changed");
+          execFileSync("git", ["-C", source, "apply", "--check", patchPath], { stdio: "inherit" });
+          const changed = execFileSync("git", ["-C", source, "apply", "--numstat", "--summary", patchPath], { encoding: "utf8" });
+          fail(changed.trim().endsWith(`\t${patch.target}`) && changed.trim().split("\n").length === 1, "051 target changed");
+          await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest });
+          fail(hash(outputRoot, patch.target) === patch.postimage, "051 postimage changed");
+          for (const path of manifest.protectedTargets) fail(hash(source, path) === hash(outputRoot, path), `protected ${path} changed`);
+          console.log(`uqa-09b1-type-correction root=${outputRoot} postimage=${patch.postimage}`);
+          NODE
+
+      - name: Run type-corrected UQA-09b1 RED in read-only isolation
+        if: steps.uqa09b1_type_diagnostic.outcome == 'success'
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          derived_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-multi-types/derived/derived"
+          source_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-multi-red/derived"
+          acquired_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition/upstream"
+          test -d "$derived_dir" && test -d "$source_dir" && test -d "$acquired_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --mount "type=bind,source=$source_dir,target=/base-red,readonly" \
+            --mount "type=bind,source=$acquired_dir,target=/acquired-upstream,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              if touch /derived/.uqa09b1-corrected-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /base-red/.uqa09b1-corrected-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /acquired-upstream/.uqa09b1-corrected-read-only-probe 2>/dev/null; then exit 1; fi
+              cmp /base-red/extensions/ask-user-question.ts /derived/extensions/ask-user-question.ts
+              cmp /base-red/lib/native-fullscreen-interaction.ts /derived/lib/native-fullscreen-interaction.ts
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /derived/extensions/ask-user-question.ts /derived/tests/ask-user-question.test.ts
+              /usr/local/bin/node /derived/scripts/check-types.mjs
+              ask_log=/tmp/uqa09b1-corrected-red.tap
+              set +e
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap \
+                /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts >"$ask_log" 2>&1
+              status=$?
+              set -e
+              cat "$ask_log"
+              test "$status" -ne 0
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$ask_log")" -eq 106
+              test "$(grep -Ec "^ok [0-9]+ - " "$ask_log")" -eq 104
+              test "$(grep -Ec "^not ok [0-9]+ - " "$ask_log")" -eq 2
+              grep -Fx "1..106" "$ask_log" >/dev/null
+              grep -Fx "# tests 113" "$ask_log" >/dev/null
+              grep -Fx "# pass 111" "$ask_log" >/dev/null
+              grep -Fx "# fail 2" "$ask_log" >/dev/null
+              grep -Fx "# cancelled 0" "$ask_log" >/dev/null
+              grep -Fx "# skipped 0" "$ask_log" >/dev/null
+              grep -Fx "# todo 0" "$ask_log" >/dev/null
+              grep -E "^not ok [0-9]+ - " "$ask_log" | cut -d"-" -f2- | sed "s/^ //" > /tmp/uqa09b1-actual-failures
+              printf "%s\n" \
+                "ask_user_question RPC multiSelect keeps reverse toggles in authored order with custom text" \
+                "ask_user_question RPC empty multiSelect Submit commits no input instead of cancelling" > /tmp/uqa09b1-expected-failures
+              diff -u /tmp/uqa09b1-expected-failures /tmp/uqa09b1-actual-failures
+              test "$(grep -c "ERR_ASSERTION" "$ask_log")" -eq 2
+              for name in \
+                "ask_user_question RPC multiSelect keeps reverse toggles in authored order with custom text" \
+                "ask_user_question RPC empty multiSelect Submit commits no input instead of cancelling"; do
+                grep -F -A 24 -- "- $name" "$ask_log" | grep -F "unavailable_outside_tui" >/dev/null
+              done
+              printf "%s\n" "uqa-09b1-corrected-red-failure-diagnostics"
               grep -E -A 22 "^not ok [0-9]+ - ask_user_question RPC (multiSelect|empty multiSelect)" "$ask_log"
             '
 
