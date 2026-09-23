@@ -1,0 +1,10 @@
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -278,6 +278,7 @@
+ 				this.moveFocus(-1);
+ 				return;
+ 			}
++			this.bodyScrollManual = false;
+ 			this.editor.handleInput(data);
+ 			return;
+ 		}

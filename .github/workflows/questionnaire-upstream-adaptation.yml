@@ -3450,6 +3450,143 @@ jobs:
               test "$(grep -Ec "operator: .?match" "$log")" -eq 1
             '
 
+      - name: Compose UQA-08b editor-caret GREEN offline
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          source_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-editor-scroll-red/derived"
+          green_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-editor-scroll-green"
+          test -d "$source_dir"
+          test ! -e "$green_dir"
+          mkdir "$green_dir"
+          chmod 0777 "$green_dir"
+          compose_log="$RUNNER_TEMP/questionnaire-upstream-viewport-editor-scroll-green-composition.log"
+          docker run --rm -i --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$source_dir,target=/base-editor-red,readonly" \
+            --mount "type=bind,source=$green_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --input-type=module <<'NODE' | tee "$compose_log"
+          import { execFileSync } from "node:child_process";
+          import { copyFile, mkdir, readFile, readdir } from "node:fs/promises";
+          import { join } from "node:path";
+          import { composeUpstreamQuestionnaireArtifact } from "/workspace/tests/fixtures/hosted-compose-upstream-questionnaire.ts";
+
+          const source = "/base-editor-red";
+          const artifact = "/artifact";
+          const patch = {
+            file: "047-viewport-editor-caret-view.patch",
+            target: "lib/questionnaire/questionnaire-view.ts",
+            preimage: "107c6f415be8d74f73c81bcc8e8070a0a177cad3",
+            postimage: "c038cefa266a707d7fcb5a923c0efdd269a0bd6b",
+          };
+          const manifest = {
+            schema: "gentle-pi.hosted-upstream-questionnaire-composition/v2",
+            derivedDirectory: "derived",
+            patchDirectory: "patches/questionnaire-upstream",
+            patchInventory: [patch],
+            allowedTargets: [patch.target],
+            protectedTargets: ["lib/native-fullscreen-interaction.ts"],
+          };
+          const fail = (condition, message) => { if (!condition) throw new Error(message); };
+          const actualPreimage = execFileSync("git", ["-C", source, "hash-object", "--no-filters", "--", patch.target], { encoding: "utf8" }).trim();
+          fail(actualPreimage === patch.preimage, `UQA-08b editor-caret GREEN preimage changed: ${actualPreimage}`);
+          const patchRoot = join(artifact, manifest.patchDirectory);
+          const outputRoot = join(artifact, manifest.derivedDirectory);
+          await mkdir(patchRoot, { recursive: true });
+          const patchPath = join(patchRoot, patch.file);
+          await copyFile(join("/workspace/tests/fixtures/upstream-questionnaire/patches", patch.file), patchPath);
+          const patchBytes = await readFile(patchPath);
+          const patchHash = execFileSync("git", ["-C", source, "hash-object", "--no-filters", "--stdin"], { input: patchBytes, encoding: "utf8" }).trim();
+          fail(patchHash === "ac74f732a4797a2c0bcc8d62bbb14bc912d57960", `UQA-08b editor-caret GREEN patch hash changed: ${patchHash}`);
+          fail(JSON.stringify((await readdir(patchRoot)).sort()) === JSON.stringify([patch.file]), "UQA-08b editor-caret GREEN staged patch inventory changed");
+          const changed = execFileSync("git", ["-C", source, "apply", "--numstat", "--summary", patchPath], { encoding: "utf8" });
+          const changedPaths = changed.split("\n").filter((line) => line.includes("\t")).map((line) => line.slice(line.lastIndexOf("\t") + 1)).filter(Boolean);
+          fail(JSON.stringify(changedPaths) === JSON.stringify([patch.target]), "UQA-08b editor-caret GREEN patch target changed");
+          await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest });
+          const actualPostimage = execFileSync("git", ["-C", outputRoot, "hash-object", "--no-filters", "--", patch.target], { encoding: "utf8" }).trim();
+          fail(actualPostimage === patch.postimage, `UQA-08b editor-caret GREEN postimage changed: ${actualPostimage}`);
+          const helper = "lib/native-fullscreen-interaction.ts";
+          const sourceHelper = execFileSync("git", ["-C", source, "hash-object", "--no-filters", "--", helper], { encoding: "utf8" }).trim();
+          const derivedHelper = execFileSync("git", ["-C", outputRoot, "hash-object", "--no-filters", "--", helper], { encoding: "utf8" }).trim();
+          fail(sourceHelper === derivedHelper, "UQA-08b editor-caret GREEN changed the protected fullscreen helper");
+          console.log(`uqa-08b-editor-caret-green-composition-proof root=${outputRoot} patch=${patch.file} target=${patch.target} preimage=${actualPreimage} postimage=${actualPostimage} patchHash=${patchHash} helper=${helper}:${derivedHelper}`);
+          NODE
+          grep -F "uqa-08b-editor-caret-green-composition-proof root=/artifact/derived patch=047-viewport-editor-caret-view.patch target=lib/questionnaire/questionnaire-view.ts preimage=107c6f415be8d74f73c81bcc8e8070a0a177cad3 postimage=c038cefa266a707d7fcb5a923c0efdd269a0bd6b patchHash=ac74f732a4797a2c0bcc8d62bbb14bc912d57960 helper=lib/native-fullscreen-interaction.ts:" "$compose_log" >/dev/null
+
+      - name: Run UQA-08b editor-caret GREEN in read-only isolation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition"
+          red_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-editor-scroll-red/derived"
+          derived_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-editor-scroll-green/derived"
+          test -d "$red_dir" && test -d "$derived_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --mount "type=bind,source=$red_dir,target=/red,readonly" \
+            --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              if touch /derived/.uqa08b-editor-green-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /red/.uqa08b-editor-green-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /acquired-upstream/.uqa08b-editor-green-read-only-probe 2>/dev/null; then exit 1; fi
+              cmp /red/tests/questionnaire-view.test.ts /derived/tests/questionnaire-view.test.ts
+              cmp /red/tests/ask-user-question.test.ts /derived/tests/ask-user-question.test.ts
+              cmp /red/tests/gentle-ai.test.ts /derived/tests/gentle-ai.test.ts
+              cmp /red/lib/native-fullscreen-interaction.ts /derived/lib/native-fullscreen-interaction.ts
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /derived/lib/questionnaire/questionnaire-view.ts /derived/tests/questionnaire-view.test.ts
+              /usr/local/bin/node /derived/scripts/check-types.mjs
+              ask_log=/tmp/uqa08b-editor-caret-green-ask.tap
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap \
+                /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts >"$ask_log" 2>&1
+              cat "$ask_log"
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$ask_log")" -eq 101
+              test "$(grep -Ec "^ok [0-9]+ - " "$ask_log")" -eq 101
+              test "$(grep -Ec "^not ok [0-9]+ - " "$ask_log")" -eq 0
+              grep -Fx "1..101" "$ask_log" >/dev/null
+              grep -Fx "# tests 108" "$ask_log" >/dev/null
+              grep -Fx "# pass 108" "$ask_log" >/dev/null
+              grep -Fx "# fail 0" "$ask_log" >/dev/null
+              grep -Fx "# cancelled 0" "$ask_log" >/dev/null
+              grep -Fx "# skipped 0" "$ask_log" >/dev/null
+              grep -Fx "# todo 0" "$ask_log" >/dev/null
+              view_log=/tmp/uqa08b-editor-caret-green-view.tap
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap \
+                /derived/tests/questionnaire-view.test.ts >"$view_log" 2>&1
+              cat "$view_log"
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$view_log")" -eq 44
+              test "$(grep -Ec "^ok [0-9]+ - " "$view_log")" -eq 44
+              test "$(grep -Ec "^not ok [0-9]+ - " "$view_log")" -eq 0
+              grep -Fx "1..44" "$view_log" >/dev/null
+              grep -Fx "# tests 44" "$view_log" >/dev/null
+              grep -Fx "# pass 44" "$view_log" >/dev/null
+              grep -Fx "# fail 0" "$view_log" >/dev/null
+              grep -Fx "# cancelled 0" "$view_log" >/dev/null
+              grep -Fx "# skipped 0" "$view_log" >/dev/null
+              grep -Fx "# todo 0" "$view_log" >/dev/null
+              grep -Eq "^ok [0-9]+ - typing restores a manually scrolled-off multiline editor caret$" "$view_log"
+            '
+
       - name: Verify final hosted candidate checkout cleanliness
         if: always()
         shell: bash
