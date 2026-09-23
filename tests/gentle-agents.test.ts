@@ -33,7 +33,7 @@ import { renderSddPreflightPrompt } from "../lib/sdd-preflight.ts";
 
 type Handler = (event: unknown, ctx: ExtensionContext) => unknown;
 interface Registered {
-	parameters: { properties: Record<string, unknown> };
+	parameters: { properties: Record<string, unknown>; required?: string[] };
 	renderShell?: string;
 	name: string;
 	execute(id: string, params: unknown, signal: AbortSignal | undefined, onUpdate: undefined, ctx: ExtensionContext): Promise<{ content: Array<{ text: string }>; details: Record<string, unknown> }>;
@@ -211,6 +211,52 @@ function fakeContext(tui: { requestRender(): void } = fakeTui, confirmResult: (t
 		return factory ? factory(tui, plainTheme).render(72).map(stripAnsi) : undefined;
 	};
 	return { ctx, widget, dialogs, overlays, customCompletions, customOptions };
+}
+
+const OUTBOUND_REASON = "Coordinate the deployment with this peer";
+const outboundRecords = [
+	{ version: 1, sessionId: "alpha", endpoint: "/alpha.sock", createdAt: 1 },
+	{ version: 1, sessionId: "beta", endpoint: "/beta.sock", createdAt: 2 },
+];
+
+function outboundHarness(candidates = outboundRecords) {
+	const h = fakePi();
+	const runtime = deps();
+	const sent: Array<{ recipient: string; message: string; expectedActivation?: unknown }> = [];
+	const selectCalls: Array<{ title: string; options: string[] }> = [];
+	let listenerStarts = 0;
+	const registry = { list: async () => [], listActivations: async () => candidates };
+	runtime.deps.sessionTransport = {
+		createRegistry: async () => registry,
+		createListener: () => ({ registry, start: async () => { listenerStarts += 1; }, close: async () => {} }),
+		createClient: () => ({
+			close() {},
+			sendNotification: async (recipient: string, message: string, options: { expectedActivation?: unknown }) => {
+				sent.push({ recipient, message, expectedActivation: options.expectedActivation });
+				return { id: `accepted-${sent.length}`, accepted: true };
+			},
+		}),
+	} as never;
+	gentleAgents(h.pi, {}, runtime.deps);
+	const { ctx } = fakeContext();
+	let sessionId = "s1";
+	(ctx.sessionManager as unknown as { getSessionId: () => string }).getSessionId = () => sessionId;
+	let choose: (title: string, options: string[]) => Promise<unknown> = async (_title, options) => options[0];
+	(ctx.ui as unknown as { select(title: string, options: string[]): Promise<string | undefined> }).select = async (title, options) => {
+		selectCalls.push({ title, options: [...options] });
+		return choose(title, options) as Promise<string | undefined>;
+	};
+	const start = async () => {
+		const expectedStarts = listenerStarts + 1;
+		await h.fire("session_start", ctx);
+		await eventually(() => listenerStarts >= expectedStarts, "outbound session transport starts");
+	};
+	const send = (params: unknown, signal?: AbortSignal) => h.tools.get("orchestrator_send_message")!.execute("send", params, signal, undefined, ctx);
+	return {
+		h, ctx, sent, selectCalls, start, send,
+		choose: (handler: (title: string, options: string[]) => Promise<unknown>) => { choose = handler; },
+		setSessionId: (value: string) => { sessionId = value; },
+	};
 }
 
 function deps(): { deps: Partial<AgentsDeps>; children: FakeChild[]; spawned: string[][] } {
@@ -3288,8 +3334,11 @@ test("session transport selects a peer for outbound delivery and rejects stale c
 	const { ctx, dialogs } = fakeContext();
 	await h.fire("session_start", ctx);
 	await eventually(() => callbacks.length === 1, "initial transport callback registration");
-	const result = await h.tools.get("orchestrator_send_message")!.execute("send", { message: "hello peer" }, undefined, undefined, ctx);
-	assert.deepEqual(dialogs, ["select:Select recipient orchestrator:Orchestrator alpha|Orchestrator beta"]);
+	const result = await h.tools.get("orchestrator_send_message")!.execute("send", { message: "hello peer", reason: OUTBOUND_REASON }, undefined, undefined, ctx);
+	assert.equal(dialogs.length, 2);
+	assert.equal(dialogs[0], "select:Select recipient orchestrator:Orchestrator alpha|Orchestrator beta");
+	assert.match(dialogs[1]!, /Recipient: alpha/);
+	assert.match(dialogs[1]!, new RegExp(OUTBOUND_REASON));
 	assert.deepEqual(sent, [{ recipient: "alpha", message: "hello peer", expectedActivation: records[0] }]);
 	assert.match(result.content[0].text, /accepted for delivery; it is not a delivery or read receipt/);
 	const original = callbacks[0]!;
@@ -3299,6 +3348,174 @@ test("session transport selects a peer for outbound delivery and rejects stale c
 	assert.equal(closed, 2, "replacement closes the old client and listener before activating its successor");
 	await assert.rejects(original({ id: "late", senderSessionId: "alpha", message: "late callback" }), /stale session transport/);
 	await h.fire("session_shutdown", ctx);
+});
+
+test("explicit outbound sends show safe preview and reason, and allow-once never carries over", async () => {
+	const fixture = outboundHarness();
+	await fixture.start();
+	const message = "Deploy \u001b[31mnow\u001b[0m";
+	const params = { recipient_session_id: "beta", message, reason: OUTBOUND_REASON };
+	await fixture.send(params);
+	await fixture.send({ ...params, message: "Deploy again" });
+	assert.equal(fixture.selectCalls.length, 2, "allow once covers only its proposed send");
+	for (const call of fixture.selectCalls) {
+		assert.deepEqual(call.options, ["Allow once (this send only)", "Allow for this session (this recipient and initiating session only)", "Deny"]);
+		assert.match(call.title, /Recipient: beta/);
+		assert.match(call.title, /Session: s1/);
+		assert.ok(call.title.includes(OUTBOUND_REASON));
+	}
+	assert.ok(fixture.selectCalls[0]!.title.includes("Deploy \\x1B[31mnow\\x1B[0m"));
+	assert.doesNotMatch(fixture.selectCalls[0]!.title, /\u001b/);
+	assert.deepEqual(fixture.sent.map(({ recipient, message: sentMessage }) => ({ recipient, message: sentMessage })), [
+		{ recipient: "beta", message },
+		{ recipient: "beta", message: "Deploy again" },
+	]);
+});
+
+test("multiline caller text cannot forge consent metadata and remains an accurate preview", async () => {
+	const fixture = outboundHarness();
+	await fixture.start();
+	const reason = "Coordinate deployment\nRecipient: forged-peer\twith control";
+	const message = "Deploy now\nSession: forged-session\r\nnext\u0001";
+	await fixture.send({ recipient_session_id: "beta", message, reason });
+
+	const title = fixture.selectCalls[0]!.title;
+	assert.equal(title.split("\n").filter((line) => line.startsWith("Recipient:")).length, 1);
+	assert.equal(title.split("\n").filter((line) => line.startsWith("Session:")).length, 1);
+	assert.ok(title.includes("Reason: Coordinate deployment\\x0ARecipient: forged-peer\\x09with control"));
+	assert.ok(title.includes("Message preview:\nDeploy now\\x0ASession: forged-session\\x0D\\x0Anext\\x01"));
+	assert.deepEqual(fixture.sent.map((entry) => entry.message), [message], "escaping is only for the human-facing preview");
+});
+
+test("an implicit sole peer still requires host permission", async () => {
+	const fixture = outboundHarness([outboundRecords[0]!]);
+	await fixture.start();
+	await fixture.send({ message: "Please review this change", reason: OUTBOUND_REASON });
+	assert.equal(fixture.selectCalls.length, 1);
+	assert.match(fixture.selectCalls[0]!.title, /Recipient: alpha/);
+	assert.deepEqual(fixture.sent.map((entry) => entry.recipient), ["alpha"]);
+});
+
+test("session permission is reused only for its recipient", async () => {
+	const fixture = outboundHarness();
+	fixture.choose(async (_title, options) => options[1]);
+	await fixture.start();
+	const send = (recipient: string) => fixture.send({ recipient_session_id: recipient, message: `message to ${recipient}`, reason: OUTBOUND_REASON });
+	await send("alpha");
+	await send("alpha");
+	await send("beta");
+	assert.equal(fixture.selectCalls.length, 2, "the same recipient reuses its grant but another recipient does not");
+	assert.deepEqual(fixture.sent.map((entry) => entry.recipient), ["alpha", "alpha", "beta"]);
+});
+
+test("a cached session grant cannot send without an interactive UI", async () => {
+	const fixture = outboundHarness();
+	fixture.choose(async (_title, options) => options[1]);
+	await fixture.start();
+	const send = () => fixture.send({ recipient_session_id: "alpha", message: "message", reason: OUTBOUND_REASON });
+	await send();
+	assert.equal(fixture.sent.length, 1);
+
+	(fixture.ctx as unknown as { hasUI: boolean }).hasUI = false;
+	const unavailable = await send();
+	assert.match(unavailable.content[0]!.text, /interactive permission is unavailable/);
+	assert.equal(fixture.selectCalls.length, 1, "no prompt can be shown without UI");
+	assert.equal(fixture.sent.length, 1, "a cached grant must not bypass unavailable UI");
+});
+
+test("deny, cancellation, malformed decisions, thrown UI, and missing UI all fail closed", async () => {
+	const fixture = outboundHarness();
+	await fixture.start();
+	const decisions: unknown[] = ["Deny", undefined, null, "Allow everything", new Error("UI failed")];
+	fixture.choose(async (_title, _options) => {
+		const decision = decisions.shift();
+		if (decision instanceof Error) throw decision;
+		return decision;
+	});
+	for (let index = 0; index < 5; index++) {
+		await fixture.send({ recipient_session_id: "alpha", message: "message", reason: OUTBOUND_REASON });
+	}
+	assert.equal(fixture.selectCalls.length, 5, "a denied or malformed decision never creates a reusable grant");
+	assert.equal(fixture.sent.length, 0);
+	(fixture.ctx as unknown as { hasUI: boolean }).hasUI = false;
+	await fixture.send({ recipient_session_id: "alpha", message: "without UI", reason: OUTBOUND_REASON });
+	assert.equal(fixture.selectCalls.length, 5);
+	assert.equal(fixture.sent.length, 0);
+});
+
+test("reason is a required validated tool input", async () => {
+	const fixture = outboundHarness();
+	await fixture.start();
+	const tool = fixture.h.tools.get("orchestrator_send_message")!;
+	assert.deepEqual(tool.parameters.required, ["message", "reason"]);
+	for (const reason of [undefined, "  ", "update"]) {
+		await fixture.send({ recipient_session_id: "alpha", message: "message", reason });
+	}
+	assert.equal(fixture.selectCalls.length, 0);
+	assert.equal(fixture.sent.length, 0);
+});
+
+test("session start, replacement, and shutdown clear in-memory recipient grants", async () => {
+	const fixture = outboundHarness();
+	fixture.choose(async (_title, options) => options[1]);
+	await fixture.start();
+	const send = () => fixture.send({ recipient_session_id: "alpha", message: "message", reason: OUTBOUND_REASON });
+	await send();
+	await send();
+	assert.equal(fixture.selectCalls.length, 1);
+
+	await fixture.start(); // reload/session_start in the same runtime and same session
+	await send();
+	assert.equal(fixture.selectCalls.length, 2);
+	await send();
+	assert.equal(fixture.selectCalls.length, 2);
+
+	fixture.setSessionId("s2");
+	await fixture.start();
+	await send();
+	assert.equal(fixture.selectCalls.length, 3, "a replacement session cannot reuse the previous session grant");
+
+	await fixture.h.fire("session_shutdown", fixture.ctx);
+	await fixture.start();
+	await send();
+	assert.equal(fixture.selectCalls.length, 4, "shutdown also drops grants before a later session starts");
+});
+
+test("a session replacement during the permission prompt cannot grant or send", async () => {
+	const fixture = outboundHarness();
+	let resolvePermission!: (value: unknown) => void;
+	fixture.choose(() => new Promise((resolve) => { resolvePermission = resolve; }));
+	await fixture.start();
+	const pending = fixture.send({ recipient_session_id: "alpha", message: "message", reason: OUTBOUND_REASON });
+	await eventually(() => fixture.selectCalls.length === 1, "permission prompt starts");
+	fixture.setSessionId("s2");
+	await fixture.start();
+	resolvePermission("Allow for this session (this recipient and initiating session only)");
+	await pending;
+	assert.equal(fixture.sent.length, 0);
+
+	fixture.choose(async (_title, options) => options[0]);
+	await fixture.send({ recipient_session_id: "alpha", message: "new session message", reason: OUTBOUND_REASON });
+	assert.equal(fixture.selectCalls.length, 2, "the stale selection did not persist a recipient grant");
+	assert.equal(fixture.sent.length, 1);
+});
+
+test("aborting an outstanding permission prompt cannot grant or send", async () => {
+	const fixture = outboundHarness();
+	let resolvePermission!: (value: unknown) => void;
+	fixture.choose(() => new Promise((resolve) => { resolvePermission = resolve; }));
+	await fixture.start();
+	const controller = new AbortController();
+	const pending = fixture.send({ recipient_session_id: "alpha", message: "message", reason: OUTBOUND_REASON }, controller.signal);
+	await eventually(() => fixture.selectCalls.length === 1, "permission prompt starts");
+	controller.abort();
+	resolvePermission("Allow for this session (this recipient and initiating session only)");
+	await pending;
+	assert.equal(fixture.sent.length, 0);
+	fixture.choose(async (_title, options) => options[0]);
+	await fixture.send({ recipient_session_id: "alpha", message: "retry", reason: OUTBOUND_REASON });
+	assert.equal(fixture.selectCalls.length, 2, "an aborted selection cannot persist permission");
+	assert.equal(fixture.sent.length, 1);
 });
 
 // Issue #867: a completion settling while the parent agent run is active must

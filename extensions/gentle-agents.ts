@@ -267,6 +267,13 @@ function sanitizeTerminalText(value: string): string {
 	return value.replace(/[\x00-\x08\x0B-\x1F\x7F-\x9F]/g, (control) => `\\x${control.charCodeAt(0).toString(16).toUpperCase().padStart(2, "0")}`);
 }
 
+function sanitizeConsentField(value: string): string {
+	return sanitizeTerminalText(value).replace(/[\t\n\u2028\u2029]/g, (control) => {
+		const code = control.charCodeAt(0);
+		return code <= 0xFF ? `\\x${code.toString(16).toUpperCase().padStart(2, "0")}` : `\\u${code.toString(16).toUpperCase().padStart(4, "0")}`;
+	});
+}
+
 function messageText(content: unknown): string {
 	if (typeof content === "string") return content;
 	if (!Array.isArray(content)) return "";
@@ -631,6 +638,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		const sessionId = ctx.sessionManager.getSessionId();
 		return active && active.generation === transportGeneration && active.sessionManager === ctx.sessionManager && active.sessionId === sessionId && sessions === ctx.sessionManager ? active : undefined;
 	};
+	const outboundRecipientGrants = new Map<string, SessionTransport>();
 
 	const requestRender = () => {
 		if (renderQueued) return;
@@ -1263,13 +1271,14 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	pi.registerTool({
 		name: "orchestrator_send_message",
 		label: "Send orchestrator message",
-		description: "Send a notification to another active session in this trusted local profile. If recipient_session_id is omitted, the sole peer is selected or the user selects one. Acceptance means enqueued, not read or completed.",
-		parameters: { type: "object", additionalProperties: false, required: ["message"], properties: { recipient_session_id: { type: "string" }, message: { type: "string" } } } as never,
+		description: "Send a notification to another active session in this trusted local profile. A concrete reason is required and the host asks permission before the first send to each recipient per session. If recipient_session_id is omitted, the sole peer is selected or the user selects one. Acceptance means enqueued, not read or completed.",
+		parameters: { type: "object", additionalProperties: false, required: ["message", "reason"], properties: { recipient_session_id: { type: "string" }, message: { type: "string" }, reason: { type: "string", minLength: 8, maxLength: 512 } } } as never,
 		async execute(_id, params, signal, _onUpdate, ctx) {
 			const transport = activeTransportFor(ctx);
-			const input = params as { recipient_session_id?: unknown; message?: unknown };
+			const input = params as { recipient_session_id?: unknown; message?: unknown; reason?: unknown };
 			if (!transport) return text("Error: session messaging is not ready.", { error: "not ready" });
-			if (typeof input.message !== "string" || Buffer.byteLength(input.message, "utf8") > 8192) return text("Error: recipient session ID or message is invalid.", { error: "invalid input" });
+			if (typeof input.message !== "string" || Buffer.byteLength(input.message, "utf8") > 8192 || typeof input.reason !== "string" || input.reason.trim().length < 8 || Buffer.byteLength(input.reason, "utf8") > 512) return text("Error: recipient session ID, message, or reason is invalid.", { error: "invalid input" });
+			const reason = input.reason.trim();
 			let recipient: string | undefined;
 			let activation: PresenceRecord | undefined;
 			if (input.recipient_session_id !== undefined) {
@@ -1300,6 +1309,33 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 			}
 			if (recipient === undefined || !validTransportSessionId(recipient)) return text("Error: recipient session ID or message is invalid.", { error: "invalid input" });
 			if (recipient === transport.sessionId) return text("Error: cannot send a message to the active session.", { error: "self" });
+			if (ctx.hasUI !== true || typeof ctx.ui?.select !== "function" || signal?.aborted) return text("Message was not sent: interactive permission is unavailable.", { error: "permission unavailable" });
+			if (outboundRecipientGrants.get(recipient) !== transport) {
+				const decisions = [
+					"Allow once (this send only)",
+					"Allow for this session (this recipient and initiating session only)",
+					"Deny",
+				];
+				const title = [
+					"Authorize outbound message",
+					`Recipient: ${sanitizeTerminalText(recipient)}`,
+					`Session: ${sanitizeTerminalText(transport.sessionId)} (initiating session)`,
+					`Reason: ${sanitizeConsentField(reason)}`,
+					"Message preview:",
+					sanitizeConsentField(input.message),
+				].join("\n");
+				let decision: unknown;
+				try {
+					decision = await ctx.ui.select(title, decisions, { signal });
+				} catch {
+					return text("Message was not sent: outbound permission was denied.", { error: "denied" });
+				}
+				if (activeTransportFor(ctx) !== transport || signal?.aborted) return text("Message was not sent: the initiating session changed or the request was cancelled.", { error: "stale" });
+				if (decision === decisions[2]) return text("Message was not sent: outbound permission was denied.", { error: "denied" });
+				if (decision !== decisions[0] && decision !== decisions[1]) return text("Message was not sent: outbound permission was not confirmed.", { error: "denied" });
+				if (decision === decisions[1]) outboundRecipientGrants.set(recipient, transport);
+			}
+			if (activeTransportFor(ctx) !== transport || signal?.aborted) return text("Message was not sent: the initiating session changed or the request was cancelled.", { error: "stale" });
 			try {
 				const accepted = await transport.client.sendNotification(recipient, input.message, { signal, expectedActivation: activation, beforeConnect: () => activeTransportFor(ctx) === transport });
 				return activeTransportFor(ctx) === transport ? text(`Message ${accepted.id} from ${transport.sessionId} to ${recipient} accepted for delivery; it is not a delivery or read receipt.`, { gentleAgents: { messageId: accepted.id, senderSessionId: transport.sessionId, recipientSessionId: recipient, state: "accepted" } }) : text("Error: session messaging is not ready.", { error: "stale" });
@@ -1434,6 +1470,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 	}
 
 	pi.on("session_start", async (event, ctx) => {
+		outboundRecipientGrants.clear();
 		// A resumed, reloaded, or replaced session starts with an empty completion
 		// queue so nothing pending from another session can replay here.
 		completions.dropAll();
@@ -1483,6 +1520,7 @@ export default function gentleAgents(pi: ExtensionAPI, env: NodeJS.ProcessEnv = 
 		}
 	});
 	pi.on("session_shutdown", async () => {
+		outboundRecipientGrants.clear();
 		completions.dropAll();
 		activeAgentRuns = 0;
 		presence?.dispose();
