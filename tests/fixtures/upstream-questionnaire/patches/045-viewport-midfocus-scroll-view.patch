@@ -1,0 +1,160 @@
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -215,6 +215,7 @@
+ 	private lineRegions: Array<MouseRegion | undefined> = [];
+ 	private bodyScroll = 0;
+ 	private bodyScrollLimit = 0;
++	private bodyScrollManual = false;
+ 	private previewScroll = 0;
+ 	private previewScrollLimit = 0;
+ 	private renderedGeometry: { width: number; height: number; columns?: number; rows?: number } | undefined;
+@@ -339,6 +340,7 @@
+ 				const next = Math.max(0, Math.min(this.bodyScrollLimit, this.bodyScroll + direction));
+ 				if (next === this.bodyScroll) return undefined;
+ 				this.bodyScroll = next;
++				this.bodyScrollManual = true;
+ 				this.invalidate();
+ 				return { handled: true as const, render: true, target: this.mouseTarget(event) };
+ 			}
+@@ -401,13 +403,12 @@
+ 			const rightWidth = Math.max(1, viewport - leftWidth - PREVIEW_GAP.length);
+ 			const left = this.renderBody(leftWidth, false);
+ 			const right = this.wrap(this.theme.fg("dim", preview), rightWidth);
+-			this.bodyScrollLimit = Math.max(0, left.lines.length - paneHeight);
++			const visibleLeft = this.visibleBody(left, paneHeight);
+ 			this.previewScrollLimit = Math.max(0, right.length - paneHeight);
+-			this.bodyScroll = Math.min(this.bodyScroll, this.bodyScrollLimit);
+ 			this.previewScroll = Math.min(this.previewScroll, this.previewScrollLimit);
+-			const leftLines = left.lines.slice(this.bodyScroll);
+-			const leftOwners = left.owners.slice(this.bodyScroll);
+-			const rightLines = right.slice(this.previewScroll);
++			const leftLines = visibleLeft.lines;
++			const leftOwners = visibleLeft.owners;
++			const rightLines = right.slice(this.previewScroll, this.previewScroll + paneHeight);
+ 			const rows = Math.max(leftLines.length, rightLines.length);
+ 			for (let index = 0; index < rows; index++) {
+ 				const previewLine = rightLines[index] ?? "";
+@@ -422,12 +423,9 @@
+ 		}
+ 		else {
+ 			const body = this.renderBody(viewport, preview !== undefined);
+-			this.bodyScrollLimit = Math.max(0, body.lines.length - paneHeight);
+ 			this.previewScroll = 0;
+ 			this.previewScrollLimit = 0;
+-			this.bodyScroll = Math.min(this.bodyScroll, this.bodyScrollLimit);
+-			const bodyLines = body.lines.slice(this.bodyScroll);
+-			const bodyOwners = body.owners.slice(this.bodyScroll);
++			const { lines: bodyLines, owners: bodyOwners } = this.visibleBody(body, paneHeight);
+ 			lines.push(...bodyLines);
+ 			owners.push(...bodyOwners);
+ 			regions.push(...bodyOwners.map((owner) => owner ? { bodyWidth: viewport, previewStart: 0, previewWidth: 0 } : undefined));
+@@ -443,7 +441,27 @@
+ 		return bounded.lines;
+ 	}
+ 
+-	/** Keep the keyboard-focused row reachable without growing beyond the terminal. */
++	/** Keep focus in view until a manual wheel scroll takes ownership of the body viewport. */
++	private visibleBody(
++		body: { lines: string[]; owners: Array<LineOwner | undefined> },
++		paneHeight: number,
++	): { lines: string[]; owners: Array<LineOwner | undefined> } {
++		this.bodyScrollLimit = Math.max(0, body.lines.length - paneHeight);
++		if (!this.bodyScrollManual) {
++			const state = this.states[this.focusedQuestion];
++			const focusedLine = this.editing === undefined
++				? body.owners.findIndex((owner) => owner?.rowIndex === state?.cursor)
++				: body.owners.findLastIndex((owner) => owner?.rowIndex === -2);
++			this.bodyScroll = focusedLine < 0 ? 0 : Math.max(0, focusedLine - Math.floor(paneHeight / 2));
++		}
++		this.bodyScroll = Math.min(this.bodyScroll, this.bodyScrollLimit);
++		return {
++			lines: body.lines.slice(this.bodyScroll, this.bodyScroll + paneHeight),
++			owners: body.owners.slice(this.bodyScroll, this.bodyScroll + paneHeight),
++		};
++	}
++
++	/** Keep the rendered questionnaire within the terminal, without undoing manual scroll. */
+ 	private boundViewport(
+ 		lines: string[],
+ 		owners: Array<LineOwner | undefined>,
+@@ -458,8 +476,10 @@
+ 		const focusedLine = this.editing === undefined
+ 			? owners.findIndex((owner) => owner?.questionIndex === this.focusedQuestion && owner.rowIndex === state?.cursor)
+ 			: owners.findLastIndex((owner) => owner?.questionIndex === this.focusedQuestion && owner.rowIndex === -2);
+-		const anchor = focusedLine < 0 ? 0 : focusedLine;
+-		const start = Math.max(0, Math.min(lines.length - maxRows, anchor - Math.floor(maxRows / 2)));
++		const anchor = this.bodyScrollManual ? owners.findIndex((owner) => owner !== undefined)
++			: focusedLine < 0 ? 0 : focusedLine;
++		const start = Math.max(0, Math.min(lines.length - maxRows,
++			this.bodyScrollManual ? anchor : anchor - Math.floor(maxRows / 2)));
+ 		return {
+ 			lines: lines.slice(start, start + maxRows),
+ 			owners: owners.slice(start, start + maxRows),
+@@ -589,6 +609,7 @@
+ 		if (total === 0) return;
+ 		this.focusedQuestion = (this.focusedQuestion + delta + total) % total;
+ 		this.bodyScroll = 0;
++		this.bodyScrollManual = false;
+ 		this.previewScroll = 0;
+ 		this.invalidate();
+ 	}
+@@ -609,6 +630,7 @@
+ 		if (!state || !controls) return;
+ 		state.cursor = Math.max(0, Math.min(controls.cancel, state.cursor + delta));
+ 		this.bodyScroll = 0;
++		this.bodyScrollManual = false;
+ 		this.previewScroll = 0;
+ 		this.invalidate();
+ 	}
+@@ -633,7 +655,10 @@
+ 		const controls = this.controlRows(questionIndex);
+ 		if (!state || !controls) return false;
+ 		const changed = this.focusedQuestion !== questionIndex || state.cursor !== rowIndex;
+-		if (changed) this.bodyScroll = this.previewScroll = 0;
++		if (changed) {
++			this.bodyScroll = this.previewScroll = 0;
++			this.bodyScrollManual = false;
++		}
+ 		this.focusedQuestion = questionIndex;
+ 		state.cursor = Math.max(0, Math.min(controls.cancel, rowIndex));
+ 		this.invalidate();
+@@ -724,6 +749,7 @@
+ 			if (!question.multiSelect) {
+ 				this.focusedQuestion = questionIndex;
+ 				state.cursor = 0;
++				this.bodyScrollManual = false;
+ 				this.invalidate();
+ 				return;
+ 			}
+@@ -750,6 +776,7 @@
+ 		const draft = kind === "custom" ? state.customDraft
+ 			: kind === "questionNote" ? state.noteDraft : this.globalNoteDraft;
+ 		this.editing = { questionIndex, kind };
++		this.bodyScrollManual = false;
+ 		this.editor = new CustomTextEditor(
+ 			title,
+ 			this.tui,
+@@ -772,6 +799,7 @@
+ 		else if (state && kind === "questionNote") state.noteDraft = value;
+ 		else if (state) state.customDraft = value;
+ 		this.editing = undefined;
++		this.bodyScrollManual = false;
+ 		this.editor.setFocused(false);
+ 		this.editor = undefined;
+ 		this.invalidate();
+@@ -818,6 +846,7 @@
+ 				this.focusedQuestion = questionIndex;
+ 				state.cursor = controls.submit;
+ 			}
++			this.bodyScrollManual = false;
+ 			this.invalidate();
+ 			return;
+ 		}
+@@ -825,6 +854,7 @@
+ 		// tab strip keeps moving; committed answers stay reachable with Tab.
+ 		const next = this.states.findIndex((state) => state.answer === undefined);
+ 		if (next !== -1 && next !== questionIndex) this.focusedQuestion = next;
++		this.bodyScrollManual = false;
+ 		this.invalidate();
+ 	}
+ 
