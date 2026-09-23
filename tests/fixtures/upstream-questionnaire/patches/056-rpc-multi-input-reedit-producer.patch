@@ -1,0 +1,22 @@
+diff --git a/extensions/ask-user-question.ts b/extensions/ask-user-question.ts
+index b2ec2a3c30eb181ff3ddcbf4ed3ea3b0b9f12595..06417061d12482399b507cdc945b9252d0f24d7d 100644
+--- a/extensions/ask-user-question.ts
++++ b/extensions/ask-user-question.ts
+@@ -212,11 +212,14 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
+ 									if (toggled.has(index)) toggled.delete(index);
+ 									else toggled.add(index);
+ 								} else if (action === "Use custom text") {
+-									const text = await withAbort(signal, () => typeof ctx.ui.editor === "function"
++									const useEditor = typeof ctx.ui.editor === "function";
++									const text = await withAbort(signal, () => useEditor
+ 										? ctx.ui.editor(question.question, custom)
+-										: ctx.ui.input(question.question, undefined, { signal }));
++										: ctx.ui.input(question.question, custom, { signal }));
+ 									if (signal?.aborted || text === undefined) break;
+-									custom = text.trim().length > 0 ? text : undefined;
++									// Input's placeholder is only a hint; blank re-entry keeps the saved draft.
++									if (text.trim().length > 0) custom = text;
++									else if (useEditor) custom = undefined;
+ 								} else if (action === "Submit") {
+ 									const selected = question.options.filter((_, index) => toggled.has(index)).map((option) => option.label);
+ 									answers.push(custom === undefined
