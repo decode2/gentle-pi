@@ -1,0 +1,105 @@
+diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
+index 24063de..69f0842 100644
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -206,6 +206,100 @@ test("ask_user_question stays unavailable outside the interactive TUI", async ()
+ 	assert.deepEqual(emitted, []);
+ });
+ 
++test("ask_user_question presents RPC single selection through action, option, and visible Submit dialogs", async () => {
++	const { tool, emitted } = registerQuestionTool();
++	const choices = ["Choose an option", "Alpha", "Submit"];
++	const selected: string[] = [];
++	let customCalls = 0;
++
++	const result = await run(tool, { questions: single() }, {
++		mode: "rpc",
++		hasUI: true,
++		ui: {
++			custom: async () => { customCalls++; return undefined; },
++			select: async (_title: string, options: string[]) => {
++				const choice = choices.shift();
++				assert.ok(choice, "RPC must not request an extra selection dialog");
++				assert.ok(options.includes(choice), `RPC dialog must expose ${choice}`);
++				selected.push(choice);
++				return choice;
++			},
++			editor: async (..._args: unknown[]) => undefined,
++		},
++	});
++
++	assert.deepEqual(selected, ["Choose an option", "Alpha", "Submit"]);
++	assert.equal(customCalls, 0, "RPC must not mount the TUI custom view");
++	assert.equal(result.content[0]?.text, "1. Proceed? — Alpha");
++	assert.deepEqual(result.details, {
++		answers: [{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha" }],
++	});
++	assert.deepEqual(emitted, [
++		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: true } },
++		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
++		{ channel: "rpiv:ask-user:blocked", data: { active: false } },
++	]);
++});
++
++test("ask_user_question prefers the RPC editor for custom text", async () => {
++	const { tool, emitted } = registerQuestionTool();
++	const choices = ["Use custom text", "Submit"];
++	let customCalls = 0;
++	let editorCalls = 0;
++	let inputCalls = 0;
++
++	const result = await run(tool, { questions: single() }, {
++		mode: "rpc",
++		hasUI: true,
++		ui: {
++			custom: async () => { customCalls++; return undefined; },
++			select: async (_title: string, options: string[]) => {
++				const choice = choices.shift();
++				assert.ok(choice && options.includes(choice));
++				return choice;
++			},
++			editor: async (..._args: unknown[]) => { editorCalls++; return "editor text"; },
++			input: async (..._args: unknown[]) => { inputCalls++; return "input text"; },
++		},
++	});
++
++	assert.deepEqual(choices, []);
++	assert.deepEqual([customCalls, editorCalls, inputCalls], [0, 1, 0]);
++	assert.deepEqual(result.details, {
++		answers: [{ questionIndex: 0, question: "Proceed?", kind: "custom", answer: "editor text" }],
++	});
++	assert.deepEqual(emitted.map(({ data }) => data.active), [true, true, false, false]);
++});
++
++test("ask_user_question falls back to RPC input for custom text", async () => {
++	const { tool, emitted } = registerQuestionTool();
++	const choices = ["Use custom text", "Submit"];
++	let customCalls = 0;
++	let inputCalls = 0;
++
++	const result = await run(tool, { questions: single() }, {
++		mode: "rpc",
++		hasUI: true,
++		ui: {
++			custom: async () => { customCalls++; return undefined; },
++			select: async (_title: string, options: string[]) => {
++				const choice = choices.shift();
++				assert.ok(choice && options.includes(choice));
++				return choice;
++			},
++			input: async (..._args: unknown[]) => { inputCalls++; return "input text"; },
++		},
++	});
++
++	assert.deepEqual(choices, []);
++	assert.deepEqual([customCalls, inputCalls], [0, 1]);
++	assert.deepEqual(result.details, {
++		answers: [{ questionIndex: 0, question: "Proceed?", kind: "custom", answer: "input text" }],
++	});
++	assert.deepEqual(emitted.map(({ data }) => data.active), [true, true, false, false]);
++});
++
+ test("ask_user_question commits a single-select answer end-to-end", async () => {
+ 	const { tool, emitted } = registerQuestionTool();
+ 	const rendered = { value: "" };
