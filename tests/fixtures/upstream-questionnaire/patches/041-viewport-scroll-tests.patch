@@ -1,0 +1,123 @@
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -121,6 +121,38 @@
+ 	};
+ }
+ 
++function renderedPoint(lines: string[], text: string): { x: number; y: number } {
++	const y = lines.findIndex((line) => plain(line).includes(text));
++	assert.ok(y >= 0, `rendered geometry does not contain ${text}`);
++	const line = plain(lines[y]!);
++	const index = line.indexOf(text);
++	assert.ok(index >= 0);
++	return { x: visibleWidth(line.slice(0, index)), y };
++}
++
++function wheelEvent(
++	lines: string[],
++	x: number,
++	y: number,
++	direction: "up" | "down",
++	width = 100,
++): TuiMouseEvent {
++	return {
++		type: "wheel",
++		button: "none",
++		wheelDelta: direction === "down" ? 1 : -1,
++		x,
++		y,
++		screenX: x,
++		screenY: y,
++		width,
++		height: lines.length,
++		shift: false,
++		alt: false,
++		ctrl: false,
++	};
++}
++
+ // Real terminal key sequences: legacy (ESC [) and application-cursor (ESC O).
+ const KEY = {
+ 	up: ["\x1b[A", "\x1bOA"],
+@@ -928,3 +960,81 @@
+ 	assertFits(view, 20);
+ 	assert.match(plain(lines.join("\n")), /draft-visible/);
+ });
++
++test("wheel over the visible preview scrolls the preview pane", () => {
++	const preview = Array.from({ length: 24 }, (_, index) =>
++		`Preview-${String(index).padStart(2, "0")} ${"x".repeat(36)}`,
++	).join(" ");
++	const view = new QuestionnaireView({
++		questions: [question("Choose?", [option("Alpha", "First choice", preview)])],
++		theme,
++		tui: { terminal: { rows: 12 }, requestRender() {} } as TUI,
++	});
++	const lines = view.render(100);
++	const point = renderedPoint(lines, "Preview-00");
++	const bodyPoint = renderedPoint(lines, "Alpha");
++	assert.ok(point.x > bodyPoint.x, "preview coordinates must be right of the rendered body");
++	const result = view.handleMouse(wheelEvent(lines, point.x, point.y, "down"));
++	assert.equal(result?.handled, true);
++	const after = plain(render(view));
++	assert.doesNotMatch(after, /Preview-00/);
++	assert.match(after, /Preview-01/);
++});
++
++test("wheel over the questionnaire body scrolls the body pane", () => {
++	const preview = "Body-preview-anchor";
++	const options = Array.from({ length: 12 }, (_, index) =>
++		option(`Body-${String(index).padStart(2, "0")}`, "Body description ".repeat(4), index === 0 ? preview : undefined),
++	);
++	const view = new QuestionnaireView({
++		questions: [question("Choose a body row?", options)],
++		theme,
++		tui: { terminal: { rows: 10 }, requestRender() {} } as TUI,
++	});
++	const lines = view.render(100);
++	const point = renderedPoint(lines, "Body-00");
++	const previewStart = renderedPoint(lines, preview).x;
++	assert.ok(point.x < previewStart, "body coordinates must be left of the rendered preview");
++	const beforeBody = lines.map((line) => plain(line).slice(0, previewStart));
++	const result = view.handleMouse(wheelEvent(lines, point.x, point.y, "down"));
++	assert.equal(result?.handled, true);
++	const afterLines = view.render(100);
++	assert.notDeepEqual(afterLines.map((line) => plain(line).slice(0, previewStart)), beforeBody);
++	assert.match(plain(afterLines.join("\n")), /Body-preview-anchor/);
++});
++
++test("unclaimed wheel input falls through without claiming transcript scrolling", () => {
++	const { view } = viewWithResult(single());
++	const lines = view.render(100);
++	const y = renderedPoint(lines, "Header").y;
++	const x = 99;
++	assert.equal(plain(lines[y]!).slice(x).trim(), "", "the point must be in rendered blank space");
++	assert.equal(view.handleMouse(wheelEvent(lines, x, y, "down")), undefined);
++	assert.equal(view.activeQuestion, 0);
++	assert.deepEqual(view.getResult().answers, []);
++});
++
++test("mouse coordinates from before a terminal resize are rejected", () => {
++	const terminal = { rows: 12, columns: 100 };
++	const view = new QuestionnaireView({
++		questions: [question("A deliberately long question that wraps at twenty", [
++			option("Alpha"), option("Beta"), option("Gamma"),
++		])],
++		theme,
++		tui: { terminal, requestRender() {} } as TUI,
++	});
++	const before = view.render(terminal.columns);
++	const point = renderedPoint(before, "Gamma");
++	const stale = {
++		...mouseEvent(before, point.y, "click"),
++		x: point.x,
++		screenX: point.x,
++		width: terminal.columns,
++		height: before.length,
++	};
++	terminal.rows = 10;
++	terminal.columns = 20;
++	view.render(terminal.columns);
++	assert.equal(view.handleMouse(stale), undefined);
++	assert.deepEqual(view.getResult().answers, []);
++});
