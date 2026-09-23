@@ -1,0 +1,81 @@
+diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
+index 5833e71..3754a09 100644
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -369,6 +369,76 @@ test("ask_user_question RPC multiSelect reopens custom editor with the previous
+ 	assertAbortLifecycle(emitted);
+ });
+ 
++test("ask_user_question RPC input-only multiSelect retyping replaces the saved custom draft", async () => {
++	const { tool, emitted } = registerQuestionTool();
++	const choices = ["Toggle an option", "Two", "Use custom text", "Use custom text", "Submit"];
++	const inputs = ["first draft", "revised draft"];
++	const inputArgs: Array<[string, string | undefined]> = [];
++	let customCalls = 0;
++	const result = await run(tool, {
++		questions: [{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true }],
++	}, {
++		mode: "rpc", hasUI: true,
++		ui: {
++			custom: async () => { customCalls++; return undefined; },
++			select: async (_title: string, options: string[]) => {
++				const choice = choices.shift();
++				assert.ok(choice && options.includes(choice), `RPC dialog must expose ${choice}`);
++				return choice;
++			},
++			input: async (title: string, placeholder?: string) => {
++				inputArgs.push([title, placeholder]);
++				return inputs.shift();
++			},
++		},
++	});
++
++	assert.deepEqual(result.details, {
++		answers: [{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "revised draft", selected: ["Two"] }],
++	});
++	assert.equal(result.content[0]?.text, "1. Pick? — (custom) revised draft — selected: Two");
++	assert.deepEqual(choices, []);
++	assert.deepEqual(inputs, []);
++	assert.equal(customCalls, 0, "RPC must not mount ctx.ui.custom");
++	assertAbortLifecycle(emitted);
++	assert.deepEqual(inputArgs, [["Pick?", undefined], ["Pick?", "first draft"]], "second input visit must show the saved draft as placeholder");
++});
++
++test("ask_user_question RPC input-only multiSelect blank re-entry retains the saved custom draft", async () => {
++	const { tool, emitted } = registerQuestionTool();
++	const choices = ["Toggle an option", "Two", "Use custom text", "Use custom text", "Submit"];
++	const inputs = ["first draft", ""];
++	const inputArgs: Array<[string, string | undefined]> = [];
++	let customCalls = 0;
++	const result = await run(tool, {
++		questions: [{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true }],
++	}, {
++		mode: "rpc", hasUI: true,
++		ui: {
++			custom: async () => { customCalls++; return undefined; },
++			select: async (_title: string, options: string[]) => {
++				const choice = choices.shift();
++				assert.ok(choice && options.includes(choice), `RPC dialog must expose ${choice}`);
++				return choice;
++			},
++			input: async (title: string, placeholder?: string) => {
++				inputArgs.push([title, placeholder]);
++				return inputs.shift();
++			},
++		},
++	});
++
++	assert.deepEqual(choices, []);
++	assert.deepEqual(inputs, []);
++	assert.equal(customCalls, 0, "RPC must not mount ctx.ui.custom");
++	assertAbortLifecycle(emitted);
++	assert.deepEqual(result.details, {
++		answers: [{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "first draft", selected: ["Two"] }],
++	}, "blank input on re-entry must retain the first draft, not cancel or clear it");
++	assert.equal(result.content[0]?.text, "1. Pick? — (custom) first draft — selected: Two");
++	assert.deepEqual(inputArgs, [["Pick?", undefined], ["Pick?", "first draft"]], "second input visit must show the saved draft as placeholder");
++});
++
+ test("ask_user_question RPC empty multiSelect Submit commits no input instead of cancelling", async () => {
+ 	const { tool, emitted } = registerQuestionTool();
+ 	const choices = ["Submit"];

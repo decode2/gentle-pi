@@ -4482,6 +4482,121 @@ jobs:
               for marker in "# fail 0" "# cancelled 0" "# skipped 0" "# todo 0"; do grep -Fx "$marker" "$view_log" >/dev/null; done
             '
 
+      - name: Compose UQA-09b1 input-only MULTI RED offline
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          source_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-multi-reedit-green/derived"
+          red_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-multi-input-red"
+          test -d "$source_dir" && test ! -e "$red_dir"
+          mkdir "$red_dir"
+          chmod 0777 "$red_dir"
+          docker run --rm -i --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$source_dir,target=/base-green,readonly" \
+            --mount "type=bind,source=$red_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { execFileSync } from "node:child_process";
+          import { copyFile, mkdir, readdir, readFile } from "node:fs/promises";
+          import { join } from "node:path";
+          import { composeUpstreamQuestionnaireArtifact } from "/workspace/tests/fixtures/hosted-compose-upstream-questionnaire.ts";
+
+          const source = "/base-green";
+          const patch = { file: "055-rpc-multi-input-reedit-tests.patch", target: "tests/ask-user-question.test.ts",
+            preimage: "5833e71d606c3ff0df1c0221e18aae12d3192fb0", postimage: "3754a0972cf25e97d7f431f462bac4e2c46e9e1c" };
+          const manifest = { schema: "gentle-pi.hosted-upstream-questionnaire-composition/v2",
+            derivedDirectory: "derived", patchDirectory: "patches/questionnaire-upstream",
+            patchInventory: [patch], allowedTargets: [patch.target],
+            protectedTargets: ["extensions/ask-user-question.ts", "lib/native-fullscreen-interaction.ts"] };
+          const hash = (root, path) => execFileSync("git", ["-C", root, "hash-object", "--no-filters", "--", path], { encoding: "utf8" }).trim();
+          const fail = (condition, message) => { if (!condition) throw new Error(message); };
+          fail(hash(source, patch.target) === patch.preimage, "frozen 053 test changed");
+          fail(hash(source, manifest.protectedTargets[0]) === "b2ec2a3c30eb181ff3ddcbf4ed3ea3b0b9f12595", "frozen 054 producer changed");
+          const patchRoot = join("/artifact", manifest.patchDirectory);
+          const outputRoot = join("/artifact", manifest.derivedDirectory);
+          await mkdir(patchRoot, { recursive: true });
+          const patchPath = join(patchRoot, patch.file);
+          await copyFile(join("/workspace/tests/fixtures/upstream-questionnaire/patches", patch.file), patchPath);
+          fail(createHash("sha256").update(await readFile(patchPath)).digest("hex") === "e3e8a0cde7fe5ed73fb64800d9a73f1ec9cbf3cd7a6822f8807078495703c29f", "055 patch changed");
+          fail(JSON.stringify(await readdir(patchRoot)) === JSON.stringify([patch.file]), "055 patch inventory changed");
+          execFileSync("git", ["-C", source, "apply", "--check", "--verbose", patchPath], { stdio: "inherit" });
+          const changed = execFileSync("git", ["-C", source, "apply", "--numstat", "--summary", patchPath], { encoding: "utf8" });
+          fail(changed.trim().endsWith(`\t${patch.target}`) && changed.trim().split("\n").length === 1, "055 target changed");
+          await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest });
+          fail(hash(outputRoot, patch.target) === patch.postimage, "055 test postimage changed");
+          for (const path of manifest.protectedTargets) fail(hash(source, path) === hash(outputRoot, path), `055 protected ${path} changed`);
+          console.log(`uqa-09b1-input-red root=${outputRoot} postimage=${patch.postimage}`);
+          NODE
+
+      - name: Run UQA-09b1 input-only MULTI RED in read-only isolation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          derived_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-multi-input-red/derived"
+          source_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-multi-reedit-green/derived"
+          acquired_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition/upstream"
+          test -d "$derived_dir" && test -d "$source_dir" && test -d "$acquired_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --mount "type=bind,source=$source_dir,target=/base-green,readonly" \
+            --mount "type=bind,source=$acquired_dir,target=/acquired-upstream,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              for root in /derived /base-green /acquired-upstream; do
+                if touch "$root/.uqa09b1-input-red-read-only-probe" 2>/dev/null; then exit 1; fi
+              done
+              test "$(git hash-object --no-filters /derived/extensions/ask-user-question.ts)" = b2ec2a3c30eb181ff3ddcbf4ed3ea3b0b9f12595
+              test "$(git hash-object --no-filters /base-green/tests/ask-user-question.test.ts)" = 5833e71d606c3ff0df1c0221e18aae12d3192fb0
+              test "$(git hash-object --no-filters /derived/tests/ask-user-question.test.ts)" = 3754a0972cf25e97d7f431f462bac4e2c46e9e1c
+              cmp /base-green/extensions/ask-user-question.ts /derived/extensions/ask-user-question.ts
+              cmp /base-green/lib/native-fullscreen-interaction.ts /derived/lib/native-fullscreen-interaction.ts
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /derived/extensions/ask-user-question.ts /derived/tests/ask-user-question.test.ts
+              /usr/local/bin/node /derived/scripts/check-types.mjs
+              ask_log=/tmp/uqa09b1-input-red-ask.tap
+              if /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap \
+                /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts >"$ask_log" 2>&1; then
+                cat "$ask_log"; echo "expected behavioral RED" >&2; exit 1
+              fi
+              cat "$ask_log"
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$ask_log")" -eq 109
+              test "$(grep -Ec "^ok [0-9]+ - " "$ask_log")" -eq 107
+              test "$(grep -Ec "^not ok [0-9]+ - " "$ask_log")" -eq 2
+              grep -Fx "1..109" "$ask_log" >/dev/null
+              grep -Fx "# tests 116" "$ask_log" >/dev/null
+              grep -Fx "# pass 114" "$ask_log" >/dev/null
+              for marker in "# fail 2" "# cancelled 0" "# skipped 0" "# todo 0"; do grep -Fx "$marker" "$ask_log" >/dev/null; done
+              grep -E "^not ok [0-9]+ - " "$ask_log" | cut -d " " -f 5- > /tmp/actual-failures
+              printf "%s\n" \
+                "ask_user_question RPC input-only multiSelect retyping replaces the saved custom draft" \
+                "ask_user_question RPC input-only multiSelect blank re-entry retains the saved custom draft" > /tmp/expected-failures
+              diff -u /tmp/expected-failures /tmp/actual-failures
+              grep -E -A 24 "^not ok [0-9]+ - ask_user_question RPC input-only multiSelect retyping replaces the saved custom draft$" "$ask_log" | grep -F "second input visit must show the saved draft as placeholder" >/dev/null
+              grep -E -A 24 "^not ok [0-9]+ - ask_user_question RPC input-only multiSelect blank re-entry retains the saved custom draft$" "$ask_log" | grep -F "blank input on re-entry must retain the first draft, not cancel or clear it" >/dev/null
+              test "$(grep -Fc "ERR_ASSERTION" "$ask_log")" -eq 2
+              test "$(grep -Fc "operator: '\''deepStrictEqual'\''" "$ask_log")" -eq 2
+            '
+
       - name: Verify final hosted candidate checkout cleanliness
         if: always()
         shell: bash
