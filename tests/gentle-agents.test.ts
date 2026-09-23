@@ -3372,6 +3372,21 @@ test("explicit outbound sends show safe preview and reason, and allow-once never
 	]);
 });
 
+test("permission sends the validated message snapshot even if tool arguments mutate during the prompt", async () => {
+	const fixture = outboundHarness();
+	let resolvePermission!: (value: unknown) => void;
+	fixture.choose(() => new Promise((resolve) => { resolvePermission = resolve; }));
+	await fixture.start();
+	const params = { recipient_session_id: "beta", message: "Approved message", reason: OUTBOUND_REASON };
+	const pending = fixture.send(params);
+	await eventually(() => fixture.selectCalls.length === 1, "permission prompt starts");
+	assert.match(fixture.selectCalls[0]!.title, /Approved message/);
+	params.message = "Unapproved message";
+	resolvePermission("Allow once (this send only)");
+	await pending;
+	assert.deepEqual(fixture.sent.map((entry) => entry.message), ["Approved message"]);
+});
+
 test("multiline caller text cannot forge consent metadata and remains an accurate preview", async () => {
 	const fixture = outboundHarness();
 	await fixture.start();
