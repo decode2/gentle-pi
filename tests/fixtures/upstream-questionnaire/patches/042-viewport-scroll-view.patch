@@ -1,0 +1,224 @@
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -71,6 +71,12 @@
+ 	rowIndex: number;
+ }
+ 
++interface MouseRegion {
++	bodyWidth: number;
++	previewStart: number;
++	previewWidth: number;
++}
++
+ function editorTheme(theme: QuestionnaireTheme): EditorTheme {
+ 	const color = (name: string) => (text: string) => theme.fg(name, text);
+ 	return {
+@@ -206,6 +212,12 @@
+ 	private completed = false;
+ 	private result: QuestionnaireResult | undefined;
+ 	private lineOwners: Array<LineOwner | undefined> = [];
++	private lineRegions: Array<MouseRegion | undefined> = [];
++	private bodyScroll = 0;
++	private bodyScrollLimit = 0;
++	private previewScroll = 0;
++	private previewScrollLimit = 0;
++	private renderedGeometry: { width: number; height: number; columns?: number; rows?: number } | undefined;
+ 	private _focused = false;
+ 
+ 	constructor(options: QuestionnaireViewOptions) {
+@@ -309,7 +321,28 @@
+ 	}
+ 
+ 	override handleMouse(event: TuiMouseEvent) {
+-		if (this.completed) return undefined;
++		if (this.completed || !this.mouseEventIsCurrent(event)) return undefined;
++		if (event.type === "wheel") {
++			const region = this.lineRegions[event.y];
++			if (!region || event.wheelDelta === 0) return undefined;
++			const delta = event.wheelDelta > 0 ? 1 : -1;
++			if (event.x >= region.previewStart && event.x < region.previewStart + region.previewWidth) {
++				const next = Math.max(0, Math.min(this.previewScrollLimit, this.previewScroll + delta));
++				if (next === this.previewScroll) return undefined;
++				this.previewScroll = next;
++				this.invalidate();
++				return { handled: true as const, render: true };
++			}
++			const owner = this.lineOwners[event.y];
++			if (event.x < region.bodyWidth && owner && owner.rowIndex >= -2) {
++				const next = Math.max(0, Math.min(this.bodyScrollLimit, this.bodyScroll + delta));
++				if (next === this.bodyScroll) return undefined;
++				this.bodyScroll = next;
++				this.invalidate();
++				return { handled: true as const, render: true };
++			}
++			return undefined;
++		}
+ 		if (this.editing !== undefined && this.editor !== undefined) return this.editor.handleMouse(event);
+ 
+ 		const owner = this.lineOwners[event.y];
+@@ -341,44 +374,71 @@
+ 		const viewport = Math.max(1, width);
+ 		const lines: string[] = [];
+ 		const owners: Array<LineOwner | undefined> = [];
++		const regions: Array<MouseRegion | undefined> = [];
+ 		const push = (text: string, owner?: LineOwner) => {
+ 			for (const line of this.wrap(text, viewport)) {
+ 				lines.push(line);
+ 				owners.push(owner);
++				regions.push(undefined);
+ 			}
+ 		};
+ 
+ 		if (this.questions.length === 0) {
+ 			this.lineOwners = [];
++			this.lineRegions = [];
++			this.renderedGeometry = this.currentRenderGeometry(viewport, 0);
+ 			return [];
+ 		}
+ 
+ 		push(this.renderTabs());
+ 		push("");
+ 
++		const paneHeight = Math.max(1, (this.tui.terminal?.rows ?? Number.MAX_SAFE_INTEGER) - 4);
+ 		const preview = this.currentPreview();
+ 		if (preview !== undefined && viewport >= MIN_PREVIEW_WIDTH) {
+ 			const leftWidth = Math.max(1, Math.floor(viewport * PREVIEW_SPLIT));
+ 			const rightWidth = Math.max(1, viewport - leftWidth - PREVIEW_GAP.length);
+ 			const left = this.renderBody(leftWidth, false);
+ 			const right = this.wrap(this.theme.fg("dim", preview), rightWidth);
+-			const rows = Math.max(left.lines.length, right.length);
++			this.bodyScrollLimit = Math.max(0, left.lines.length - paneHeight);
++			this.previewScrollLimit = Math.max(0, right.length - paneHeight);
++			this.bodyScroll = Math.min(this.bodyScroll, this.bodyScrollLimit);
++			this.previewScroll = Math.min(this.previewScroll, this.previewScrollLimit);
++			const leftLines = left.lines.slice(this.bodyScroll);
++			const leftOwners = left.owners.slice(this.bodyScroll);
++			const rightLines = right.slice(this.previewScroll);
++			const rows = Math.max(leftLines.length, rightLines.length);
+ 			for (let index = 0; index < rows; index++) {
+-				lines.push(`${padTo(left.lines[index] ?? "", leftWidth)}${PREVIEW_GAP}${right[index] ?? ""}`);
+-				owners.push(left.owners[index]);
++				const previewLine = rightLines[index] ?? "";
++				lines.push(`${padTo(leftLines[index] ?? "", leftWidth)}${PREVIEW_GAP}${previewLine}`);
++				owners.push(leftOwners[index]);
++				regions.push({
++					bodyWidth: leftWidth,
++					previewStart: leftWidth + PREVIEW_GAP.length,
++					previewWidth: Math.min(rightWidth, visibleWidth(previewLine)),
++				});
+ 			}
+ 		}
+ 		else {
+ 			const body = this.renderBody(viewport, preview !== undefined);
+-			lines.push(...body.lines);
+-			owners.push(...body.owners);
++			this.bodyScrollLimit = Math.max(0, body.lines.length - paneHeight);
++			this.previewScroll = 0;
++			this.previewScrollLimit = 0;
++			this.bodyScroll = Math.min(this.bodyScroll, this.bodyScrollLimit);
++			const bodyLines = body.lines.slice(this.bodyScroll);
++			const bodyOwners = body.owners.slice(this.bodyScroll);
++			lines.push(...bodyLines);
++			owners.push(...bodyOwners);
++			regions.push(...bodyOwners.map((owner) => owner ? { bodyWidth: viewport, previewStart: 0, previewWidth: 0 } : undefined));
+ 		}
+ 
+ 		push("");
+ 		push(this.hint());
+ 
+-		const bounded = this.boundViewport(lines, owners);
++		const bounded = this.boundViewport(lines, owners, regions);
+ 		this.lineOwners = bounded.owners;
++		this.lineRegions = bounded.regions;
++		this.renderedGeometry = this.currentRenderGeometry(viewport, bounded.lines.length);
+ 		return bounded.lines;
+ 	}
+ 
+@@ -386,11 +446,12 @@
+ 	private boundViewport(
+ 		lines: string[],
+ 		owners: Array<LineOwner | undefined>,
+-	): { lines: string[]; owners: Array<LineOwner | undefined> } {
++		regions: Array<MouseRegion | undefined>,
++	): { lines: string[]; owners: Array<LineOwner | undefined>; regions: Array<MouseRegion | undefined> } {
+ 		const terminalRows = this.tui.terminal?.rows;
+-		if (terminalRows === undefined) return { lines, owners };
++		if (terminalRows === undefined) return { lines, owners, regions };
+ 		const maxRows = Math.max(1, terminalRows);
+-		if (lines.length <= maxRows) return { lines, owners };
++		if (lines.length <= maxRows) return { lines, owners, regions };
+ 
+ 		const state = this.states[this.focusedQuestion];
+ 		const focusedLine = this.editing === undefined
+@@ -401,11 +462,14 @@
+ 		return {
+ 			lines: lines.slice(start, start + maxRows),
+ 			owners: owners.slice(start, start + maxRows),
++			regions: regions.slice(start, start + maxRows),
+ 		};
+ 	}
+ 
+ 	override invalidate(): void {
+ 		this.lineOwners = [];
++		this.lineRegions = [];
++		this.renderedGeometry = undefined;
+ 		super.invalidate();
+ 		this.editor?.setFocused(this._focused);
+ 	}
+@@ -523,6 +587,8 @@
+ 		const total = this.questions.length;
+ 		if (total === 0) return;
+ 		this.focusedQuestion = (this.focusedQuestion + delta + total) % total;
++		this.bodyScroll = 0;
++		this.previewScroll = 0;
+ 		this.invalidate();
+ 	}
+ 
+@@ -541,6 +607,8 @@
+ 		const controls = this.controlRows(this.focusedQuestion);
+ 		if (!state || !controls) return;
+ 		state.cursor = Math.max(0, Math.min(controls.cancel, state.cursor + delta));
++		this.bodyScroll = 0;
++		this.previewScroll = 0;
+ 		this.invalidate();
+ 	}
+ 
+@@ -564,6 +632,7 @@
+ 		const controls = this.controlRows(questionIndex);
+ 		if (!state || !controls) return false;
+ 		const changed = this.focusedQuestion !== questionIndex || state.cursor !== rowIndex;
++		if (changed) this.bodyScroll = this.previewScroll = 0;
+ 		this.focusedQuestion = questionIndex;
+ 		state.cursor = Math.max(0, Math.min(controls.cancel, rowIndex));
+ 		this.invalidate();
+@@ -799,6 +868,30 @@
+ 		return matchesKey(data, shift ? "shift+tab" : "tab");
+ 	}
+ 
++	private currentRenderGeometry(width: number, height: number) {
++		const columns = this.tui.terminal?.columns;
++		const rows = this.tui.terminal?.rows;
++		return {
++			width,
++			height,
++			...(columns !== undefined ? { columns } : {}),
++			...(rows !== undefined ? { rows } : {}),
++		};
++	}
++
++	private mouseEventIsCurrent(event: TuiMouseEvent): boolean {
++		const geometry = this.renderedGeometry;
++		const terminal = this.tui.terminal;
++		return geometry !== undefined
++			&& geometry.width === event.width
++			&& geometry.height === event.height
++			&& geometry.columns === terminal?.columns
++			&& geometry.rows === terminal?.rows
++			&& event.x >= 0 && event.x < event.width
++			&& event.y >= 0 && event.y < event.height
++			&& event.y < this.lineOwners.length;
++	}
++
+ 	private mouseTarget(event: TuiMouseEvent) {
+ 		return {
+ 			component: this,
