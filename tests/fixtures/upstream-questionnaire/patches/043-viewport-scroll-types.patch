@@ -1,0 +1,32 @@
+--- a/lib/questionnaire/questionnaire-view.ts
++++ b/lib/questionnaire/questionnaire-view.ts
+@@ -324,22 +324,23 @@
+ 		if (this.completed || !this.mouseEventIsCurrent(event)) return undefined;
+ 		if (event.type === "wheel") {
+ 			const region = this.lineRegions[event.y];
+-			if (!region || event.wheelDelta === 0) return undefined;
+-			const delta = event.wheelDelta > 0 ? 1 : -1;
++			const delta = event.wheelDelta ?? 0;
++			if (!region || delta === 0) return undefined;
++			const direction = delta > 0 ? 1 : -1;
+ 			if (event.x >= region.previewStart && event.x < region.previewStart + region.previewWidth) {
+-				const next = Math.max(0, Math.min(this.previewScrollLimit, this.previewScroll + delta));
++				const next = Math.max(0, Math.min(this.previewScrollLimit, this.previewScroll + direction));
+ 				if (next === this.previewScroll) return undefined;
+ 				this.previewScroll = next;
+ 				this.invalidate();
+-				return { handled: true as const, render: true };
++				return { handled: true as const, render: true, target: this.mouseTarget(event) };
+ 			}
+ 			const owner = this.lineOwners[event.y];
+ 			if (event.x < region.bodyWidth && owner && owner.rowIndex >= -2) {
+-				const next = Math.max(0, Math.min(this.bodyScrollLimit, this.bodyScroll + delta));
++				const next = Math.max(0, Math.min(this.bodyScrollLimit, this.bodyScroll + direction));
+ 				if (next === this.bodyScroll) return undefined;
+ 				this.bodyScroll = next;
+ 				this.invalidate();
+-				return { handled: true as const, render: true };
++				return { handled: true as const, render: true, target: this.mouseTarget(event) };
+ 			}
+ 			return undefined;
+ 		}
