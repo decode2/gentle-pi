@@ -3322,6 +3322,134 @@ jobs:
               grep -Fx "# fail 0" "$view_log" >/dev/null
             '
 
+      - name: Compose UQA-08b editor-caret RED offline
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          source_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-scroll-midfocus-green/derived"
+          red_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-editor-scroll-red"
+          test -d "$source_dir"
+          test ! -e "$red_dir"
+          mkdir "$red_dir"
+          chmod 0777 "$red_dir"
+          docker run --rm -i --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$source_dir,target=/base-green,readonly" \
+            --mount "type=bind,source=$red_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { execFileSync } from "node:child_process";
+          import { copyFile, mkdir, readdir, readFile } from "node:fs/promises";
+          import { join } from "node:path";
+          import { composeUpstreamQuestionnaireArtifact } from "/workspace/tests/fixtures/hosted-compose-upstream-questionnaire.ts";
+
+          const source = "/base-green";
+          const artifact = "/artifact";
+          const manifest = {
+            schema: "gentle-pi.hosted-upstream-questionnaire-composition/v2",
+            derivedDirectory: "derived",
+            patchDirectory: "patches/questionnaire-upstream",
+            patchInventory: [{
+              file: "046-viewport-editor-scroll-tests.patch",
+              target: "tests/questionnaire-view.test.ts",
+              preimage: "8cae509d3c38b6c47651808ee0d14b157905cbb7",
+              postimage: "0f493774f4e98bf968303f8dfde155c05cbd25e2",
+            }],
+            allowedTargets: ["tests/questionnaire-view.test.ts"],
+            protectedTargets: ["lib/native-fullscreen-interaction.ts"],
+          };
+          const fail = (condition, message) => { if (!condition) throw new Error(message); };
+          const patch = manifest.patchInventory[0];
+          const actualPreimage = execFileSync("git", ["-C", source, "hash-object", "--no-filters", "--", patch.target], { encoding: "utf8" }).trim();
+          fail(actualPreimage === patch.preimage, `UQA-08b editor-caret preimage changed: ${actualPreimage}`);
+          const patchRoot = join(artifact, manifest.patchDirectory);
+          const outputRoot = join(artifact, manifest.derivedDirectory);
+          await mkdir(patchRoot, { recursive: true });
+          const patchPath = join(patchRoot, patch.file);
+          await copyFile(join("/workspace/tests/fixtures/upstream-questionnaire/patches", patch.file), patchPath);
+          const patchBytes = await readFile(patchPath);
+          const patchHash = createHash("sha256").update(patchBytes).digest("hex");
+          fail(patchHash === "387a1da5aa04902ef4122914359e2d1db44f22b6ae9c95c1155d4c92419fb9e3", `UQA-08b editor-caret patch hash changed: ${patchHash}`);
+          const staged = (await readdir(patchRoot)).sort();
+          fail(JSON.stringify(staged) === JSON.stringify([patch.file]), "UQA-08b editor-caret staged patch set changed");
+          const changed = execFileSync("git", ["-C", source, "apply", "--numstat", "--summary", patchPath], { encoding: "utf8" });
+          const changedPaths = changed.split("\n").filter((line) => line.includes("\t")).map((line) => line.slice(line.lastIndexOf("\t") + 1)).filter(Boolean);
+          fail(JSON.stringify(changedPaths) === JSON.stringify([patch.target]), "UQA-08b editor-caret patch target changed");
+          await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest });
+          const actualPostimage = execFileSync("git", ["-C", outputRoot, "hash-object", "--no-filters", "--", patch.target], { encoding: "utf8" }).trim();
+          fail(actualPostimage === patch.postimage, `UQA-08b editor-caret postimage changed: ${actualPostimage}`);
+          const helper = "lib/native-fullscreen-interaction.ts";
+          const sourceHelper = execFileSync("git", ["-C", source, "hash-object", "--no-filters", "--", helper], { encoding: "utf8" }).trim();
+          const derivedHelper = execFileSync("git", ["-C", outputRoot, "hash-object", "--no-filters", "--", helper], { encoding: "utf8" }).trim();
+          fail(sourceHelper === derivedHelper, "UQA-08b editor-caret changed the protected fullscreen helper");
+          console.log(`uqa-08b-editor-caret-red-composition-proof root=${outputRoot} patch=${patch.file} target=${patch.target} preimage=${actualPreimage} postimage=${actualPostimage} helper=${helper}:${derivedHelper}`);
+          NODE
+
+      - name: Run UQA-08b editor-caret RED in read-only isolation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition"
+          base_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-scroll-midfocus-green/derived"
+          derived_dir="$RUNNER_TEMP/questionnaire-upstream-viewport-editor-scroll-red/derived"
+          test -d "$base_dir" && test -d "$derived_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --mount "type=bind,source=$base_dir,target=/base-green,readonly" \
+            --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              if touch /derived/.uqa08b-editor-red-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /base-green/.uqa08b-editor-red-read-only-probe 2>/dev/null; then exit 1; fi
+              if touch /acquired-upstream/.uqa08b-editor-red-read-only-probe 2>/dev/null; then exit 1; fi
+              cmp /base-green/lib/questionnaire/questionnaire-view.ts /derived/lib/questionnaire/questionnaire-view.ts
+              cmp /base-green/lib/native-fullscreen-interaction.ts /derived/lib/native-fullscreen-interaction.ts
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /derived/lib/questionnaire/questionnaire-view.ts /derived/tests/questionnaire-view.test.ts
+              /usr/local/bin/node /derived/scripts/check-types.mjs
+              log=/tmp/uqa08b-editor-caret-red-view.tap
+              set +e
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap \
+                /derived/tests/questionnaire-view.test.ts >"$log" 2>&1
+              status=$?
+              set -e
+              cat "$log"
+              test "$status" -ne 0
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$log")" -eq 44
+              test "$(grep -Ec "^ok [0-9]+ - " "$log")" -eq 43
+              test "$(grep -Ec "^not ok [0-9]+ - " "$log")" -eq 1
+              grep -Eq "^not ok [0-9]+ - typing restores a manually scrolled-off multiline editor caret$" "$log"
+              grep -Fx "1..44" "$log" >/dev/null
+              grep -Fx "# tests 44" "$log" >/dev/null
+              grep -Fx "# pass 43" "$log" >/dev/null
+              grep -Fx "# fail 1" "$log" >/dev/null
+              grep -Fx "# cancelled 0" "$log" >/dev/null
+              grep -Fx "# skipped 0" "$log" >/dev/null
+              grep -Fx "# todo 0" "$log" >/dev/null
+              test "$(grep -Fc "typing brings the changed caret line back into view" "$log")" -eq 1
+              test "$(grep -Ec "ERR_ASSERTION" "$log")" -eq 1
+              test "$(grep -Ec "operator: .?match" "$log")" -eq 1
+            '
+
       - name: Verify final hosted candidate checkout cleanliness
         if: always()
         shell: bash

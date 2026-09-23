@@ -1,0 +1,53 @@
+--- a/tests/questionnaire-view.test.ts
++++ b/tests/questionnaire-view.test.ts
+@@ -961,6 +961,50 @@
+ 	assert.match(plain(lines.join("\n")), /draft-visible/);
+ });
+ 
++test("typing restores a manually scrolled-off multiline editor caret", () => {
++	const completed: QuestionnaireResult[] = [];
++	const view = new QuestionnaireView({
++		questions: [question("Choose?", [option("Alpha")])],
++		theme,
++		tui: { terminal: { rows: 10 }, requestRender() {} } as TUI,
++		onComplete: (result) => completed.push(result),
++	});
++	view.handleInput(KEY.down[0]);
++	view.handleInput(KEY.enter);
++	for (let index = 0; index < 16; index++) {
++		if (index > 0) view.handleInput(KEY.enter);
++		view.handleInput(`draft-${String(index).padStart(2, "0")}`);
++	}
++	view.handleInput(KEY.enter);
++	view.handleInput("caret-tail");
++
++	let lines = view.render(100);
++	assert.ok(lines.length <= 10);
++	assert.match(plain(lines.join("\n")), /caret-tail/, "the final editor line starts visible");
++	assert.deepEqual(view.getResult().answers, []);
++	let claimed = 0;
++	while (claimed < 24 && plain(lines.join("\n")).includes("caret-tail")) {
++		const visibleDraft = lines.map((line) => plain(line).match(/draft-\d{2}/)?.[0])
++			.find((text) => text !== undefined);
++		assert.ok(visibleDraft, "wheel coordinates must stay on a visible editor row");
++		const point = renderedPoint(lines, visibleDraft);
++		const before = plain(lines.join("\n"));
++		assert.equal(view.handleMouse(wheelEvent(lines, point.x, point.y, "up"))?.handled, true);
++		lines = view.render(100);
++		assert.notEqual(plain(lines.join("\n")), before, "each claimed wheel must move the rendered body");
++		claimed++;
++	}
++	assert.ok(claimed > 0, "the user manually scrolled the editor body");
++	assert.doesNotMatch(plain(lines.join("\n")), /caret-tail/, "the caret line is genuinely hidden");
++
++	view.handleInput("Z");
++	const after = plain(render(view));
++	assert.match(after, /draft-15/);
++	assert.match(after, /caret-tailZ/, "typing brings the changed caret line back into view");
++	assert.deepEqual(view.getResult().answers, [], "typing must not commit or discard the draft");
++	assert.equal(completed.length, 0, "the open editor must not complete the questionnaire");
++});
++
+ test("wheel over the visible preview scrolls the preview pane", () => {
+ 	const preview = Array.from({ length: 24 }, (_, index) =>
+ 		`Preview-${String(index).padStart(2, "0")} ${"x".repeat(36)}`,
