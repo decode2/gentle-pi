@@ -1,0 +1,203 @@
+diff --git a/extensions/ask-user-question.ts b/extensions/ask-user-question.ts
+index 037574cd331f6ebb4cfb001bc0f6df5d905783d9..2bcedddd299eab8e0161ac072e6f7ff9a36cff14 100644
+--- a/extensions/ask-user-question.ts
++++ b/extensions/ask-user-question.ts
+@@ -52,6 +52,37 @@ function unavailableResult(): QuestionnaireToolResult {
+ 	};
+ }
+ 
++/** Settle on abort even when an RPC client never answers; ignore late dialog outcomes. */
++function withAbort<T>(signal: AbortSignal | undefined, dialog: () => Promise<T>): Promise<T | undefined> {
++	if (signal?.aborted) return Promise.resolve(undefined);
++	return new Promise((resolve, reject) => {
++		let settled = false;
++		const finish = (value: T | undefined) => {
++			if (settled) return;
++			settled = true;
++			signal?.removeEventListener("abort", onAbort);
++			resolve(value);
++		};
++		const fail = (error: unknown) => {
++			if (settled) return;
++			settled = true;
++			signal?.removeEventListener("abort", onAbort);
++			reject(error);
++		};
++		const onAbort = () => finish(undefined);
++		signal?.addEventListener("abort", onAbort, { once: true });
++		if (signal?.aborted) {
++			onAbort();
++			return;
++		}
++		try {
++			dialog().then(finish, fail);
++		} catch (error) {
++			fail(error);
++		}
++	});
++}
++
+ /**
+  * Human-readable body for one answer. A custom answer on a multiSelect
+  * question keeps the toggled options, so the text must name them explicitly:
+@@ -149,62 +180,109 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
+ 		): Promise<QuestionnaireToolResult> {
+ 			const error = validateQuestionnaire(params);
+ 			if (error) return invalidQuestionnaireResult(error);
+-			if (ctx.mode !== "tui") return unavailableResult();
+ 
+-			let view: QuestionnaireView | undefined;
+-			let abortRequested = false;
+-			let abortListenerRemoved = false;
+-			const cancelledResult = (): QuestionnaireToolResult => ({
+-				content: [{ type: "text", text: "User cancelled the questionnaire" }],
+-				details: { cancelled: true },
+-			});
+-			const abortListener = () => {
+-				abortRequested = true;
+-				view?.cancel();
+-			};
+-			const removeAbortListener = () => {
+-				if (!signal || abortListenerRemoved) return;
+-				abortListenerRemoved = true;
+-				signal.removeEventListener("abort", abortListener);
+-			};
+-			if (signal?.aborted) return cancelledResult();
+-			signal?.addEventListener("abort", abortListener);
+-			if (signal?.aborted) {
+-				removeAbortListener();
+-				return cancelledResult();
+-			}
+ 			let selection: QuestionnaireResult | undefined;
+-			try {
++			if (ctx.mode === "rpc") {
++				if (ctx.hasUI !== true || typeof ctx.ui.select !== "function" ||
++					(typeof ctx.ui.editor !== "function" && typeof ctx.ui.input !== "function") ||
++					params.questions.some((question) => question.multiSelect)) return unavailableResult();
++				if (signal?.aborted) return {
++					content: [{ type: "text", text: "User cancelled the questionnaire" }],
++					details: { cancelled: true },
++				};
+ 				pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: true });
+ 				pi.events.emit("rpiv:ask-user:blocked", { active: true });
+-				selection = await ctx.ui.custom<QuestionnaireResult>((tui, theme, keybindings, done) => {
+-					view = new QuestionnaireView({
+-						questions: params.questions,
+-						theme,
+-						tui,
+-						keybindings,
+-						onComplete: (result) => {
+-							removeAbortListener();
+-							done(result);
+-						},
+-					});
+-					if (abortRequested) view.cancel();
+-					// Native dock swap, never an overlay: the transcript stays scrollable
+-					// while the questionnaire owns focus. No `overlay` option is passed.
+-					const container = createNativeFullscreenInteraction({
+-						keyboardTarget: view,
+-						requestRender: () => tui.requestRender(),
+-					});
+-					container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+-					container.addChild(view);
+-					container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+-					return container;
++				try {
++					const answers: AnswerRow[] = [];
++					for (const [questionIndex, question] of params.questions.entries()) {
++						if (signal?.aborted) break;
++						const action = await withAbort(signal, () => ctx.ui.select(question.question, ["Choose an option", "Use custom text", "Cancel"], { signal }));
++						if (signal?.aborted || action === undefined || action === "Cancel") break;
++						let answer: AnswerRow | undefined;
++						if (action === "Choose an option") {
++							const selected = await withAbort(signal, () => ctx.ui.select(question.question, question.options.map((option) => option.label), { signal }));
++							if (signal?.aborted || selected === undefined) break;
++							const option = question.options.find((item) => item.label === selected);
++							if (!option) break;
++							answer = { questionIndex, question: question.question, kind: "option", answer: option.label,
++								...(option.preview === undefined ? {} : { preview: option.preview }) };
++						} else if (action === "Use custom text") {
++							const custom = await withAbort(signal, () => typeof ctx.ui.editor === "function"
++								? ctx.ui.editor(question.question)
++								: ctx.ui.input(question.question, undefined, { signal }));
++							if (signal?.aborted || custom === undefined || custom.trim().length === 0) break;
++							answer = { questionIndex, question: question.question, kind: "custom", answer: custom };
++						} else {
++							break;
++						}
++						const submit = await withAbort(signal, () => ctx.ui.select(question.question, ["Submit", "Cancel"], { signal }));
++						if (signal?.aborted || submit !== "Submit") break;
++						answers.push(answer);
++					}
++					selection = answers.length === params.questions.length
++						? { cancelled: false, answers }
++						: { cancelled: true, answers };
++				} finally {
++					pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: false });
++					pi.events.emit("rpiv:ask-user:blocked", { active: false });
++				}
++			} else if (ctx.mode !== "tui") {
++				return unavailableResult();
++			} else {
++				let view: QuestionnaireView | undefined;
++				let abortRequested = false;
++				let abortListenerRemoved = false;
++				const cancelledResult = (): QuestionnaireToolResult => ({
++					content: [{ type: "text", text: "User cancelled the questionnaire" }],
++					details: { cancelled: true },
+ 				});
+-			}
+-			finally {
+-				removeAbortListener();
+-				pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: false });
+-				pi.events.emit("rpiv:ask-user:blocked", { active: false });
++				const abortListener = () => {
++					abortRequested = true;
++					view?.cancel();
++				};
++				const removeAbortListener = () => {
++					if (!signal || abortListenerRemoved) return;
++					abortListenerRemoved = true;
++					signal.removeEventListener("abort", abortListener);
++				};
++				if (signal?.aborted) return cancelledResult();
++				signal?.addEventListener("abort", abortListener);
++				if (signal?.aborted) {
++					removeAbortListener();
++					return cancelledResult();
++				}
++				try {
++					pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: true });
++					pi.events.emit("rpiv:ask-user:blocked", { active: true });
++					selection = await ctx.ui.custom<QuestionnaireResult>((tui, theme, keybindings, done) => {
++						view = new QuestionnaireView({
++							questions: params.questions,
++							theme,
++							tui,
++							keybindings,
++							onComplete: (result) => {
++								removeAbortListener();
++								done(result);
++							},
++						});
++						if (abortRequested) view.cancel();
++						// Native dock swap, never an overlay: the transcript stays scrollable
++						// while the questionnaire owns focus. No `overlay` option is passed.
++						const container = createNativeFullscreenInteraction({
++							keyboardTarget: view,
++							requestRender: () => tui.requestRender(),
++						});
++						container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
++						container.addChild(view);
++						container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
++						return container;
++					});
++				}
++				finally {
++					removeAbortListener();
++					pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: false });
++					pi.events.emit("rpiv:ask-user:blocked", { active: false });
++				}
+ 			}
+ 
+ 			if (selection === undefined || selection.cancelled) {

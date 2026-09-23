@@ -3724,6 +3724,127 @@ jobs:
               done < /tmp/uqa09a-rpc-red-failures
             '
 
+      - name: Compose UQA-09a RPC entry GREEN offline
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          source_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-entry-red/derived"
+          green_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-entry-green"
+          test -d "$source_dir"
+          test ! -e "$green_dir"
+          mkdir "$green_dir"
+          chmod 0777 "$green_dir"
+          docker run --rm -i --network=none --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$source_dir,target=/base-red,readonly" \
+            --mount "type=bind,source=$green_dir,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=1g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /workspace "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /usr/local/bin/node --experimental-strip-types --input-type=module <<'NODE'
+          import { createHash } from "node:crypto";
+          import { execFileSync } from "node:child_process";
+          import { copyFile, mkdir, readFile } from "node:fs/promises";
+          import { join } from "node:path";
+          import { composeUpstreamQuestionnaireArtifact } from "/workspace/tests/fixtures/hosted-compose-upstream-questionnaire.ts";
+
+          const source = "/base-red";
+          const artifact = "/artifact";
+          const patch = {
+            file: "049-rpc-entry-producer.patch",
+            target: "extensions/ask-user-question.ts",
+            preimage: "037574cd331f6ebb4cfb001bc0f6df5d905783d9",
+            postimage: "2bcedddd299eab8e0161ac072e6f7ff9a36cff14",
+          };
+          const manifest = {
+            schema: "gentle-pi.hosted-upstream-questionnaire-composition/v2",
+            derivedDirectory: "derived",
+            patchDirectory: "patches/questionnaire-upstream",
+            patchInventory: [patch],
+            allowedTargets: [patch.target],
+            protectedTargets: ["lib/native-fullscreen-interaction.ts"],
+          };
+          const fail = (condition, message) => { if (!condition) throw new Error(message); };
+          const hash = (root, path) => execFileSync("git", ["-C", root, "hash-object", "--no-filters", "--", path], { encoding: "utf8" }).trim();
+          fail(hash(source, patch.target) === patch.preimage, "UQA-09a RPC GREEN preimage changed");
+          const patchRoot = join(artifact, manifest.patchDirectory);
+          const outputRoot = join(artifact, manifest.derivedDirectory);
+          await mkdir(patchRoot, { recursive: true });
+          const patchPath = join(patchRoot, patch.file);
+          await copyFile(join("/workspace/tests/fixtures/upstream-questionnaire/patches", patch.file), patchPath);
+          fail(createHash("sha256").update(await readFile(patchPath)).digest("hex") === "3f2e15a54504b30e1c03a7cc5807601971e97db19ad49b5111047766ddacad83", "UQA-09a RPC GREEN patch hash changed");
+          execFileSync("git", ["-C", source, "apply", "--check", "--verbose", patchPath], { stdio: "inherit" });
+          await composeUpstreamQuestionnaireArtifact({ sourceRoot: source, patchRoot, outputRoot, manifest });
+          fail(hash(outputRoot, patch.target) === patch.postimage, "UQA-09a RPC GREEN postimage changed");
+          for (const path of ["tests/ask-user-question.test.ts", "lib/native-fullscreen-interaction.ts"]) {
+            fail(hash(source, path) === hash(outputRoot, path), `UQA-09a RPC GREEN changed protected ${path}`);
+          }
+          console.log(`uqa-09a-rpc-green-composition-proof root=${outputRoot} patch=${patch.file} target=${patch.target} preimage=${patch.preimage} postimage=${patch.postimage}`);
+          NODE
+
+      - name: Run UQA-09a RPC entry GREEN in read-only isolation
+        env:
+          IMAGE_REF: ${{ steps.image.outputs.ref }}
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE_REF")" = "$IMAGE_ID"
+          acquisition_dir="$RUNNER_TEMP/questionnaire-upstream-acquisition"
+          base_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-entry-red/derived"
+          derived_dir="$RUNNER_TEMP/questionnaire-upstream-rpc-entry-green/derived"
+          test -d "$acquisition_dir/upstream" && test -d "$base_dir" && test -d "$derived_dir"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$derived_dir,target=/derived,readonly" \
+            --mount "type=bind,source=$base_dir,target=/base-red,readonly" \
+            --mount "type=bind,source=$acquisition_dir/upstream,target=/acquired-upstream,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 --cap-drop=ALL \
+            --security-opt=no-new-privileges --user 1000:1000 -w /derived "$IMAGE_REF" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin HOME=/tmp/hosted-home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 GENTLE_PI_HOSTED_ISOLATION=docker-network-none-readonly-v1 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            /bin/sh -eu -c '
+              if touch /derived/.uqa09a-rpc-green-read-only-probe 2>/dev/null; then exit 1; fi
+              cmp /base-red/tests/ask-user-question.test.ts /derived/tests/ask-user-question.test.ts
+              cmp /base-red/lib/native-fullscreen-interaction.ts /derived/lib/native-fullscreen-interaction.ts
+              /usr/local/bin/node /acquired-upstream/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM --typeRoots /acquired-upstream/node_modules/@types --types node \
+                /derived/extensions/ask-user-question.ts /derived/tests/ask-user-question.test.ts
+              /usr/local/bin/node /derived/scripts/check-types.mjs
+              output="$(/usr/local/bin/node --experimental-strip-types --test --test-reporter=tap /derived/tests/ask-user-question.test.ts /derived/tests/gentle-ai.test.ts 2>&1)"
+              printf "%s\\n" "$output"
+              test "$(printf "%s\\n" "$output" | grep -Ec "^ok [0-9]+ - ")" -eq 104
+              test "$(printf "%s\\n" "$output" | grep -Ec "^not ok ")" -eq 0
+              printf "%s\\n" "$output" | grep -Fx "1..104" >/dev/null
+              printf "%s\\n" "$output" | grep -Fx "# tests 111" >/dev/null
+              printf "%s\\n" "$output" | grep -Fx "# pass 111" >/dev/null
+              printf "%s\\n" "$output" | grep -Fx "# fail 0" >/dev/null
+              printf "%s\\n" "$output" | grep -Fx "# cancelled 0" >/dev/null
+              printf "%s\\n" "$output" | grep -Fx "# skipped 0" >/dev/null
+              printf "%s\\n" "$output" | grep -Fx "# todo 0" >/dev/null
+              view_log=/tmp/uqa09a-rpc-green-view.tap
+              /usr/local/bin/node --experimental-strip-types --test --test-reporter=tap \
+                /derived/tests/questionnaire-view.test.ts >"$view_log" 2>&1
+              cat "$view_log"
+              test "$(grep -Ec "^(ok|not ok) [0-9]+ - " "$view_log")" -eq 44
+              test "$(grep -Ec "^ok [0-9]+ - " "$view_log")" -eq 44
+              test "$(grep -Ec "^not ok [0-9]+ - " "$view_log")" -eq 0
+              grep -Fx "1..44" "$view_log" >/dev/null
+              grep -Fx "# tests 44" "$view_log" >/dev/null
+              grep -Fx "# pass 44" "$view_log" >/dev/null
+              grep -Fx "# fail 0" "$view_log" >/dev/null
+              grep -Fx "# cancelled 0" "$view_log" >/dev/null
+              grep -Fx "# skipped 0" "$view_log" >/dev/null
+              grep -Fx "# todo 0" "$view_log" >/dev/null
+            '
+
       - name: Verify final hosted candidate checkout cleanliness
         if: always()
         shell: bash
