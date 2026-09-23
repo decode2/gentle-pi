@@ -1,0 +1,91 @@
+diff --git a/tests/ask-user-question.test.ts b/tests/ask-user-question.test.ts
+index 69f0842..4c0d54a 100644
+--- a/tests/ask-user-question.test.ts
++++ b/tests/ask-user-question.test.ts
+@@ -300,6 +300,86 @@ test("ask_user_question falls back to RPC input for custom text", async () => {
+ 	assert.deepEqual(emitted.map(({ data }) => data.active), [true, true, false, false]);
+ });
+ 
++test("ask_user_question RPC multiSelect keeps reverse toggles in authored order with custom text", async () => {
++	const { tool, emitted } = registerQuestionTool();
++	const choices = ["Toggle an option", "Two", "Toggle an option", "One", "Use custom text", "Submit"];
++	const selected: string[] = [];
++	let customCalls = 0;
++	let editorCalls = 0;
++	let inputCalls = 0;
++	const result = await run(tool, {
++		questions: [{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true }],
++	}, {
++		mode: "rpc", hasUI: true,
++		ui: {
++			custom: async () => { customCalls++; return undefined; },
++			select: async (_title: string, options: string[]) => {
++				const choice = choices.shift();
++				assert.ok(choice && options.includes(choice), `RPC dialog must expose ${choice}`);
++				selected.push(choice);
++				return choice;
++			},
++			editor: async (..._args: unknown[]) => { editorCalls++; return "free note"; },
++			input: async (..._args: unknown[]) => { inputCalls++; return "input fallback"; },
++		},
++	});
++
++	assert.deepEqual(result.details, {
++		answers: [{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "free note", selected: ["One", "Two"] }],
++	});
++	assert.equal(result.content[0]?.text, "1. Pick? — (custom) free note — selected: One, Two");
++	assert.deepEqual(selected, ["Toggle an option", "Two", "Toggle an option", "One", "Use custom text", "Submit"]);
++	assert.deepEqual(choices, []);
++	assert.deepEqual([customCalls, editorCalls, inputCalls], [0, 1, 0]);
++	assertAbortLifecycle(emitted);
++});
++
++test("ask_user_question RPC empty multiSelect Submit commits no input instead of cancelling", async () => {
++	const { tool, emitted } = registerQuestionTool();
++	const choices = ["Submit"];
++	let customCalls = 0;
++	let editorCalls = 0;
++	const result = await run(tool, {
++		questions: [{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true }],
++	}, {
++		mode: "rpc", hasUI: true,
++		ui: {
++			custom: async () => { customCalls++; return undefined; },
++			select: async (_title: string, options: string[]) => {
++				const choice = choices.shift();
++				assert.ok(choice && options.includes(choice), "visible Submit must accept an empty MULTI");
++				return choice;
++			},
++			editor: async (..._args: unknown[]) => { editorCalls++; return undefined; },
++		},
++	});
++
++	assert.deepEqual(result.details, {
++		answers: [{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: [] }],
++	});
++	assert.equal(result.content[0]?.text, "1. Pick? — (no input)");
++	assert.equal(result.details.cancelled ?? false, false);
++	assert.deepEqual(choices, []);
++	assert.deepEqual([customCalls, editorCalls], [0, 0]);
++	assertAbortLifecycle(emitted);
++
++	const cancelled = registerQuestionTool();
++	const cancelResult = await run(cancelled.tool, {
++		questions: [{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true }],
++	}, {
++		mode: "rpc", hasUI: true,
++		ui: {
++			select: async (_title: string, options: string[]) => {
++				assert.ok(options.includes("Cancel"));
++				return "Cancel";
++			},
++			editor: async (..._args: unknown[]) => undefined,
++		},
++	});
++	assert.deepEqual(cancelResult.details, { cancelled: true });
++	assertAbortLifecycle(cancelled.emitted);
++});
++
+ test("ask_user_question commits a single-select answer end-to-end", async () => {
+ 	const { tool, emitted } = registerQuestionTool();
+ 	const rendered = { value: "" };
