@@ -258,7 +258,7 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 		async execute(
 			_toolCallId: string,
 			params: QuestionParams,
-			_signal: AbortSignal | undefined,
+			signal: AbortSignal | undefined,
 			_onUpdate: undefined,
 			ctx,
 		): Promise<QuestionnaireToolResult> {
@@ -275,17 +275,38 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 				}
 			}
 
+			if (signal?.aborted) return cancelledResult();
+
 			let selection: QuestionnaireResult | undefined;
+			let view: QuestionnaireView | undefined;
+			let listening = false;
+			const removeAbortListener = () => {
+				if (!listening) return;
+				signal?.removeEventListener("abort", onAbort);
+				listening = false;
+			};
+			const onAbort = () => view?.cancel();
 			try {
 				pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: true });
+				if (signal) {
+					signal.addEventListener("abort", onAbort);
+					listening = true;
+				}
+				// An abort between the first check and listener registration must not mount.
+				if (signal?.aborted) return cancelledResult();
 				selection = await ctx.ui.custom<QuestionnaireResult>((tui, theme, keybindings, done) => {
-					const view = new QuestionnaireView({
+					view = new QuestionnaireView({
 						questions: params.questions,
 						theme,
 						tui,
 						keybindings,
-						onComplete: (result) => done(result),
+						onComplete: (result) => {
+							removeAbortListener();
+							done(result);
+						},
 					});
+					// The signal can fire while the host constructs the view.
+					if (signal?.aborted) view.cancel();
 					// Native dock swap, never an overlay: the transcript stays scrollable
 					// while the questionnaire owns focus. No `overlay` option is passed.
 					const container = createNativeFullscreenInteraction({
@@ -299,6 +320,7 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 				});
 			}
 			finally {
+				removeAbortListener();
 				pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: false });
 			}
 

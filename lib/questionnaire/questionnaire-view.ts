@@ -155,6 +155,11 @@ export class QuestionnaireView extends Container implements Focusable {
 		this.invalidate();
 	}
 
+	/** Cancel once, delivering committed answers without uncommitted editor text or toggles. */
+	cancel(): void {
+		this.finish({ cancelled: true, answers: this.collectedAnswers() });
+	}
+
 	/** Current committed result. Safe to call before completion. */
 	getResult(): QuestionnaireResult {
 		return this.result ?? { cancelled: false, answers: this.collectedAnswers() };
@@ -204,7 +209,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		}
 
 		if (this.matches(data, "tui.select.cancel")) {
-			this.finish({ cancelled: true, answers: this.collectedAnswers() });
+			this.cancel();
 			return;
 		}
 
@@ -274,7 +279,7 @@ export class QuestionnaireView extends Container implements Focusable {
 				return { handled: true as const, focus: true, render: false, target: this.mouseTarget(event) };
 			}
 			if (event.type === "click") {
-				if (owner.action === "cancel") this.finish({ cancelled: true, answers: this.collectedAnswers() });
+				if (owner.action === "cancel") this.cancel();
 				else this.advance();
 				return { handled: true as const, render: true, target: this.mouseTarget(event) };
 			}
