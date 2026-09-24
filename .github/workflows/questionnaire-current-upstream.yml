@@ -95,11 +95,13 @@ jobs:
             env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             HOME=/artifact/home TMPDIR=/artifact/tmp NPM_CONFIG_CACHE=/artifact/npm-cache \
             NPM_CONFIG_USERCONFIG=/artifact/home/user.npmrc NPM_CONFIG_GLOBALCONFIG=/artifact/home/global.npmrc \
-            PNPM_HOME=/artifact/pnpm-home GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+            PNPM_HOME=/artifact/pnpm-home GIT_CONFIG_GLOBAL=/artifact/home/gitconfig GIT_CONFIG_NOSYSTEM=1 \
             GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
             EXPECTED_SHA="$EXPECTED_SHA" /bin/bash -euo pipefail -c '
               mkdir -p /artifact/{home,tmp,npm-cache,pnpm-home}
-              git -c safe.directory=/workspace -c safe.directory=/workspace/.git clone --no-local --no-checkout /workspace /artifact/source
+              git config --global --add safe.directory /workspace
+              git config --global --add safe.directory /workspace/.git
+              git clone --no-local --no-checkout /workspace /artifact/source
               cd /artifact/source
               git checkout --detach "$EXPECTED_SHA"
               test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
