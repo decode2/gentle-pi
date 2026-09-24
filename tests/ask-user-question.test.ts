@@ -131,19 +131,31 @@ const enabledOwner = JSON.stringify({ version: 1, owner: "gentle-pi", enabled: t
 function registerQuestionTool(slot?: ExtensionSlot): { tool: RegisteredTool; slot: ExtensionSlot; emitted: LifecycleEvent[] } {
 	const target: ExtensionSlot = slot ?? { path: OURS_PATH, tools: new Map() };
 	const emitted: LifecycleEvent[] = [];
-	const pi = {
-		registerTool(tool: RegisteredTool) {
-			target.tools.set(tool.name, tool);
-		},
-		events: {
-			emit(channel: string, data: { active: boolean }) {
-				emitted.push({ channel, data });
+	const cleanup: Array<() => void> = [];
+	const profile = ownerProfile({ after: (fn) => cleanup.push(fn) });
+	let start: ((event: unknown, ctx: { mode: string }) => void) | undefined;
+	try {
+		profile.writeOwner(enabledOwner);
+		const pi = {
+			registerTool(tool: RegisteredTool) { target.tools.set(tool.name, tool); },
+			on(event: string, handler: (event: unknown, ctx: { mode: string }) => void) {
+				if (event === "session_start") start = handler;
 			},
-		},
-	};
-	askUserQuestion(pi as never);
+			getAllTools: () => [...target.tools.values()],
+			events: {
+				emit(channel: string, data: { active: boolean }) {
+					emitted.push({ channel, data });
+				},
+			},
+		};
+		askUserQuestion(pi as never);
+		assert.ok(start, "registration waits for session_start");
+		start({}, { mode: "tui" });
+	} finally {
+		for (const release of cleanup) release();
+	}
 	const tool = target.tools.get("ask_user_question");
-	if (!tool) throw new Error("ask_user_question must register");
+	if (!tool) throw new Error("ask_user_question must register for the seeded TUI fixture");
 	return { tool, slot: target, emitted };
 }
 
@@ -893,35 +905,45 @@ test("ask_user_question settles its lifecycle after a custom UI error", async ()
 	]);
 });
 
-test("ask_user_question owns an exclusive tool name across extensions", () => {
-	// Live-verified against the installed Pi runtime: tool names are exclusive
-	// across extensions. Loading two extensions that register
-	// `ask_user_question` aborts the whole load with a hard error
-	// (`Tool "ask_user_question" conflicts with <other extension>`; the runtime
-	// exits non-zero) -- there is no precedence, override, or silent shadowing.
-	// This fake registry is a per-extension Map and cannot reproduce Pi's
-	// cross-extension load error, so it pins the part it can: our single
-	// registration owns the name within its own extension, and the runtime, not
-	// resource order, enforces exclusivity outside it. The competing
-	// `@juicesharp/rpiv-ask-user-question` package must be removed from the
-	// user's settings before this extension can load.
+test("ask_user_question registers into an empty tool inventory", () => {
 	const ours: ExtensionSlot = { path: OURS_PATH, tools: new Map() };
 	const registration = registerQuestionTool(ours);
 
-	assert.equal(ours.tools.get("ask_user_question"), registration.tool, "the first-party extension owns its name");
+	assert.equal(ours.tools.get("ask_user_question"), registration.tool);
 	assert.equal(registration.tool.name, "ask_user_question");
 	assert.equal(registration.tool.label, "Ask User Question");
 });
 
-test("re-registering inside one extension overwrites its own tool entry", () => {
+test("a later session_start cannot overwrite a tool or register without inventory", () => {
 	const slot: ExtensionSlot = { path: OURS_PATH, tools: new Map() };
 	registerQuestionTool(slot);
 	const first = slot.tools.get("ask_user_question");
 	registerQuestionTool(slot);
-	const second = slot.tools.get("ask_user_question");
 
-	assert.equal(slot.tools.size, 1, "the extension map is keyed by tool name");
-	assert.notEqual(first, second, "a later registration replaces the same-name entry");
+	assert.equal(slot.tools.size, 1, "the tool map retains its existing entry");
+	assert.equal(slot.tools.get("ask_user_question"), first, "an incumbent is not overwritten");
+
+	const cleanup: Array<() => void> = [];
+	const profile = ownerProfile({ after: (fn) => cleanup.push(fn) });
+	try {
+		profile.writeOwner(enabledOwner);
+		for (const inventory of [undefined, () => { throw new Error("inventory unavailable"); }]) {
+			let start: ((event: unknown, ctx: { mode: string }) => void) | undefined;
+			let registrations = 0;
+			askUserQuestion({
+				registerTool: () => { registrations++; },
+				on: (event: string, handler: (event: unknown, ctx: { mode: string }) => void) => {
+					if (event === "session_start") start = handler;
+				},
+				getAllTools: inventory,
+			} as never);
+			assert.ok(start);
+			start({}, { mode: "tui" });
+			assert.equal(registrations, 0, "unavailable tool inventory fails closed");
+		}
+	} finally {
+		for (const release of cleanup) release();
+	}
 });
 
 test("ask_user_question renderCall summarizes the questions and option labels", () => {
