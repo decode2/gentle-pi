@@ -56,6 +56,8 @@ function fixture(t: test.TestContext) {
 		...process.env,
 		HOME: home,
 		USERPROFILE: home,
+		PI_CODING_AGENT_DIR: join(home, ".pi", "agent"),
+		GENTLE_SHELL_CONFIG: join(home, ".gentle-shell", "config.json"),
 		GENTLE_SHELL_HOME: gentleShellHome,
 		GENTLE_SHELL_PI: piScript,
 		GENTLE_SHELL_NO_AUTO_SETUP: "1",
@@ -640,6 +642,278 @@ test("gentle-shell setup accepts a home selector before it and provisions that h
 	assert.equal(payload.PI_CODING_AGENT_DIR, target);
 	assert.equal(payload.GENTLE_PI_AGENT_HOME, target);
 	assert.equal(existsSync(join(target, "settings.json")), true);
+});
+
+function directoryChain(directory: string): string[] {
+	const chain: string[] = [];
+	for (let current = directory; ; current = dirname(current)) {
+		chain.push(current);
+		if (dirname(current) === current) return chain;
+	}
+}
+
+function writeConfigFsyncPreload(path: string, configPath: string, eventPath: string, failDirectoryFsync: boolean | string = false) {
+	const directories = directoryChain(dirname(configPath));
+	const failPath = typeof failDirectoryFsync === "string" ? failDirectoryFsync : failDirectoryFsync ? dirname(configPath) : "";
+	writeFileSync(path, [
+		"const fs = require('node:fs');",
+		"const path = require('node:path');",
+		"const { syncBuiltinESMExports } = require('node:module');",
+		`const configPath = ${JSON.stringify(configPath)};`,
+		`const tempPath = path.join(path.dirname(configPath), '.' + path.basename(configPath) + '.gentle-shell-' + process.pid + '.tmp');`,
+		`const directories = new Set(${JSON.stringify(directories)});`,
+		`const eventPath = ${JSON.stringify(eventPath)};`,
+		`const failDirectoryFsync = ${JSON.stringify(failPath)};`,
+		"const log = (event) => fs.appendFileSync(eventPath, event + '\\n');",
+		"const originalOpen = fs.openSync;",
+		"const originalFsync = fs.fsyncSync;",
+		"const originalClose = fs.closeSync;",
+		"const originalRename = fs.renameSync;",
+		"const directoryFds = new Map();",
+		"const fileFds = new Set();",
+		"fs.openSync = function(path, ...args) { const fd = originalOpen.call(this, path, ...args); if (path === tempPath) fileFds.add(fd); if (directories.has(path)) directoryFds.set(fd, path); return fd; };",
+		"fs.renameSync = function(from, to) { const result = originalRename.call(this, from, to); if (to === configPath) log('rename'); return result; };",
+		"fs.fsyncSync = function(fd) { if (fileFds.has(fd)) { const result = originalFsync.call(this, fd); log('fsync:file'); return result; } const dir = directoryFds.get(fd); if (dir && dir === failDirectoryFsync) { log('fsync-failed:' + dir); throw Object.assign(new Error('injected directory fsync failure'), { code: 'EIO' }); } const result = originalFsync.call(this, fd); if (dir) log('fsync:' + dir); return result; };",
+		"fs.closeSync = function(fd) { const dir = directoryFds.get(fd); const result = originalClose.call(this, fd); fileFds.delete(fd); if (dir) { directoryFds.delete(fd); log('close:' + dir); } return result; };",
+		"syncBuiltinESMExports();",
+		"",
+	].join("\n"));
+}
+
+test("setup --external-ready marks an existing home without provisioning and later reuses the marker", (t) => {
+	const f = fixture(t);
+	mkdirSync(join(f.home, ".gentle-shell"));
+	mkdirSync(f.gentleShellHome, { recursive: true });
+	const settingsPath = join(f.gentleShellHome, "settings.json");
+	const originalSettings = '{"theme":"kept"}';
+	writeFileSync(settingsPath, originalSettings);
+	const counterPath = join(f.root, "gentle-ai-runs.jsonl");
+	const gentleAiScript = join(f.root, "fake-gentle-ai-counting.mjs");
+	writeGentleAiScriptCountingRuns(gentleAiScript, counterPath);
+	const piCounterPath = join(f.root, "pi-runs.jsonl");
+	const piScript = join(f.root, "fake-pi-counting.mjs");
+	writeFileSync(piScript, [
+		"#!/usr/bin/env node",
+		"import { appendFileSync } from 'node:fs';",
+		`appendFileSync(${JSON.stringify(piCounterPath)}, JSON.stringify(process.argv.slice(2)) + '\\n');`,
+		"if (process.argv.includes('--version')) { console.log('0.85.1'); process.exit(0); }",
+		"process.exit(0);",
+		"",
+	].join("\n"));
+	chmodSync(piScript, 0o755);
+	const env = { ...f.env, GENTLE_SHELL_PI: piScript, GENTLE_SHELL_GENTLE_AI_BIN: gentleAiScript, GENTLE_SHELL_GENTLE_AI_PIN: "3.6.0" };
+
+	const marked = run(env, ["--isolated", "setup", "--external-ready"]);
+	assert.equal(marked.status, 0, marked.stderr);
+	assert.match(marked.stdout, /external-ready advisory marker/);
+	assert.equal(marked.stderr, "");
+	assert.equal(readFileSync(settingsPath, "utf8"), originalSettings);
+	assert.equal(existsSync(join(f.gentleShellHome, ".gentle-shell-home")), false);
+	assert.equal(existsSync(counterPath), false);
+	assert.equal(existsSync(piCounterPath), false, "marker authoring must not probe or invoke Pi");
+	const configPath = join(f.home, ".gentle-shell", "config.json");
+	assert.equal(statSync(configPath).mode & 0o777, 0o600);
+	const config = JSON.parse(readFileSync(configPath, "utf8"));
+	const entry = config.provisioned[realpathSync(f.gentleShellHome)];
+	assert.equal(entry.gentleAi, "3.6.0");
+	assert.equal(entry.gentlePi, ownGentlePiVersion());
+	assert.equal(entry.externalReady, true);
+	assert.equal(typeof entry.at, "string");
+
+	const launched = run(enableAutoProvision(env), ["--mode", "rpc"]);
+	assert.equal(launched.status, 0, `${launched.stderr}; Pi calls: ${existsSync(piCounterPath) ? readFileSync(piCounterPath, "utf8") : "none"}`);
+	assert.equal(existsSync(counterPath), false);
+	assert.equal(readFileSync(settingsPath, "utf8"), originalSettings);
+	assert.ok(readFileSync(piCounterPath, "utf8").trim().length > 0, "the later normal launch should invoke Pi");
+});
+
+test("setup --external-ready rejects mixed options, --link, and missing homes without writes", (t) => {
+	const f = fixture(t);
+	const configPath = join(f.root, "launcher-config.json");
+	const missingHome = join(f.root, "missing-home");
+	const cases = [
+		["mixed options", ["--isolated", "setup", "--external-ready", "--dry-run"], f.gentleShellHome],
+		["link mode", ["--link", "setup", "--external-ready"], f.gentleShellHome],
+		["missing home", ["--home", missingHome, "setup", "--external-ready"], missingHome],
+	] as const;
+	for (const [label, args, home] of cases) {
+		const result = run({ ...f.env, GENTLE_SHELL_CONFIG: configPath }, [...args]);
+		assert.notEqual(result.status, 0, `${label}: ${result.stderr}`);
+		assert.equal(existsSync(configPath), false, `${label} must not write launcher config`);
+		assert.equal(existsSync(join(home, "settings.json")), false, `${label} must not bootstrap settings`);
+		assert.equal(existsSync(join(home, ".gentle-shell-home")), false, `${label} must not write the ownership marker`);
+	}
+});
+
+test("setup --external-ready preserves unrelated launcher config and malformed other-home entries", (t) => {
+	const f = fixture(t);
+	const target = join(f.root, "ready home");
+	mkdirSync(target);
+	const configPath = join(f.root, "launcher-config.json");
+	const otherEntry = { gentleAi: 3, gentlePi: ["legacy"], at: null, custom: { keep: true } };
+	writeFileSync(configPath, JSON.stringify({ home: "isolated", custom: "kept", provisioned: { other: otherEntry } }));
+	chmodSync(configPath, 0o600);
+	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: configPath }, ["--home", target, "setup", "--external-ready"]);
+	assert.equal(result.status, 0, result.stderr);
+	const config = JSON.parse(readFileSync(configPath, "utf8"));
+	assert.equal(config.home, "isolated");
+	assert.equal(config.custom, "kept");
+	assert.deepEqual(config.provisioned.other, otherEntry);
+	assert.equal(config.provisioned[realpathSync(target)].externalReady, true);
+	assert.equal(statSync(configPath).mode & 0o777, 0o600);
+	assert.equal(existsSync(join(target, "settings.json")), false);
+	assert.equal(existsSync(join(target, ".gentle-shell-home")), false);
+});
+
+test("setup --external-ready refuses invalid selected config without changing files", (t) => {
+	const f = fixture(t);
+	const target = join(f.root, "ready-home");
+	mkdirSync(target);
+	const settingsPath = join(target, "settings.json");
+	writeFileSync(settingsPath, '{"keep":true}');
+	const configDir = join(f.root, "config-dir");
+	mkdirSync(configDir);
+	const configPath = join(configDir, "config.json");
+	const env = { ...f.env, GENTLE_SHELL_CONFIG: configPath };
+	for (const text of ["{broken", "[]", '{"provisioned":[]}']) {
+		writeFileSync(configPath, text);
+		const result = run(env, ["--home", target, "setup", "--external-ready"]);
+		assert.equal(result.status, 1, result.stderr);
+		assert.equal(result.stderr, "gentle-shell: refusing external-ready marker because launcher config is invalid; no files were changed.\n");
+		assert.equal(readFileSync(configPath, "utf8"), text);
+		assert.deepEqual(readdirSync(configDir), ["config.json"]);
+		assert.equal(readFileSync(settingsPath, "utf8"), '{"keep":true}');
+		assert.equal(existsSync(join(target, ".gentle-shell-home")), false);
+	}
+});
+
+test("setup --external-ready refuses missing config directory components without side effects", (t) => {
+	const f = fixture(t);
+	const target = join(f.root, "ready-home");
+	mkdirSync(target);
+	const settingsPath = join(target, "settings.json");
+	writeFileSync(settingsPath, "keep unchanged");
+	const configDir = join(f.home, "missing-parent", "missing-config");
+	const configPath = join(configDir, "config.json");
+	const calls = join(f.root, "child-calls");
+	const piScript = join(f.root, "pi-should-not-run.mjs");
+	const aiScript = join(f.root, "ai-should-not-run.mjs");
+	for (const script of [piScript, aiScript]) writeFileSync(script, `require('node:fs').writeFileSync(${JSON.stringify(calls)}, 'called');`);
+	const env = { ...f.env, GENTLE_SHELL_CONFIG: configPath, GENTLE_SHELL_PI: piScript, GENTLE_SHELL_GENTLE_AI_BIN: aiScript };
+	const result = run(env, ["--home", target, "setup", "--external-ready"]);
+	assert.equal(result.status, 1, result.stderr);
+	assert.equal(result.stdout, "");
+	assert.match(result.stderr, /Missing launcher config directory .*missing-parent; create it after approval before setup --external-ready\./);
+	assert.equal(existsSync(dirname(configDir)), false);
+	assert.equal(existsSync(configPath), false);
+	assert.equal(readFileSync(settingsPath, "utf8"), "keep unchanged");
+	assert.deepEqual(readdirSync(target), ["settings.json"]);
+	assert.equal(existsSync(calls), false);
+});
+
+test("setup --external-ready refuses a symlinked config", (t) => {
+	const f = fixture(t);
+	const target = join(f.root, "ready-home");
+	mkdirSync(target);
+	const sentinel = join(f.root, "real-config.json");
+	const original = JSON.stringify({ custom: "preserve" });
+	writeFileSync(sentinel, original);
+	const configPath = join(f.root, "config-link.json");
+	symlinkSync(sentinel, configPath);
+	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: configPath }, ["--home", target, "setup", "--external-ready"]);
+	assert.equal(result.status, 1, result.stderr);
+	assert.match(result.stderr, /symlinked launcher config/);
+	assert.equal(readFileSync(sentinel, "utf8"), original);
+	assert.equal(realpathSync(configPath), sentinel);
+	assert.equal(existsSync(join(target, "settings.json")), false);
+});
+
+test("setup --external-ready refuses a symlinked config directory ancestor", (t) => {
+	const f = fixture(t);
+	const target = join(f.root, "ready-home");
+	mkdirSync(target);
+	const realDir = join(f.root, "real-config-dir");
+	mkdirSync(realDir);
+	const configPath = join(realDir, "config.json");
+	const original = JSON.stringify({ custom: "preserve" });
+	writeFileSync(configPath, original);
+	const linkedDir = join(f.root, "config-dir-link");
+	symlinkSync(realDir, linkedDir, "dir");
+	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: join(linkedDir, "config.json") }, ["--home", target, "setup", "--external-ready"]);
+	assert.equal(result.status, 1, result.stderr);
+	assert.match(result.stderr, /unsafe durable launcher config directory/);
+	assert.equal(readFileSync(configPath, "utf8"), original);
+	assert.deepEqual(readdirSync(realDir), ["config.json"]);
+	assert.equal(realpathSync(linkedDir), realDir);
+});
+
+test("setup --external-ready refuses a planted PID temp symlink", (t) => {
+	const f = fixture(t);
+	const target = join(f.root, "ready-home");
+	mkdirSync(target);
+	const configDir = join(f.root, "guarded-config");
+	mkdirSync(configDir);
+	const configPath = join(configDir, "config.json");
+	const originalConfig = JSON.stringify({ custom: "preserve" });
+	writeFileSync(configPath, originalConfig);
+	const sentinel = join(f.root, "sentinel.json");
+	writeFileSync(sentinel, "do not overwrite");
+	const preload = join(f.root, "plant-temp-symlink.cjs");
+	writeFileSync(preload, [
+		"const fs = require('node:fs');",
+		"const path = require('node:path');",
+		`const configPath = ${JSON.stringify(configPath)};`,
+		`const sentinel = ${JSON.stringify(sentinel)};`,
+		"const tempPath = path.join(path.dirname(configPath), '.config.json.gentle-shell-' + process.pid + '.tmp');",
+		"fs.symlinkSync(sentinel, tempPath);",
+		"",
+	].join("\n"));
+	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: configPath, NODE_OPTIONS: `--require=${preload}` }, ["--home", target, "setup", "--external-ready"]);
+	assert.equal(result.status, 1, result.stderr);
+	assert.match(result.stderr, /EEXIST|already exists/i);
+	assert.equal(readFileSync(sentinel, "utf8"), "do not overwrite");
+	assert.equal(readFileSync(configPath, "utf8"), originalConfig);
+	const planted = readdirSync(configDir).find((name) => name.startsWith(".config.json.gentle-shell-") && name.endsWith(".tmp"));
+	assert.ok(planted);
+	assert.equal(realpathSync(join(configDir, planted)), sentinel);
+});
+
+test("setup --external-ready fsyncs existing config directories leaf-to-root after rename", (t) => {
+	const f = fixture(t);
+	const target = join(f.root, "ready-home");
+	mkdirSync(target);
+	const configPath = join(f.home, ".gentle-shell", "config.json");
+	mkdirSync(dirname(configPath));
+	const eventPath = join(f.root, "fs-events.log");
+	const preload = join(f.root, "record-fs-events.cjs");
+	writeConfigFsyncPreload(preload, configPath, eventPath);
+	const result = run({ ...f.env, NODE_OPTIONS: `--require=${preload}` }, ["--home", target, "setup", "--external-ready"]);
+	assert.equal(result.status, 0, result.stderr);
+	assert.match(result.stdout, /recorded an external-ready advisory marker/);
+	const directories = directoryChain(dirname(configPath));
+	const expected = ["fsync:file", "rename", ...directories.flatMap((directory) => [`fsync:${directory}`, `close:${directory}`])];
+	assert.deepEqual(readFileSync(eventPath, "utf8").trim().split("\n"), expected);
+});
+
+test("setup --external-ready reports directory-fsync failure without success", (t) => {
+	const f = fixture(t);
+	const target = join(f.root, "ready-home");
+	mkdirSync(target);
+	const configPath = join(f.home, ".gentle-shell", "config.json");
+	mkdirSync(dirname(configPath));
+	const eventPath = join(f.root, "fs-events.log");
+	const preload = join(f.root, "fail-directory-fsync.cjs");
+	const failedDirectory = dirname(dirname(dirname(configPath)));
+	writeConfigFsyncPreload(preload, configPath, eventPath, failedDirectory);
+	const result = run({ ...f.env, NODE_OPTIONS: `--require=${preload}` }, ["--home", target, "setup", "--external-ready"]);
+	assert.equal(result.status, 1, result.stderr);
+	assert.equal(result.stdout, "");
+	assert.match(result.stderr, /injected directory fsync failure/);
+	const directories = directoryChain(dirname(configPath));
+	const failedIndex = directories.indexOf(failedDirectory);
+	assert.ok(failedIndex >= 0);
+	const expected = ["fsync:file", "rename", ...directories.slice(0, failedIndex).flatMap((directory) => [`fsync:${directory}`, `close:${directory}`]), `fsync-failed:${failedDirectory}`, `close:${failedDirectory}`];
+	assert.deepEqual(readFileSync(eventPath, "utf8").trim().split("\n"), expected);
 });
 
 test("gentle-shell setup passes through the gentle-ai exit code", (t) => {
