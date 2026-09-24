@@ -380,6 +380,74 @@ test("UM-03a-preview: long split preview remains reachable with a short left bod
 		after.some((line) => plain(line).includes("Cancel")), "footer remains visible after scrolling");
 });
 
+test("UM-03b-wheel: owned body text moves the slice but blank cells on its row fall through", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as TUI;
+	const view = new QuestionnaireView({
+		questions: [question("Choose?", Array.from({ length: 12 }, (_, i) =>
+			option(`Route ${i}`, i === 0 ? "A" : `Detail ${i}: ${"wrapped description ".repeat(4)}`)))],
+		theme, tui: compactTui,
+	});
+	const before = view.render(40);
+	const row = before.findIndex((line) => plain(line).includes("Route 0"));
+	assert.ok(row >= 0, "the short option label must be visible in an overflowing body");
+	assert.ok(visibleWidth(plain(before[row]!).trimEnd()) < 30, "x30 must be beyond the rendered Route 0 owner");
+	const wheel = { ...mouseEvent(before, row, "wheel", 40), button: "none" as const, wheelDelta: 3 };
+	assert.equal(view.handleMouse({ ...wheel, x: 30 }), undefined,
+		"UM-03b-wheel: blank cells beyond the rendered row owner must fall through");
+	assert.deepEqual(view.render(40), before, "blank-cell wheel must not move the owned slice");
+	assert.equal(view.handleMouse(wheel)?.handled, true, "wheel over owned option text must move the slice");
+	assert.notDeepEqual(view.render(40), before, "owned wheel must show different body text");
+});
+
+test("UM-03b-wheel: zero delta and outward edges fall through without invalidating hit maps", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as TUI;
+	const view = new QuestionnaireView({
+		questions: [question("Choose?", Array.from({ length: 12 }, (_, i) =>
+			option(`Route ${i}`, i === 0 ? "A" : `Detail ${i}: ${"wrapped description ".repeat(4)}`)))],
+		theme, tui: compactTui,
+	});
+	const before = view.render(40);
+	const row = before.findIndex((line) => plain(line).includes("Route 0"));
+	assert.ok(row >= 0);
+	const wheel = { ...mouseEvent(before, row, "wheel", 40), button: "none" as const };
+	assert.equal(view.handleMouse({ ...wheel, wheelDelta: 0 }), undefined,
+		"UM-03b-wheel: a zero-delta event cannot own a scroll movement");
+	assert.equal(view.handleMouse({ ...wheel, wheelDelta: -1 }), undefined,
+		"outward wheel at the top must fall through");
+	assert.deepEqual(view.render(40), before);
+	assert.equal(view.handleMouse({ ...wheel, wheelDelta: 1000 })?.handled, true);
+	assert.equal(view.handleMouse(wheel), undefined, "movement invalidates the old hit map until rerender");
+	const bottom = view.render(40);
+	const bottomRow = bottom.findIndex((line) => plain(line).includes("Type something."));
+	assert.ok(bottomRow >= 0, "custom option remains visible at the bottom");
+	assert.equal(view.handleMouse({ ...mouseEvent(bottom, bottomRow, "wheel", 40),
+		button: "none", wheelDelta: 1 }), undefined, "outward wheel at the bottom must fall through");
+	assert.deepEqual(view.render(40), bottom);
+});
+
+test("UM-03b-wheel: oversized inline preview text scrolls but blank option cells fall through", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as TUI;
+	const tail = "PREVIEW-TAIL-OWNED";
+	const view = new QuestionnaireView({
+		questions: [question("Choose?", [option("Alpha", "Short description",
+			`${"Long preview detail ".repeat(28)}\n${tail}`)])],
+		theme, tui: compactTui,
+	});
+	const before = view.render(80);
+	assert.ok(!plain(before.join("\n")).includes(tail), "preview must overflow the inline body");
+	const optionRow = before.findIndex((line) => plain(line).includes("Alpha"));
+	const previewRow = before.findIndex((line) => plain(line).includes("Long preview detail"));
+	assert.ok(optionRow >= 0 && previewRow >= 0, "option and inline preview must both be visible");
+	assert.equal(view.handleMouse({ ...mouseEvent(before, optionRow, "wheel", 80),
+		button: "none", wheelDelta: 200, x: 70 }), undefined,
+		"UM-03b-wheel: inline layout does not grant blank option cells wheel ownership");
+	assert.deepEqual(view.render(80), before);
+	assert.equal(view.handleMouse({ ...mouseEvent(before, previewRow, "wheel", 80),
+		button: "none", wheelDelta: 200, x: 8 })?.handled, true,
+		"inline preview text is owned scrollable body content");
+	assert.ok(plain(view.render(80).join("\n")).includes(tail), "wheel reveals the preview tail");
+});
+
 test("UM-03a: a 40x20 long wrapped body keeps Next Submit and Cancel reachable without answer-time delivery", () => {
 	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as TUI;
 	const completed: QuestionnaireResult[] = [];
