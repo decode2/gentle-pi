@@ -197,6 +197,45 @@ test("UM-01: pointer Submit accepts only the visible action hit span", () => {
 	assert.equal(completed.length, 1);
 });
 
+test("UM-01: pointer Submit delivers latest MULTI selection after commit and custom edit", () => {
+	const results: QuestionnaireResult[] = [];
+	for (const withCustom of [false, true]) {
+		const { view, completed } = viewWithResult([
+			question("Pick?", [option("One"), option("Two")], { multiSelect: true }),
+		]);
+		view.handleInput(KEY.space); // Select One.
+		if (withCustom) {
+			view.handleInput(KEY.down[0]);
+			view.handleInput(KEY.down[0]);
+			view.handleInput(KEY.enter); // Open custom editor.
+			view.handleInput("free note");
+			view.handleInput(KEY.enter); // Commit custom answer with One selected.
+			view.handleInput(KEY.up[0]); // Return from custom row to Two.
+		} else {
+			view.handleInput(KEY.enter); // Commit One as a MULTI answer.
+			view.handleInput(KEY.down[0]); // Focus Two after commit.
+		}
+		view.handleInput(KEY.space); // Edit the committed answer by selecting Two.
+		assert.equal(completed.length, 0, "editing MULTI must not deliver before Submit");
+		assert.match(render(view), /\[x\] Two/);
+		const lines = view.render(100);
+		const row = lines.findIndex((line) => /\bSubmit\b/.test(plain(line)));
+		assert.ok(row >= 0, "Submit must remain visible after editing MULTI");
+		const x = plain(lines[row]!).indexOf("Submit");
+		assert.equal(view.handleMouse({ ...mouseEvent(lines, row, "click"), x })?.handled, true);
+		assert.equal(completed.length, 1, "pointer Submit must deliver exactly once");
+		results.push(completed[0]!);
+	}
+	assert.deepEqual(results, [
+		{ cancelled: false, answers: [
+			{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: ["One", "Two"] },
+		] },
+		{ cancelled: false, answers: [
+			{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "free note", selected: ["One", "Two"] },
+		] },
+	], "pointer Submit must deliver the latest MULTI selections after commit and custom edit");
+});
+
 test("UM-01: visible Cancel remains distinct from Submit", () => {
 	const { view, completed } = viewWithResult(single());
 	view.handleInput(KEY.enter); // Draft an answer, but do not deliver it.

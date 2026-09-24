@@ -1,4 +1,4 @@
-name: Current-upstream questionnaire UM-01 GREEN
+name: Current-upstream questionnaire UM-01 stale MULTI RED
 
 on:
   push:
@@ -26,7 +26,7 @@ jobs:
     env:
       BASE: 7f78c36d4b50070008557a79b8734dd37222c569
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM01_TEST_BLOB: 8a3b215d2f90c0ed9dd059306e8fe2f74f1fe1b0
+      UM01_TEST_BLOB: ecc198bb9476a4471f06f030de16a0d739c4e540
       UM01_VIEW_BLOB: 1ff075755892ec5d44651c85e955e9fa5f74d0eb
     steps:
       - name: Checkout exact event revision without credentials
@@ -66,7 +66,7 @@ jobs:
           test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM01_TEST_BLOB"
           test "$(git rev-parse HEAD:lib/questionnaire/questionnaire-view.ts)" = "$UM01_VIEW_BLOB"
           test "$(git hash-object -- lib/questionnaire/questionnaire-view.ts)" = "$UM01_VIEW_BLOB"
-          echo "UM-01 GREEN checkout=$EXPECTED_SHA test=$UM01_TEST_BLOB view=$UM01_VIEW_BLOB base=$BASE other critical blobs unchanged"
+          echo "UM-01 stale MULTI RED checkout=$EXPECTED_SHA test=$UM01_TEST_BLOB view=$UM01_VIEW_BLOB base=$BASE other critical blobs unchanged"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -122,7 +122,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, all ask/view tests, Herdr and isolated UM-01 GREEN offline
+      - name: Run strict types and isolated stale MULTI behavioral RED offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -147,40 +147,25 @@ jobs:
                 /source/extensions/ask-user-question.ts /source/lib/questionnaire/questionnaire-view.ts \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
+              set +e
               node --experimental-strip-types --test --test-reporter=tap \
-                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/questionnaire-green.tap
-              grep -Fx "1..55" /tmp/questionnaire-green.tap
-              grep -Fx "# tests 55" /tmp/questionnaire-green.tap
-              grep -Fx "# pass 55" /tmp/questionnaire-green.tap
-              grep -Fx "# fail 0" /tmp/questionnaire-green.tap
-              grep -Fx "# skipped 0" /tmp/questionnaire-green.tap
-              node --experimental-strip-types --test --test-reporter=tap \
-                --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
-                /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
-              grep -Fx "# pass 3" /tmp/herdr.tap
-              grep -Fx "# fail 0" /tmp/herdr.tap
-              node --experimental-strip-types --test --test-reporter=tap \
-                --test-name-pattern="^UM-01:" \
+                --test-name-pattern="^UM-01: pointer Submit delivers latest MULTI selection after commit and custom edit$" \
                 /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/um01-green.tap
-              grep -Fx "TAP version 13" /tmp/um01-green.tap
-              grep -Fx "1..6" /tmp/um01-green.tap
-              grep -Fx "# tests 6" /tmp/um01-green.tap
-              grep -Fx "# pass 6" /tmp/um01-green.tap
-              grep -Fx "# fail 0" /tmp/um01-green.tap
-              grep -Fx "# skipped 0" /tmp/um01-green.tap
-              test "$(grep -Ec "^ok [0-9]+ - UM-01:" /tmp/um01-green.tap)" -eq 6
-              for name in \
-                "keyboard Next and final Submit require separate actions after answering" \
-                "earlier answers remain editable until explicit Submit" \
-                "an empty optional MULTI can be explicitly submitted" \
-                "custom draft and MULTI toggles survive editing before Submit" \
-                "pointer Submit accepts only the visible action hit span" \
-                "visible Cancel remains distinct from Submit"; do
-                grep -E "^ok [0-9]+ - UM-01: $name$" /tmp/um01-green.tap
-              done
-              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um01-green.tap
+                | tee /tmp/um01-stale-multi-red.tap
+              status=${PIPESTATUS[0]}
+              set -e
+              test "$status" -eq 1
+              grep -Fx "TAP version 13" /tmp/um01-stale-multi-red.tap
+              grep -Fx "1..1" /tmp/um01-stale-multi-red.tap
+              grep -Fx "# tests 1" /tmp/um01-stale-multi-red.tap
+              grep -Fx "# pass 0" /tmp/um01-stale-multi-red.tap
+              grep -Fx "# fail 1" /tmp/um01-stale-multi-red.tap
+              grep -Fx "# cancelled 0" /tmp/um01-stale-multi-red.tap
+              grep -Fx "# skipped 0" /tmp/um01-stale-multi-red.tap
+              grep -Fx "# todo 0" /tmp/um01-stale-multi-red.tap
+              test "$(grep -Ec "^not ok [0-9]+ - UM-01: pointer Submit delivers latest MULTI selection after commit and custom edit$" /tmp/um01-stale-multi-red.tap)" -eq 1
+              grep -F "pointer Submit must deliver the latest MULTI selections after commit and custom edit" /tmp/um01-stale-multi-red.tap
+              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um01-stale-multi-red.tap
             '
 
       - name: Recheck exact checkout and cleanliness
