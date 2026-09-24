@@ -636,13 +636,13 @@ export class QuestionnaireView extends Container implements Focusable {
 	}
 
 	private matchesNewline(data: string): boolean {
-		return this.keybindings?.matches(data, "tui.input.newLine") === true ||
+		return this.keybindings?.matches?.(data, "tui.input.newLine") === true ||
 			matchesKey(data, "shift+enter") || data === "\x1b[13;2~" ||
 			data === "\x1b\r" || data === "\n";
 	}
 
 	private matchesSubmit(data: string): boolean {
-		return this.keybindings?.matches(data, "tui.input.submit") ?? matchesKey(data, "enter");
+		return this.keybindings?.matches?.(data, "tui.input.submit") ?? matchesKey(data, "enter");
 	}
 
 	private mouseTarget(event: TuiMouseEvent) {
