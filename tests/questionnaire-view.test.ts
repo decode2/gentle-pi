@@ -354,6 +354,32 @@ test("UM-02: MULTI custom multiline answer keeps toggles until explicit Submit",
 	assert.equal(completed.length, 1, "MULTI custom text needs one explicit Submit");
 });
 
+test("UM-03a-preview: long split preview remains reachable with a short left body at 80x20", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as TUI;
+	const end = "PREVIEW-TAIL-REACHABLE";
+	const preview = `${"Long preview detail ".repeat(28)}\n${end}`;
+	const view = new QuestionnaireView({
+		questions: [question("Choose?", [option("Alpha", "Short description", preview)])],
+		theme, tui: compactTui,
+	});
+	const before = view.render(80);
+	assert.ok(before.length <= compactTui.terminal.rows - 2);
+	assert.ok(before.some((line) => plain(line).includes("Submit")) &&
+		before.some((line) => plain(line).includes("Cancel")), "actions remain visible below the split preview");
+	assert.ok(!plain(before.join("\n")).includes(end), "the long preview must actually overflow initially");
+	const ownedRow = before.findIndex((line) => plain(line).includes("Alpha"));
+	assert.ok(ownedRow >= 0, "the left option owns a wheel target");
+	const wheel = { ...mouseEvent(before, ownedRow, "wheel", 80), button: "none" as const, wheelDelta: 200 };
+	assert.equal(view.handleMouse(wheel)?.handled, true,
+		"UM-03a-preview: owned wheel must reveal the preview tail");
+	const after = view.render(80);
+	assert.ok(plain(after.join("\n")).includes(end),
+		"UM-03a-preview: last distinctive preview content must be visible after owned wheel and rerender");
+	assert.ok(after.length <= compactTui.terminal.rows - 2 &&
+		after.some((line) => plain(line).includes("Submit")) &&
+		after.some((line) => plain(line).includes("Cancel")), "footer remains visible after scrolling");
+});
+
 test("UM-03a: a 40x20 long wrapped body keeps Next Submit and Cancel reachable without answer-time delivery", () => {
 	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as TUI;
 	const completed: QuestionnaireResult[] = [];
