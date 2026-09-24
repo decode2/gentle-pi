@@ -174,7 +174,7 @@ jobs:
                 "# cancelled 0" "# todo 0"; do
                 grep -Fx "$expected" /tmp/questionnaire-full.tap
               done
-              test "$(grep -Ec '^ok [0-9]+ - ' /tmp/questionnaire-full.tap)" -ge 70
+              test "$(grep -Ec "^ok [0-9]+ - " /tmp/questionnaire-full.tap)" -ge 70
               ! grep -Fq "Invalid questionnaire:" /tmp/questionnaire-full.tap
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
@@ -283,9 +283,9 @@ jobs:
               grep -Fx "TAP version 13" /tmp/um04b-red.tap
               grep -Fx "# fail 5" /tmp/um04b-red.tap
               grep -Fx "# cancelled 0" /tmp/um04b-red.tap
-              test "$(grep -Ec '^not ok [0-9]+ - UM-04b:' /tmp/um04b-red.tap)" -eq 5
-              test "$(grep -Ec '^not ok [0-9]+ - ' /tmp/um04b-red.tap)" -eq 5
-              test "$(grep -Ec 'code:.*ERR_ASSERTION' /tmp/um04b-red.tap)" -eq 5
+              test "$(grep -Ec "^not ok [0-9]+ - UM-04b:" /tmp/um04b-red.tap)" -eq 5
+              test "$(grep -Ec "^not ok [0-9]+ - " /tmp/um04b-red.tap)" -eq 5
+              test "$(grep -Ec "code:.*ERR_ASSERTION" /tmp/um04b-red.tap)" -eq 5
               for name in \
                 "pre-aborted valid TUI signal never mounts or emits blocked" \
                 "active abort delivers committed preview once through host done and ignores late input" \
