@@ -1,4 +1,4 @@
-name: Current-upstream questionnaire UM-04a partial cancellation RED
+name: Current-upstream questionnaire UM-04a partial cancellation GREEN
 
 on:
   push:
@@ -31,7 +31,7 @@ jobs:
       UM03_TEST_BLOB: 1cc268512016a3a0b0a6c3e4b7fddbc9cdc9d26e
       UM04A_ASK_TEST_BLOB: bff4677daa035e18d83b1c7a15f2663def2ce136
       UM03_VIEW_BLOB: 145fbf99ed4a31bd781fab8bf6b251d3da2cffea
-      UM02_ASK_BLOB: ba896274d384cab18b84ffeacf4e52cf7b66d78a
+      UM04A_ASK_BLOB: 98feeddecac4f1ea0471afd84824a2c4b1b7e86e
     steps:
       - name: Checkout exact event revision without credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -40,7 +40,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove UM-04a RED test and frozen view/producer identity
+      - name: Prove UM-04a GREEN producer and frozen test/view identity
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -71,13 +71,13 @@ jobs:
           for entry in \
             "tests/questionnaire-view.test.ts:$UM03_TEST_BLOB" \
             "lib/questionnaire/questionnaire-view.ts:$UM03_VIEW_BLOB" \
-            "extensions/ask-user-question.ts:$UM02_ASK_BLOB"; do
+            "extensions/ask-user-question.ts:$UM04A_ASK_BLOB"; do
             path="${entry%%:*}"
             blob="${entry#*:}"
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          echo "UM-04a RED checkout=$EXPECTED_SHA ask_test=$UM04A_ASK_TEST_BLOB view_test=$UM03_TEST_BLOB view=$UM03_VIEW_BLOB ask=$UM02_ASK_BLOB base=$BASE other critical blobs unchanged"
+          echo "UM-04a GREEN checkout=$EXPECTED_SHA ask_test=$UM04A_ASK_TEST_BLOB view_test=$UM03_TEST_BLOB view=$UM03_VIEW_BLOB ask=$UM04A_ASK_BLOB base=$BASE other critical blobs unchanged"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -133,7 +133,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, 66-test baseline, Herdr, prior focused gates and isolated UM-04a RED offline
+      - name: Run strict types, ratchet, full ask/view, Herdr and focused GREEN gates offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -159,13 +159,13 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
-                --test-skip-pattern="^UM-04a:" \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/questionnaire-baseline.tap
-              for expected in "1..66" "# tests 66" "# pass 66" "# fail 0" \
+                | tee /tmp/questionnaire-full.tap
+              for expected in "TAP version 13" "1..70" "# tests 70" "# pass 70" "# fail 0" \
                 "# cancelled 0" "# skipped 0" "# todo 0"; do
-                grep -Fx "$expected" /tmp/questionnaire-baseline.tap
+                grep -Fx "$expected" /tmp/questionnaire-full.tap
               done
+              ! grep -Fq "Invalid questionnaire:" /tmp/questionnaire-full.tap
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
                 /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
@@ -245,34 +245,23 @@ jobs:
               done
               grep -E "^ok [0-9]+ - UM-03a-preview: long split preview remains reachable with a short left body at 80x20$" /tmp/um03a-preview-green.tap
               grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um03a-preview-green.tap
-              set +e
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-04a:" \
-                /source/tests/ask-user-question.test.ts | tee /tmp/um04a-red.tap
-              red_status=${PIPESTATUS[0]}
-              set -e
-              test "$red_status" -ne 0
-              for expected in "TAP version 13" "1..4" "# tests 4" "# pass 0" "# fail 4" \
+                /source/tests/ask-user-question.test.ts | tee /tmp/um04a-green.tap
+              for expected in "TAP version 13" "1..4" "# tests 4" "# pass 4" "# fail 0" \
                 "# cancelled 0" "# skipped 0" "# todo 0"; do
-                grep -Fx "$expected" /tmp/um04a-red.tap
+                grep -Fx "$expected" /tmp/um04a-green.tap
               done
-              test "$(grep -Ec "^not ok [0-9]+ - UM-04a:" /tmp/um04a-red.tap)" -eq 4
+              test "$(grep -Ec "^ok [0-9]+ - UM-04a:" /tmp/um04a-green.tap)" -eq 4
               for name in \
                 "Escape preserves a committed option and preview in partial cancellation" \
                 "Escape preserves committed MULTI and custom rows in question order" \
                 "cancellation excludes later uncommitted MULTI toggles and custom draft" \
                 "renderResult shows partial rows alongside cancellation without changing answerless rendering"; do
-                grep -E "^not ok [0-9]+ - UM-04a: $name$" /tmp/um04a-red.tap
+                grep -E "^ok [0-9]+ - UM-04a: $name$" /tmp/um04a-green.tap
               done
-              for diagnostic in \
-                "UM-04a: cancelled option transcript retains its committed preview" \
-                "UM-04a: cancelled MULTI and custom transcript keeps original indices and order" \
-                "UM-04a: cancelled transcript excludes uncommitted later toggles and draft" \
-                "UM-04a: committed option row remains visible on cancellation"; do
-                grep -F "$diagnostic" /tmp/um04a-red.tap
-              done
-              ! grep -Fq "Invalid questionnaire:" /tmp/um04a-red.tap
-              test "$(grep -Ec "^  code: .*ERR_ASSERTION" /tmp/um04a-red.tap)" -eq 4
+              ! grep -Fq "Invalid questionnaire:" /tmp/um04a-green.tap
+              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um04a-green.tap
             '
 
       - name: Recheck exact checkout and cleanliness

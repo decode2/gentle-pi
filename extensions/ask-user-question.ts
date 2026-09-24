@@ -303,9 +303,11 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 			}
 
 			if (selection === undefined || selection.cancelled) {
+				const rows = selection?.answers ?? [];
+				if (rows.length === 0) return cancelledResult();
 				return {
-					content: [{ type: "text", text: "User cancelled the questionnaire" }],
-					details: { cancelled: true },
+					content: [{ type: "text", text: `User cancelled the questionnaire\nPartial answers:\n${answersText(rows)}` }],
+					details: { cancelled: true, answers: rows },
 				};
 			}
 			return {
@@ -325,15 +327,15 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 		},
 		renderResult(result, _options, theme) {
 			const details = result.details as QuestionnaireDetails | undefined;
-			if (details?.cancelled === true) return new Text(theme.fg("warning", "Cancelled"), 0, 0);
+			const cancelled = details?.cancelled === true;
 			const answers = Array.isArray(details?.answers) ? details.answers : [];
-			if (answers.length === 0) return new Text(theme.fg("warning", "No answers"), 0, 0);
+			if (answers.length === 0) return new Text(theme.fg("warning", cancelled ? "Cancelled" : "No answers"), 0, 0);
 			const lines = answers.map((answer) => {
 				if (answer.kind === "multi") return theme.fg("success", `✓ ${answer.question} — ${(answer.selected ?? []).join(", ")}`);
 				if (answer.kind === "custom") return theme.fg("success", `✓ ${answer.question} — ${answerBody(answer)}`);
 				return theme.fg("success", `✓ ${answer.question} — ${answer.answer ?? ""}`);
 			});
-			return new Text(lines.join("\n"), 0, 0);
+			return new Text((cancelled ? [theme.fg("warning", "Cancelled"), ...lines] : lines).join("\n"), 0, 0);
 		},
 	});
 }
