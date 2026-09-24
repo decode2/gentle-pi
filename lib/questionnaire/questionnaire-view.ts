@@ -62,7 +62,7 @@ interface QuestionState {
 }
 
 type LineOwner =
-	| { questionIndex: number; rowIndex: number }
+	| { questionIndex: number; rowIndex: number; width?: number }
 	| { editorRow: number; editorHeight: number }
 	| { action: "advance" | "cancel"; width: number };
 
@@ -72,8 +72,8 @@ type LineOwner =
  * The whole questionnaire is represented as a compact tab strip: exactly one
  * question body is rendered at a time, and Tab/Shift-Tab switches the active
  * question while each question keeps its own cursor, toggles, and custom-text
- * draft. This keeps the component's height bounded for one to four questions
- * so it fits the native dock area instead of overflowing the viewport.
+ * draft. The body scrolls within the terminal rows remaining after two native
+ * borders and wrapped chrome/actions; this keeps actions reachable at 40x20.
  *
  * Native dock-swap component: it is a {@link Container}, never an overlay, so
  * the transcript stays scrollable while it is focused. Keyboard handling uses
@@ -93,11 +93,20 @@ export class QuestionnaireView extends Container implements Focusable {
 	private completed = false;
 	private result: QuestionnaireResult | undefined;
 	private lineOwners: Array<LineOwner | undefined> = [];
+	private renderedWidth = 0;
+	private bodyStart = 0;
+	private bodyEnd = 0;
+	private bodyWidth = 0;
+	private bodyOffset = 0;
+	private bodyMaxOffset = 0;
+	private followCursor = false;
+	private readonly tui: TUI;
 	private _focused = false;
 
 	constructor(options: QuestionnaireViewOptions) {
 		super();
 		this.questions = options.questions;
+		this.tui = options.tui;
 		this.theme = options.theme;
 		this.keybindings = options.keybindings;
 		this.onComplete = options.onComplete;
@@ -228,8 +237,18 @@ export class QuestionnaireView extends Container implements Focusable {
 
 	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
 		if (this.completed) return undefined;
+		if (event.width !== this.renderedWidth || event.height !== this.lineOwners.length ||
+			event.x < 0 || event.x >= event.width || event.y < 0 || event.y >= event.height) return undefined;
 		const owner = this.lineOwners[event.y];
 		if (!owner) return undefined;
+		if (event.type === "wheel") {
+			if (event.y < this.bodyStart || event.y >= this.bodyEnd || event.x >= this.bodyWidth ||
+				!("questionIndex" in owner || "editorRow" in owner) || this.bodyMaxOffset === 0) return undefined;
+			this.bodyOffset = Math.max(0, Math.min(this.bodyMaxOffset, this.bodyOffset + (event.wheelDelta ?? 0)));
+			this.invalidate();
+			return { handled: true as const, render: true, target: this.mouseTarget(event) };
+		}
+		if (event.y >= this.bodyStart && event.y < this.bodyEnd && event.x >= this.bodyWidth) return undefined;
 		if ("editorRow" in owner) {
 			if (this.editingQuestion === undefined) return undefined;
 			const result = this.editors[this.editingQuestion]!.handleMouse({
@@ -253,7 +272,7 @@ export class QuestionnaireView extends Container implements Focusable {
 			}
 			return undefined;
 		}
-		if (owner.rowIndex < 0) return undefined;
+		if (owner.rowIndex < 0 || event.x >= (owner.width ?? 0)) return undefined;
 
 		if (event.type === "press") {
 			const changed = this.focusRow(owner.questionIndex, owner.rowIndex);
@@ -293,30 +312,45 @@ export class QuestionnaireView extends Container implements Focusable {
 			return [];
 		}
 
-		push(this.renderTabs());
+		if (this.renderedWidth !== viewport) this.followCursor = true;
+		// The progress chip stays first even when long headers cannot all fit.
+		for (const line of this.wrap(this.renderTabs(), viewport).slice(0, 2)) {
+			lines.push(line);
+			owners.push(undefined);
+		}
 		push("");
-
 		const preview = this.currentPreview();
-		if (preview !== undefined && viewport >= MIN_PREVIEW_WIDTH) {
-			const leftWidth = Math.max(1, Math.floor(viewport * PREVIEW_SPLIT));
-			const rightWidth = Math.max(1, viewport - leftWidth - PREVIEW_GAP.length);
-			const left = this.renderBody(leftWidth, false);
-			const right = this.wrap(this.theme.fg("dim", preview), rightWidth);
-			const rows = Math.max(left.lines.length, right.length);
-			for (let index = 0; index < rows; index++) {
-				lines.push(`${padTo(left.lines[index] ?? "", leftWidth)}${PREVIEW_GAP}${right[index] ?? ""}`);
-				owners.push(left.owners[index]);
-			}
+		const split = preview !== undefined && viewport >= MIN_PREVIEW_WIDTH;
+		const leftWidth = split ? Math.max(1, Math.floor(viewport * PREVIEW_SPLIT)) : viewport;
+		const body = this.renderBody(leftWidth, preview !== undefined && !split);
+		const right = split ? this.wrap(this.theme.fg("dim", preview!),
+			Math.max(1, viewport - leftWidth - PREVIEW_GAP.length)) : [];
+		const action = this.focusedQuestion === this.questions.length - 1 ? "Submit" : "Next";
+		const chrome = 1 + (this.editingQuestion === undefined
+			? this.wrap(action, viewport).length + this.wrap("Cancel", viewport).length : 0)
+			+ this.wrap(this.hint(), viewport).length;
+		const bodyHeight = Math.max(1, this.tui.terminal.rows - 2 - lines.length - chrome);
+		const total = Math.max(body.lines.length, right.length);
+		// The preview is not a scroll owner; only overflow in the left body enables wheel input.
+		this.bodyMaxOffset = Math.max(0, body.lines.length - bodyHeight);
+		this.bodyOffset = Math.min(this.bodyOffset, this.bodyMaxOffset);
+		if (this.followCursor) {
+			const cursor = this.states[this.focusedQuestion]?.cursor;
+			const row = body.owners.findIndex((owner) => owner && "rowIndex" in owner && owner.rowIndex === cursor);
+			if (row >= 0) this.bodyOffset = Math.min(this.bodyMaxOffset,
+				Math.max(row - bodyHeight + 1, Math.min(this.bodyOffset, row)));
+			this.followCursor = false;
 		}
-		else {
-			const body = this.renderBody(viewport, preview !== undefined);
-			lines.push(...body.lines);
-			owners.push(...body.owners);
+		this.bodyStart = lines.length;
+		this.bodyWidth = leftWidth;
+		for (let index = this.bodyOffset; index < Math.min(total, this.bodyOffset + bodyHeight); index++) {
+			lines.push(split ? `${padTo(body.lines[index] ?? "", leftWidth)}${PREVIEW_GAP}${right[index - this.bodyOffset] ?? ""}`
+				: body.lines[index] ?? "");
+			owners.push(body.owners[index]);
 		}
-
+		this.bodyEnd = lines.length;
 		push("");
 		if (this.editingQuestion === undefined) {
-			const action = this.focusedQuestion === this.questions.length - 1 ? "Submit" : "Next";
 			for (const [label, kind] of [[action, "advance"], ["Cancel", "cancel"]] as const) {
 				const styled = kind === "advance" && this.states[this.focusedQuestion]?.actionFocused
 					? this.accent(label) : this.theme.fg("muted", label);
@@ -332,6 +366,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		push(this.hint());
 
 		this.lineOwners = owners;
+		this.renderedWidth = viewport;
 		return lines;
 	}
 
@@ -362,7 +397,9 @@ export class QuestionnaireView extends Container implements Focusable {
 		const push = (text: string, owner?: LineOwner) => {
 			for (const line of this.wrap(text, width)) {
 				lines.push(line);
-				owners.push(owner);
+				owners.push(owner && "questionIndex" in owner
+					? { ...owner, width: visibleWidth(line.replace(/\x1b\[[0-9;]*m/g, "").trimEnd()) }
+					: owner);
 			}
 		};
 
@@ -438,6 +475,8 @@ export class QuestionnaireView extends Container implements Focusable {
 		const total = this.questions.length;
 		if (total === 0) return;
 		this.focusedQuestion = (this.focusedQuestion + delta + total) % total;
+		this.bodyOffset = 0;
+		this.followCursor = true;
 		this.invalidate();
 	}
 
@@ -448,6 +487,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		const total = question.options.length + 1;
 		state.cursor = Math.max(0, Math.min(total - 1, state.cursor + delta));
 		state.actionFocused = false;
+		this.followCursor = true;
 		this.invalidate();
 	}
 
@@ -526,6 +566,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		const state = this.states[questionIndex];
 		if (!state) return;
 		this.editingQuestion = questionIndex;
+		this.bodyOffset = 0;
 		this.syncEditorFocus();
 		this.invalidate();
 	}
@@ -596,6 +637,8 @@ export class QuestionnaireView extends Container implements Focusable {
 			return;
 		}
 		this.focusedQuestion++;
+		this.bodyOffset = 0;
+		this.followCursor = true;
 		this.invalidate();
 	}
 

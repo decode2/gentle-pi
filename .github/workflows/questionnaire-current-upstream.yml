@@ -1,9 +1,9 @@
-name: Current-upstream questionnaire UM-03a RED
+name: Current-upstream questionnaire UM-03a-editor RED
 
 on:
   push:
     branches:
-      - feat/questionnaire-body-reachability
+      - test/questionnaire-editor-reachability-red
   pull_request:
     branches:
       - main
@@ -19,7 +19,7 @@ jobs:
        github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
       (github.event_name == 'push' ||
-       (github.head_ref == 'feat/questionnaire-body-reachability' &&
+       (github.head_ref == 'test/questionnaire-editor-reachability-red' &&
         (github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-shell' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-pi')))
@@ -28,9 +28,9 @@ jobs:
     env:
       BASE: 7f78c36d4b50070008557a79b8734dd37222c569
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM03_TEST_BLOB: 069f0de3d6af450360521e6460be0943f50cd62e
+      UM03_TEST_BLOB: ab1457d2d87b6918f3973c257b5f72d07ff906bf
+      UM03_VIEW_BLOB: 44610f727addc9e589854e2ea46247d4dfb9f69d
       UM02_ASK_TEST_BLOB: 26e4b48d86cf91f9865be8efbbdee5f7443c80bb
-      UM02_VIEW_BLOB: 546efc03d3b6396669a57a4a195411b99e7c7334
       UM02_ASK_BLOB: ba896274d384cab18b84ffeacf4e52cf7b66d78a
     steps:
       - name: Checkout exact event revision without credentials
@@ -40,7 +40,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove UM-03a RED test and frozen UM-02 production identity
+      - name: Prove UM-03a-editor RED test and frozen UM-03a production identity
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -70,14 +70,14 @@ jobs:
           test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM03_TEST_BLOB"
           for entry in \
             "tests/ask-user-question.test.ts:$UM02_ASK_TEST_BLOB" \
-            "lib/questionnaire/questionnaire-view.ts:$UM02_VIEW_BLOB" \
+            "lib/questionnaire/questionnaire-view.ts:$UM03_VIEW_BLOB" \
             "extensions/ask-user-question.ts:$UM02_ASK_BLOB"; do
             path="${entry%%:*}"
             blob="${entry#*:}"
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          echo "UM-03a RED checkout=$EXPECTED_SHA test=$UM03_TEST_BLOB ask_test=$UM02_ASK_TEST_BLOB view=$UM02_VIEW_BLOB ask=$UM02_ASK_BLOB base=$BASE other critical blobs unchanged"
+          echo "UM-03a-editor RED checkout=$EXPECTED_SHA test=$UM03_TEST_BLOB ask_test=$UM02_ASK_TEST_BLOB view=$UM03_VIEW_BLOB ask=$UM02_ASK_BLOB base=$BASE other critical blobs unchanged"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -133,7 +133,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, 62-test baseline, Herdr, UM-01/02 GREEN and UM-03a RED offline
+      - name: Run strict types, 62-test baseline, Herdr, UM-01/02/03a GREEN and UM-03a-editor RED offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -159,7 +159,7 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
-                --test-skip-pattern="^UM-03a:" \
+                --test-skip-pattern="^UM-03a(-editor)?:" \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
                 | tee /tmp/questionnaire-baseline.tap
               for expected in "1..62" "# tests 62" "# pass 62" "# fail 0" \
@@ -217,24 +217,33 @@ jobs:
               done
               grep -E "^ok [0-9]+ - UM-02: large bracketed paste delivers expanded content instead of its marker$" /tmp/um02-green.tap
               grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um02-green.tap
-              set +e
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-03a:" \
-                /source/tests/questionnaire-view.test.ts > /tmp/um03a-red.tap 2>&1
+                /source/tests/questionnaire-view.test.ts | tee /tmp/um03a-green.tap
+              grep -Fx "TAP version 13" /tmp/um03a-green.tap
+              for expected in "1..2" "# tests 2" "# pass 2" "# fail 0" \
+                "# cancelled 0" "# skipped 0" "# todo 0"; do
+                grep -Fx "$expected" /tmp/um03a-green.tap
+              done
+              test "$(grep -Ec "^ok [0-9]+ - UM-03a:" /tmp/um03a-green.tap)" -eq 2
+              grep -E "^ok [0-9]+ - UM-03a: a 40x20 long wrapped body keeps Next Submit and Cancel reachable without answer-time delivery$" /tmp/um03a-green.tap
+              grep -E "^ok [0-9]+ - UM-03a: scrolling and width resize reject stale hits but fresh owned targets retain the Editor draft$" /tmp/um03a-green.tap
+              set +e
+              node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="^UM-03a-editor:" \
+                /source/tests/questionnaire-view.test.ts > /tmp/um03a-editor-red.tap 2>&1
               red_status=$?
               set -e
               test "$red_status" -ne 0
-              grep -Fx "TAP version 13" /tmp/um03a-red.tap
-              for expected in "1..2" "# tests 2" "# pass 0" "# fail 2" \
+              grep -Fx "TAP version 13" /tmp/um03a-editor-red.tap
+              for expected in "1..1" "# tests 1" "# pass 0" "# fail 1" \
                 "# cancelled 0" "# skipped 0" "# todo 0"; do
-                grep -Fx "$expected" /tmp/um03a-red.tap
+                grep -Fx "$expected" /tmp/um03a-editor-red.tap
               done
-              test "$(grep -Ec "^not ok [0-9]+ - UM-03a:" /tmp/um03a-red.tap)" -eq 2
-              grep -E "^not ok [0-9]+ - UM-03a: a 40x20 long wrapped body keeps Next Submit and Cancel reachable without answer-time delivery$" /tmp/um03a-red.tap
-              grep -E "^not ok [0-9]+ - UM-03a: scrolling and width resize reject stale hits but fresh owned targets retain the Editor draft$" /tmp/um03a-red.tap
-              grep -F "UM-03a: the view must leave room for both real native custom TUI borders at 40x20" /tmp/um03a-red.tap
-              grep -F "UM-03a: wheel must scroll the owned body without delivering" /tmp/um03a-red.tap
-              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um03a-red.tap
+              test "$(grep -Ec "^not ok [0-9]+ - UM-03a-editor:" /tmp/um03a-editor-red.tap)" -eq 1
+              grep -E "^not ok [0-9]+ - UM-03a-editor: long wrapped question keeps the real custom Editor draft and caret on screen$" /tmp/um03a-editor-red.tap
+              grep -F "UM-03a-editor: draft and caret must remain visible in the 18-row native viewport" /tmp/um03a-editor-red.tap
+              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um03a-editor-red.tap
             '
 
       - name: Recheck exact checkout and cleanliness
