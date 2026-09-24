@@ -256,8 +256,15 @@ export class QuestionnaireView extends Container implements Focusable {
 		if (!owner) return undefined;
 		if (event.type === "wheel") {
 			if (event.y < this.bodyStart || event.y >= this.bodyEnd || event.x >= this.bodyWidth ||
-				!("questionIndex" in owner || "editorRow" in owner) || this.bodyMaxOffset === 0) return undefined;
-			this.bodyOffset = Math.max(0, Math.min(this.bodyMaxOffset, this.bodyOffset + (event.wheelDelta ?? 0)));
+				this.bodyMaxOffset === 0) return undefined;
+			// Question rows own only their visible text; the rendered Editor owns its body column.
+			if ("questionIndex" in owner ? event.x >= (owner.width ?? 0) : !("editorRow" in owner))
+				return undefined;
+			const delta = event.wheelDelta ?? 0;
+			if (!Number.isFinite(delta)) return undefined;
+			const nextOffset = Math.max(0, Math.min(this.bodyMaxOffset, this.bodyOffset + delta));
+			if (nextOffset === this.bodyOffset) return undefined;
+			this.bodyOffset = nextOffset;
 			this.invalidate();
 			return { handled: true as const, render: true, target: this.mouseTarget(event) };
 		}
