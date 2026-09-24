@@ -585,7 +585,7 @@ test("UM-04a: Escape preserves committed MULTI and custom rows in question order
 	const { tool } = registerQuestionTool();
 	const questions = [
 		{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true },
-		{ question: "Skipped?", header: "Skipped", options: [option("Ignore"), option("Other")] },
+		{ question: "Skipped?", header: "Skipped", options: [option("Ignore"), option("Spare")] },
 		{ question: "Explain?", header: "Explain", options: [option("Yes"), option("No")], multiSelect: true },
 	];
 	const result = await run(tool, { questions }, tuiContext([

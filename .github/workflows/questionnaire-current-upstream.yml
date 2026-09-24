@@ -29,7 +29,7 @@ jobs:
       BASE: 7f78c36d4b50070008557a79b8734dd37222c569
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
       UM03_TEST_BLOB: 1cc268512016a3a0b0a6c3e4b7fddbc9cdc9d26e
-      UM04A_ASK_TEST_BLOB: 9cb509580d728a0e8fc8db33840df953d5f1a7bd
+      UM04A_ASK_TEST_BLOB: bff4677daa035e18d83b1c7a15f2663def2ce136
       UM03_VIEW_BLOB: 145fbf99ed4a31bd781fab8bf6b251d3da2cffea
       UM02_ASK_BLOB: ba896274d384cab18b84ffeacf4e52cf7b66d78a
     steps:
@@ -271,7 +271,8 @@ jobs:
                 "UM-04a: committed option row remains visible on cancellation"; do
                 grep -F "$diagnostic" /tmp/um04a-red.tap
               done
-              test "$(grep -c "code: 'ERR_ASSERTION'" /tmp/um04a-red.tap)" -eq 4
+              ! grep -Fq "Invalid questionnaire:" /tmp/um04a-red.tap
+              test "$(grep -Ec "^  code: .*ERR_ASSERTION" /tmp/um04a-red.tap)" -eq 4
             '
 
       - name: Recheck exact checkout and cleanliness
