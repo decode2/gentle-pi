@@ -86,7 +86,7 @@ function registerQuestionTool(slot?: ExtensionSlot): { tool: RegisteredTool; slo
 	return { tool, slot: target, emitted };
 }
 
-function tuiContext(inputs: readonly string[], rendered?: { value: string }) {
+function tuiContext(inputs: readonly string[], rendered?: { value: string }, assertBeforeSubmit = false) {
 	return {
 		mode: "tui",
 		ui: {
@@ -96,7 +96,13 @@ function tuiContext(inputs: readonly string[], rendered?: { value: string }) {
 					result = value;
 				});
 				if (rendered) rendered.value = component.render(100).join("\n");
-				for (const input of inputs) component.handleInput?.(input);
+				for (const [index, input] of inputs.entries()) {
+					if (assertBeforeSubmit && index === inputs.length - 1) {
+						assert.equal(input, "\r", "the final input explicitly activates Submit");
+						assert.equal(result, undefined, "answer-time entry must not deliver before explicit Submit");
+					}
+					component.handleInput?.(input);
+				}
 				return result;
 			},
 		},
@@ -415,7 +421,7 @@ test("ask_user_question commits a single-select answer end-to-end", async () => 
 	const { tool, emitted } = registerQuestionTool();
 	const rendered = { value: "" };
 
-	const result = await run(tool, { questions: single() }, tuiContext(["\r"], rendered));
+	const result = await run(tool, { questions: single() }, tuiContext(["\r", "\r"], rendered, true));
 
 	assert.match(rendered.value, /\[1\/1\]/);
 	assert.match(rendered.value, /▸ Proceed/);
@@ -443,6 +449,8 @@ test("ask_user_question mounts through ctx.ui.custom without an overlay option",
 				const component = factory({ requestRender() {} }, theme, {}, (value) => {
 					result = value;
 				});
+				component.handleInput?.("\r");
+				assert.equal(result, undefined, "choosing an answer does not deliver without Submit");
 				component.handleInput?.("\r");
 				return result;
 			},
@@ -495,7 +503,7 @@ test("ask_user_question echoes an option preview beside the answer", async () =>
 		{ question: "Proceed?", header: "Proceed", options: [option("Alpha", "First choice", "Preview A"), option("Beta")] },
 	];
 
-	const result = await run(tool, { questions }, tuiContext(["\r"]));
+	const result = await run(tool, { questions }, tuiContext(["\r", "\r"], undefined, true));
 
 	assert.equal(result.content[0]?.text, "1. Proceed? — Alpha\n   selected preview: Preview A");
 	assert.deepEqual(result.details.answers, [
@@ -509,7 +517,7 @@ test("ask_user_question commits a multiSelect answer with every toggled option",
 		{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true },
 	];
 
-	const result = await run(tool, { questions }, tuiContext([" ", "\r"]));
+	const result = await run(tool, { questions }, tuiContext([" ", "\r", "\r"], undefined, true));
 
 	assert.equal(result.content[0]?.text, "1. Pick? — selected: One");
 	assert.deepEqual(result.details.answers, [
@@ -523,7 +531,7 @@ test("ask_user_question commits a free-text custom answer", async () => {
 	const result = await run(
 		tool,
 		{ questions: single() },
-		tuiContext(["\x1b[B", "\x1b[B", "\r", "custom text", "\r"]),
+		tuiContext(["\x1b[B", "\x1b[B", "\r", "custom text", "\r", "\r"], undefined, true),
 	);
 
 	assert.equal(result.content[0]?.text, "1. Proceed? — (custom) custom text");
@@ -538,11 +546,11 @@ test("ask_user_question keeps toggled options in a multiSelect custom answer", a
 		{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true },
 	];
 
-	// Toggle One, move to the custom row, open the editor, type, and submit.
+	// Toggle One, move to the custom row, open the editor, accept text, then explicitly Submit.
 	const result = await run(
 		tool,
 		{ questions },
-		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\r"]),
+		tuiContext([" ", "\x1b[B", "\x1b[B", "\r", "free note", "\r", "\r"], undefined, true),
 	);
 
 	assert.equal(result.content[0]?.text, "1. Pick? — (custom) free note — selected: One");

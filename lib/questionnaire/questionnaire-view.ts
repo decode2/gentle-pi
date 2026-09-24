@@ -337,9 +337,12 @@ export class QuestionnaireView extends Container implements Focusable {
 			for (const [label, kind] of [[action, "advance"], ["Cancel", "cancel"]] as const) {
 				const styled = kind === "advance" && this.states[this.focusedQuestion]?.actionFocused
 					? this.accent(label) : this.theme.fg("muted", label);
+				let remaining = visibleWidth(label);
 				for (const line of this.wrap(styled, viewport)) {
 					lines.push(line);
-					owners.push({ action: kind, width: visibleWidth(line) });
+					const hitWidth = Math.min(visibleWidth(line), remaining);
+					owners.push({ action: kind, width: hitWidth });
+					remaining -= hitWidth;
 				}
 			}
 		}
@@ -471,6 +474,13 @@ export class QuestionnaireView extends Container implements Focusable {
 		}
 		if (state.toggled.has(state.cursor)) state.toggled.delete(state.cursor);
 		else state.toggled.add(state.cursor);
+		if (state.answer) {
+			const selected = [...state.toggled].sort((a, b) => a - b)
+				.map((index) => question.options[index]!.label);
+			// MULTI always records an array; custom omits it when no options remain.
+			if (state.answer.kind === "custom" && selected.length === 0) delete state.answer.selected;
+			else state.answer.selected = selected;
+		}
 		state.actionFocused = false;
 		this.invalidate();
 	}
