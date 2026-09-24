@@ -280,6 +280,30 @@ function durableConfigDirectories(configDir) {
 	return directories;
 }
 
+// Windows Node fs does not expose a reliable check for *all* reparse-point
+// directory ancestors (not just symlinks/junctions). Refuse marker authoring
+// there rather than treating an incomplete lstat check as a security guarantee.
+function readExternalReadyText(configPath) {
+	if (process.platform === "win32") throw new Error("setup --external-ready is unavailable on Windows: Node cannot verify all config path reparse points safely; no marker was written.");
+	const absolutePath = resolvePath(configPath);
+	durableConfigDirectories(dirname(absolutePath));
+	try {
+		const entry = lstatSync(absolutePath);
+		if (entry.isSymbolicLink()) throw new Error(`Refusing symlinked launcher config ${configPath}`);
+		if (!entry.isFile()) throw new Error(`Refusing non-file launcher config ${configPath}`);
+	} catch (error) {
+		if (error.code === "ENOENT") return undefined;
+		throw error;
+	}
+	// The leaf cannot be swapped to a symlink between lstat and open.
+	const fd = openSync(absolutePath, fsConstants.O_RDONLY | fsConstants.O_NOFOLLOW);
+	try {
+		return readFileSync(fd, "utf8");
+	} finally {
+		closeSync(fd);
+	}
+}
+
 // Atomic (temp file in the same directory, then rename): a crash or kill
 // mid-write must never leave config.json truncated or partially written,
 // since it also carries the S7 provisioning marker every plain launch reads.
@@ -883,7 +907,7 @@ async function handleSetupCommand(commandArgs, home, runtime) {
 
 // Records an advisory post-Ready marker only; the external owner remains
 // responsible for approval, source binding, and independently verifying Ready.
-function handleExternalReadyCommand(commandArgs, args, home) {
+function handleExternalReadyCommand(commandArgs, args, home, configText) {
 	if (commandArgs.length !== 1 || commandArgs[0] !== "--external-ready" || args.version) {
 		fail("Use 'gentle-shell [home selector] setup --external-ready' alone; it cannot be combined with other setup options.", 2);
 	}
@@ -893,7 +917,6 @@ function handleExternalReadyCommand(commandArgs, args, home) {
 
 	const homeKey = safeRealpath(home.dir);
 	const configPath = resolveConfigPath();
-	const configText = readJsonIfExists(configPath);
 	const invalidConfig = "gentle-shell: refusing external-ready marker because launcher config is invalid; no files were changed.";
 	let config = {};
 	if (configText !== undefined) {
@@ -924,6 +947,35 @@ function handleExternalReadyCommand(commandArgs, args, home) {
 	process.stdout.write(
 		`gentle-shell: recorded an external-ready advisory marker for ${home.dir}; caller must bind this launcher source and home after its own Ready check. This marker does not authenticate the caller or verify Ready.\n`,
 	);
+}
+
+// Only a selected home's explicit externalReady field opts into this guard.
+// Raw config parsing cannot recover a deleted/wholly corrupt marker, and a
+// matching version cannot establish source SHA, approval, or actual Ready.
+function externalReadyRefusal(home, config) {
+	const homeKey = safeRealpath(home.dir);
+	const entries = config.provisioned;
+	if (typeof entries !== "object" || entries === null || Array.isArray(entries) || !Object.prototype.hasOwnProperty.call(entries, homeKey)) return undefined;
+	const record = entries[homeKey];
+	if (typeof record !== "object" || record === null || Array.isArray(record) || !Object.prototype.hasOwnProperty.call(record, "externalReady")) return undefined;
+
+	const selector = home.mode === "link" ? ["--home", home.dir] : homeSelectorFlags(home);
+	const command = ["gentle-shell", ...selector, "setup", "--external-ready"].map(shellQuote).join(" ");
+	const nextStep = `Only after the external Gentle AI owner re-reviews and verifies Ready, rerun \`${command}\` to refresh this advisory marker.`;
+	const versionPattern = /^\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
+	const validVersions = ["gentleAi", "gentlePi"].every(
+		(field) => Object.prototype.hasOwnProperty.call(record, field) && typeof record[field] === "string" && versionPattern.test(record[field]),
+	);
+	const validAt = typeof record.at === "string" && Number.isFinite(Date.parse(record.at)) && new Date(record.at).toISOString() === record.at;
+	if (record.externalReady !== true || !validVersions || !validAt) {
+		return `gentle-shell: malformed external-ready marker for ${home.dir}; refusing setup and launch. ${nextStep}`;
+	}
+	const pin = resolveSetupGentleAiPin();
+	const gentlePiVersion = ownPackageVersion();
+	if (record.gentleAi !== pin || record.gentlePi !== gentlePiVersion) {
+		return `gentle-shell: external-ready marker for ${home.dir} has version drift (gentle-ai ${record.gentleAi} -> ${pin}, gentle-pi ${record.gentlePi} -> ${gentlePiVersion}); refusing setup and launch. ${nextStep}`;
+	}
+	return undefined;
 }
 
 const AUTO_SETUP_OPT_OUT_ENV = "GENTLE_SHELL_NO_AUTO_SETUP";
@@ -1161,15 +1213,21 @@ async function main() {
 		return;
 	}
 
-	const config = loadConfig();
+	const externalReady = args.command === "setup" && args.commandArgs.some((arg) => arg.startsWith("--external-ready"));
+	const externalReadyText = externalReady ? readExternalReadyText(resolveConfigPath()) : undefined;
+	const config = externalReady ? (externalReadyText === undefined ? undefined : parseLauncherConfig(externalReadyText)) : loadConfig();
 	let home = resolveHome({ args, env: process.env, homedir: homedir(), config });
 	if (home.mode === "path") home = { ...home, dir: resolvePath(home.dir) };
 
-	// This opt-in post-Ready annotation runs before runtime resolution and home bootstrap.
-	if (args.command === "setup" && args.commandArgs.some((arg) => arg.startsWith("--external-ready"))) {
-		handleExternalReadyCommand(args.commandArgs, args, home);
+	// Marker authoring is the explicit refresh path. All other operations,
+	// including --version, opt-out launches and Pi subcommands, must refuse a
+	// malformed or drifted selected-home marker before Pi probes or bootstrap.
+	if (externalReady) {
+		handleExternalReadyCommand(args.commandArgs, args, home, externalReadyText);
 		return;
 	}
+	const refusal = externalReadyRefusal(home, readRawConfig(resolveConfigPath()));
+	if (refusal !== undefined) fail(refusal, 1);
 
 	const runtime = resolvePiRuntime({
 		env: process.env,

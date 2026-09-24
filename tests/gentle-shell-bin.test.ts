@@ -45,7 +45,7 @@ function ownGentlePiVersion(): string {
 // GENTLE_SHELL_GENTLE_AI_BIN. The auto-provision test section below opts
 // back in per test via enableAutoProvision.
 function fixture(t: test.TestContext) {
-	const root = mkdtempSync(join(tmpdir(), "gentle-shell-bin-"));
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "gentle-shell-bin-")));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const home = join(root, "home");
 	mkdirSync(home, { recursive: true });
@@ -680,6 +680,13 @@ function writeConfigFsyncPreload(path: string, configPath: string, eventPath: st
 	].join("\n"));
 }
 
+function assertWindowsMarkerBlocked(result: ReturnType<typeof run>, configPath: string) {
+	assert.equal(result.status, 1, result.stderr);
+	assert.equal(result.stdout, "");
+	assert.match(result.stderr, /unavailable on Windows: Node cannot verify all config path reparse points safely/);
+	assert.equal(existsSync(configPath), false, "no marker may be written");
+}
+
 test("setup --external-ready marks an existing home without provisioning and later reuses the marker", (t) => {
 	const f = fixture(t);
 	mkdirSync(join(f.home, ".gentle-shell"));
@@ -704,6 +711,13 @@ test("setup --external-ready marks an existing home without provisioning and lat
 	const env = { ...f.env, GENTLE_SHELL_PI: piScript, GENTLE_SHELL_GENTLE_AI_BIN: gentleAiScript, GENTLE_SHELL_GENTLE_AI_PIN: "3.6.0" };
 
 	const marked = run(env, ["--isolated", "setup", "--external-ready"]);
+	if (process.platform === "win32") {
+		assertWindowsMarkerBlocked(marked, f.env.GENTLE_SHELL_CONFIG!);
+		assert.equal(existsSync(counterPath), false);
+		assert.equal(existsSync(piCounterPath), false);
+		assert.equal(readFileSync(settingsPath, "utf8"), originalSettings);
+		return;
+	}
 	assert.equal(marked.status, 0, marked.stderr);
 	assert.match(marked.stdout, /external-ready advisory marker/);
 	assert.equal(marked.stderr, "");
@@ -754,6 +768,12 @@ test("setup --external-ready preserves unrelated launcher config and malformed o
 	writeFileSync(configPath, JSON.stringify({ home: "isolated", custom: "kept", provisioned: { other: otherEntry } }));
 	chmodSync(configPath, 0o600);
 	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: configPath }, ["--home", target, "setup", "--external-ready"]);
+	if (process.platform === "win32") {
+		assert.equal(result.status, 1, result.stderr);
+		assert.match(result.stderr, /unavailable on Windows: Node cannot verify/);
+		assert.equal(readFileSync(configPath, "utf8"), JSON.stringify({ home: "isolated", custom: "kept", provisioned: { other: otherEntry } }));
+		return;
+	}
 	assert.equal(result.status, 0, result.stderr);
 	const config = JSON.parse(readFileSync(configPath, "utf8"));
 	assert.equal(config.home, "isolated");
@@ -779,7 +799,8 @@ test("setup --external-ready refuses invalid selected config without changing fi
 		writeFileSync(configPath, text);
 		const result = run(env, ["--home", target, "setup", "--external-ready"]);
 		assert.equal(result.status, 1, result.stderr);
-		assert.equal(result.stderr, "gentle-shell: refusing external-ready marker because launcher config is invalid; no files were changed.\n");
+		if (process.platform === "win32") assert.match(result.stderr, /unavailable on Windows: Node cannot verify/);
+		else assert.equal(result.stderr, "gentle-shell: refusing external-ready marker because launcher config is invalid; no files were changed.\n");
 		assert.equal(readFileSync(configPath, "utf8"), text);
 		assert.deepEqual(readdirSync(configDir), ["config.json"]);
 		assert.equal(readFileSync(settingsPath, "utf8"), '{"keep":true}');
@@ -803,12 +824,25 @@ test("setup --external-ready refuses missing config directory components without
 	const result = run(env, ["--home", target, "setup", "--external-ready"]);
 	assert.equal(result.status, 1, result.stderr);
 	assert.equal(result.stdout, "");
-	assert.match(result.stderr, /Missing launcher config directory .*missing-parent; create it after approval before setup --external-ready\./);
+	assert.match(result.stderr, process.platform === "win32" ? /unavailable on Windows: Node cannot verify/ : /Missing launcher config directory .*missing-parent; create it after approval before setup --external-ready\./);
 	assert.equal(existsSync(dirname(configDir)), false);
 	assert.equal(existsSync(configPath), false);
 	assert.equal(readFileSync(settingsPath, "utf8"), "keep unchanged");
 	assert.deepEqual(readdirSync(target), ["settings.json"]);
 	assert.equal(existsSync(calls), false);
+});
+
+test("setup --external-ready refuses a non-directory config ancestor without writing", (t) => {
+	const f = fixture(t);
+	const target = join(f.root, "ready-home");
+	mkdirSync(target);
+	const ancestor = join(f.root, "not-a-directory");
+	writeFileSync(ancestor, "untouched");
+	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: join(ancestor, "config.json") }, ["--home", target, "setup", "--external-ready"]);
+	assert.equal(result.status, 1, result.stderr);
+	assert.match(result.stderr, process.platform === "win32" ? /unavailable on Windows: Node cannot verify/ : /unsafe durable launcher config directory/);
+	assert.equal(readFileSync(ancestor, "utf8"), "untouched");
+	assert.deepEqual(readdirSync(target), []);
 });
 
 test("setup --external-ready refuses a symlinked config", (t) => {
@@ -820,12 +854,37 @@ test("setup --external-ready refuses a symlinked config", (t) => {
 	writeFileSync(sentinel, original);
 	const configPath = join(f.root, "config-link.json");
 	symlinkSync(sentinel, configPath);
-	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: configPath }, ["--home", target, "setup", "--external-ready"]);
+	const reads = join(f.root, "config-reads.log");
+	const preload = join(f.root, "track-config-reads.cjs");
+	writeFileSync(preload, [
+		"const fs = require('node:fs');",
+		"const { syncBuiltinESMExports } = require('node:module');",
+		`const configPath = ${JSON.stringify(configPath)};`,
+		`const reads = ${JSON.stringify(reads)};`,
+		"const original = fs.readFileSync;",
+		"fs.readFileSync = function(path, ...args) { if (path === configPath) fs.writeFileSync(reads, 'followed'); return original.call(this, path, ...args); };",
+		"syncBuiltinESMExports();",
+	].join("\n"));
+	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: configPath, NODE_OPTIONS: `--require=${preload}` }, ["--home", target, "setup", "--external-ready"]);
 	assert.equal(result.status, 1, result.stderr);
-	assert.match(result.stderr, /symlinked launcher config/);
+	assert.match(result.stderr, process.platform === "win32" ? /unavailable on Windows: Node cannot verify/ : /symlinked launcher config/);
+	assert.equal(existsSync(reads), false, "config symlink must not even be read");
 	assert.equal(readFileSync(sentinel, "utf8"), original);
 	assert.equal(realpathSync(configPath), sentinel);
 	assert.equal(existsSync(join(target, "settings.json")), false);
+});
+
+test("setup --external-ready refuses a directory at the config leaf", (t) => {
+	const f = fixture(t);
+	const target = join(f.root, "ready-home");
+	const configPath = join(f.root, "config.json");
+	mkdirSync(target);
+	mkdirSync(configPath);
+	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: configPath }, ["--home", target, "setup", "--external-ready"]);
+	assert.equal(result.status, 1, result.stderr);
+	assert.match(result.stderr, process.platform === "win32" ? /unavailable on Windows: Node cannot verify/ : /Refusing non-file launcher config/);
+	assert.deepEqual(readdirSync(configPath), []);
+	assert.deepEqual(readdirSync(target), []);
 });
 
 test("setup --external-ready refuses a symlinked config directory ancestor", (t) => {
@@ -841,10 +900,25 @@ test("setup --external-ready refuses a symlinked config directory ancestor", (t)
 	symlinkSync(realDir, linkedDir, "dir");
 	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: join(linkedDir, "config.json") }, ["--home", target, "setup", "--external-ready"]);
 	assert.equal(result.status, 1, result.stderr);
-	assert.match(result.stderr, /unsafe durable launcher config directory/);
+	assert.match(result.stderr, process.platform === "win32" ? /unavailable on Windows: Node cannot verify/ : /unsafe durable launcher config directory/);
 	assert.equal(readFileSync(configPath, "utf8"), original);
 	assert.deepEqual(readdirSync(realDir), ["config.json"]);
 	assert.equal(realpathSync(linkedDir), realDir);
+});
+
+test("setup --external-ready refuses a Windows junction ancestor without writes", { skip: process.platform !== "win32" }, (t) => {
+	const f = fixture(t);
+	const target = join(f.root, "ready-home");
+	const actual = join(f.root, "real-config-dir");
+	mkdirSync(target);
+	mkdirSync(actual);
+	const junction = join(f.root, "config-junction");
+	symlinkSync(actual, junction, "junction");
+	const configPath = join(junction, "config.json");
+	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: configPath }, ["--home", target, "setup", "--external-ready"]);
+	assertWindowsMarkerBlocked(result, configPath);
+	assert.deepEqual(readdirSync(actual), []);
+	assert.deepEqual(readdirSync(target), []);
 });
 
 test("setup --external-ready refuses a planted PID temp symlink", (t) => {
@@ -870,7 +944,7 @@ test("setup --external-ready refuses a planted PID temp symlink", (t) => {
 	].join("\n"));
 	const result = run({ ...f.env, GENTLE_SHELL_CONFIG: configPath, NODE_OPTIONS: `--require=${preload}` }, ["--home", target, "setup", "--external-ready"]);
 	assert.equal(result.status, 1, result.stderr);
-	assert.match(result.stderr, /EEXIST|already exists/i);
+	assert.match(result.stderr, process.platform === "win32" ? /unavailable on Windows: Node cannot verify/ : /EEXIST|already exists/i);
 	assert.equal(readFileSync(sentinel, "utf8"), "do not overwrite");
 	assert.equal(readFileSync(configPath, "utf8"), originalConfig);
 	const planted = readdirSync(configDir).find((name) => name.startsWith(".config.json.gentle-shell-") && name.endsWith(".tmp"));
@@ -888,6 +962,11 @@ test("setup --external-ready fsyncs existing config directories leaf-to-root aft
 	const preload = join(f.root, "record-fs-events.cjs");
 	writeConfigFsyncPreload(preload, configPath, eventPath);
 	const result = run({ ...f.env, NODE_OPTIONS: `--require=${preload}` }, ["--home", target, "setup", "--external-ready"]);
+	if (process.platform === "win32") {
+		assertWindowsMarkerBlocked(result, configPath);
+		assert.equal(existsSync(eventPath), false);
+		return;
+	}
 	assert.equal(result.status, 0, result.stderr);
 	assert.match(result.stdout, /recorded an external-ready advisory marker/);
 	const directories = directoryChain(dirname(configPath));
@@ -908,12 +987,131 @@ test("setup --external-ready reports directory-fsync failure without success", (
 	const result = run({ ...f.env, NODE_OPTIONS: `--require=${preload}` }, ["--home", target, "setup", "--external-ready"]);
 	assert.equal(result.status, 1, result.stderr);
 	assert.equal(result.stdout, "");
+	if (process.platform === "win32") {
+		assert.match(result.stderr, /unavailable on Windows: Node cannot verify/);
+		assert.equal(existsSync(configPath), false);
+		assert.equal(existsSync(eventPath), false);
+		return;
+	}
 	assert.match(result.stderr, /injected directory fsync failure/);
 	const directories = directoryChain(dirname(configPath));
 	const failedIndex = directories.indexOf(failedDirectory);
 	assert.ok(failedIndex >= 0);
 	const expected = ["fsync:file", "rename", ...directories.slice(0, failedIndex).flatMap((directory) => [`fsync:${directory}`, `close:${directory}`]), `fsync-failed:${failedDirectory}`, `close:${failedDirectory}`];
 	assert.deepEqual(readFileSync(eventPath, "utf8").trim().split("\n"), expected);
+});
+
+// Every denied path uses counting child stubs, not a real Pi or installer.
+// The config and home assertions also prove refusal precedes bootstrap.
+function externalReadyGuardFixture(t: test.TestContext) {
+	const f = fixture(t);
+	const configPath = f.env.GENTLE_SHELL_CONFIG!;
+	mkdirSync(dirname(configPath));
+	const calls = join(f.root, "pi-calls.jsonl");
+	writeFileSync(f.piScript, [
+		"#!/usr/bin/env node",
+		"import { appendFileSync } from 'node:fs';",
+		`appendFileSync(${JSON.stringify(calls)}, JSON.stringify(process.argv.slice(2)) + '\\n');`,
+		"if (process.argv.includes('--version')) console.log('0.85.1');",
+		"process.exit(0);",
+		"",
+	].join("\n"));
+	chmodSync(f.piScript, 0o755);
+	const aiCalls = join(f.root, "ai-calls.jsonl");
+	const aiScript = join(f.root, "fake-ai.mjs");
+	writeGentleAiScriptCountingRuns(aiScript, aiCalls);
+	const installerOutput = join(f.root, "installer-output");
+	const installerScript = join(f.root, "fake-installer.mjs");
+	writeFileSync(installerScript, `require('node:fs').writeFileSync(${JSON.stringify(installerOutput)}, 'ran');`);
+	const env = {
+		...enableAutoProvision(f.env),
+		GENTLE_SHELL_GENTLE_AI_PIN: "3.6.0",
+		GENTLE_SHELL_GENTLE_AI_BIN: aiScript,
+		GENTLE_SHELL_GENTLE_AI_INSTALLER: installerScript,
+	};
+	return { ...f, env, configPath, calls, aiCalls, installerOutput };
+}
+
+test("external-ready malformed selected-home records refuse before any child or bootstrap", (t) => {
+	const f = externalReadyGuardFixture(t);
+	const valid = { externalReady: true, gentleAi: "3.6.0", gentlePi: ownGentlePiVersion(), at: "2025-01-01T00:00:00.000Z" };
+	const cases = [
+		["false flag", { ...valid, externalReady: false }],
+		["null flag", { ...valid, externalReady: null }],
+		["missing gentleAi", { ...valid, gentleAi: undefined }],
+		["invalid gentleAi", { ...valid, gentleAi: 3 }],
+		["bad gentleAi version", { ...valid, gentleAi: "not-a-version" }],
+		["missing gentlePi", { ...valid, gentlePi: undefined }],
+		["invalid gentlePi", { ...valid, gentlePi: [] }],
+		["bad gentlePi version", { ...valid, gentlePi: "not-a-version" }],
+		["missing at", { ...valid, at: undefined }],
+		["invalid at", { ...valid, at: null }],
+		["bad timestamp", { ...valid, at: "yesterday" }],
+	] as const;
+	for (const [label, entry] of cases) {
+		const text = JSON.stringify({ provisioned: { [f.gentleShellHome]: entry } });
+		writeFileSync(f.configPath, text);
+		for (const args of [[], ["setup"], ["list"], ["--version"]]) {
+			const result = run(f.env, args);
+			assert.equal(result.status, 1, `${label} ${args}: ${result.stderr}`);
+			assert.equal(result.stdout, "");
+			assert.match(result.stderr, /malformed external-ready marker.*refusing setup and launch/);
+			assert.match(result.stderr, /external Gentle AI owner re-reviews and verifies Ready/);
+			assert.equal(readFileSync(f.configPath, "utf8"), text);
+			assert.equal(existsSync(f.gentleShellHome), false, `${label}: no bootstrap`);
+			for (const path of [f.calls, f.aiCalls, f.installerOutput]) assert.equal(existsSync(path), false, `${label}: no child at ${path}`);
+		}
+	}
+});
+
+test("external-ready gentleAi and gentlePi version drift refuse opt-out, setup and Pi subcommands without child effects", (t) => {
+	const f = externalReadyGuardFixture(t);
+	const target = join(f.root, "ready path");
+	mkdirSync(target);
+	const settingsPath = join(target, "settings.json");
+	writeFileSync(settingsPath, "keep settings unchanged");
+	const key = realpathSync(target);
+	const valid = { externalReady: true, gentleAi: "3.6.0", gentlePi: ownGentlePiVersion(), at: "2025-01-01T00:00:00.000Z" };
+	for (const [field, value] of [["gentleAi", "3.7.0"], ["gentlePi", "0.0.0"]] as const) {
+		// A persisted path home is selected without an explicit --home selector.
+		const text = JSON.stringify({ home: target, provisioned: { [key]: { ...valid, [field]: value } } });
+		writeFileSync(f.configPath, text);
+		for (const args of [[], ["--home", target, "setup"], ["--home", target, "setup", "--dry-run"], ["list"], ["--version"]]) {
+			for (const optOut of [false, true]) {
+				const env = optOut ? { ...f.env, GENTLE_SHELL_NO_AUTO_SETUP: "1" } : f.env;
+				const result = run(env, args);
+				assert.equal(result.status, 1, `${field} ${args} opt-out=${optOut}: ${result.stderr}`);
+				assert.equal(result.stdout, "");
+				assert.match(result.stderr, /external-ready marker.*version drift.*refusing setup and launch/);
+				assert.match(result.stderr, /external Gentle AI owner re-reviews and verifies Ready/);
+				assert.ok(result.stderr.includes("setup --external-ready"));
+				assert.equal(readFileSync(f.configPath, "utf8"), text);
+				assert.equal(readFileSync(settingsPath, "utf8"), "keep settings unchanged");
+				assert.deepEqual(readdirSync(target), ["settings.json"]);
+				for (const path of [f.calls, f.aiCalls, f.installerOutput]) assert.equal(existsSync(path), false, `${field}: no child at ${path}`);
+			}
+		}
+	}
+});
+
+test("external-ready guard ignores non-external legacy entries and malformed sibling homes", (t) => {
+	const f = externalReadyGuardFixture(t);
+	const text = JSON.stringify({ provisioned: {
+			[f.gentleShellHome]: { gentleAi: "3.5.0", gentlePi: "0.0.0", at: "old" },
+			[join(f.root, "other-home")]: { externalReady: false, gentleAi: null },
+		} });
+	writeFileSync(f.configPath, text);
+	// On Windows a .mjs file cannot be spawned directly; use the launcher's
+	// .cmd spawn path while still counting both Pi invocations in the stub.
+	const piCommand = process.platform === "win32" ? join(f.root, "fake-pi.cmd") : f.piScript;
+	if (process.platform === "win32") writeFileSync(piCommand, `@echo off\r\n"${process.execPath}" "${f.piScript}" %*\r\n`);
+	const result = run({ ...f.env, GENTLE_SHELL_PI: piCommand, GENTLE_SHELL_NO_AUTO_SETUP: "1" }, ["list"]);
+	assert.equal(result.status, 0, result.stderr);
+	assert.equal(result.stdout, "");
+	assert.equal(readFileSync(f.configPath, "utf8"), text);
+	assert.equal(existsSync(f.aiCalls), false);
+	assert.equal(existsSync(f.installerOutput), false);
+	assert.deepEqual(readFileSync(f.calls, "utf8").trim().split("\n").map((line) => JSON.parse(line)), [["--version"], ["list"]]);
 });
 
 test("gentle-shell setup passes through the gentle-ai exit code", (t) => {
