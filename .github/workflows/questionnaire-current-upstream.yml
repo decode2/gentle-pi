@@ -200,17 +200,17 @@ jobs:
               grep -Fx "TAP version 13" /tmp/um02-red.tap
               grep -Fx "1..5" /tmp/um02-red.tap
               grep -Fx "# tests 5" /tmp/um02-red.tap
-              grep -Fx "# pass 0" /tmp/um02-red.tap
-              grep -Fx "# fail 5" /tmp/um02-red.tap
+              grep -Fx "# pass 1" /tmp/um02-red.tap
+              grep -Fx "# fail 4" /tmp/um02-red.tap
               grep -Fx "# cancelled 0" /tmp/um02-red.tap
               grep -Fx "# skipped 0" /tmp/um02-red.tap
               grep -Fx "# todo 0" /tmp/um02-red.tap
-              test "$(grep -Ec "^not ok [0-9]+ - UM-02:" /tmp/um02-red.tap)" -eq 5
-              test "$(grep -Fc "failureType: '\''testCodeFailure'\''" /tmp/um02-red.tap)" -eq 5
+              test "$(grep -Ec "^not ok [0-9]+ - UM-02:" /tmp/um02-red.tap)" -eq 4
+              test "$(grep -Fc "failureType: '\''testCodeFailure'\''" /tmp/um02-red.tap)" -eq 4
+              grep -E "^ok [0-9]+ - UM-02: large bracketed paste delivers expanded content instead of its marker$" /tmp/um02-red.tap
               for name in \
                 "typed newline edits custom text without submitting it" \
                 "bracketed multiline paste normalizes CRLF CR and tabs before custom commit" \
-                "large bracketed paste delivers expanded content instead of its marker" \
                 "Tab Esc and reopen preserve separate drafts and the editing caret" \
                 "MULTI custom multiline answer keeps toggles until explicit Submit"; do
                 grep -E "^not ok [0-9]+ - UM-02: $name$" /tmp/um02-red.tap
@@ -218,7 +218,6 @@ jobs:
               for diagnostic in \
                 "typed newline must survive custom commit" \
                 "bracketed paste must retain normalized multiline content" \
-                "large paste must expand its marker at custom commit" \
                 "returning to a draft must preserve newline and caret" \
                 "MULTI custom multiline draft must keep its selected options"; do
                 grep -F "UM-02: $diagnostic" /tmp/um02-red.tap
