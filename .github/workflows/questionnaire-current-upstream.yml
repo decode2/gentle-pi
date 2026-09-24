@@ -1,4 +1,4 @@
-name: Current-upstream questionnaire UM-02 RED
+name: Current-upstream questionnaire UM-02 GREEN
 
 on:
   push:
@@ -28,9 +28,10 @@ jobs:
     env:
       BASE: 7f78c36d4b50070008557a79b8734dd37222c569
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM02_TEST_BLOB: badcb7e97a506480b34a52a07f5f51d430f91790
-      UM01_ASK_TEST_BLOB: 7ed196be37ec582dd915778b9d570f5774053e19
-      UM01_VIEW_BLOB: 683dc02041e2deda9d1e7f82d57cc6d8d688a21a
+      UM02_TEST_BLOB: a6efdc3ee8b7ad18083899d87083367acec458a0
+      UM02_ASK_TEST_BLOB: 26e4b48d86cf91f9865be8efbbdee5f7443c80bb
+      UM02_VIEW_BLOB: 0934debcde27a79476d5378c7d79631500559498
+      UM02_ASK_BLOB: ba896274d384cab18b84ffeacf4e52cf7b66d78a
     steps:
       - name: Checkout exact event revision without credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -39,7 +40,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove UM-02 test identity and unchanged UM-01 view/ask sources
+      - name: Prove UM-02 GREEN source and test identity
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -51,14 +52,14 @@ jobs:
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts) ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts|extensions/ask-user-question.ts) ;;
               *) echo "unexpected changed path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
           for path in \
             package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json \
             scripts/check-types.mjs scripts/types-baseline.json \
-            extensions/ask-user-question.ts extensions/gentle-ai.ts \
+            extensions/gentle-ai.ts \
             lib/native-fullscreen-interaction.ts \
             tests/gentle-ai.test.ts; do
             base_blob="$(git rev-parse "$BASE:$path")"
@@ -67,11 +68,16 @@ jobs:
           done
           test "$(git rev-parse HEAD:tests/questionnaire-view.test.ts)" = "$UM02_TEST_BLOB"
           test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM02_TEST_BLOB"
-          test "$(git rev-parse HEAD:tests/ask-user-question.test.ts)" = "$UM01_ASK_TEST_BLOB"
-          test "$(git hash-object -- tests/ask-user-question.test.ts)" = "$UM01_ASK_TEST_BLOB"
-          test "$(git rev-parse HEAD:lib/questionnaire/questionnaire-view.ts)" = "$UM01_VIEW_BLOB"
-          test "$(git hash-object -- lib/questionnaire/questionnaire-view.ts)" = "$UM01_VIEW_BLOB"
-          echo "UM-02 RED checkout=$EXPECTED_SHA test=$UM02_TEST_BLOB ask=$UM01_ASK_TEST_BLOB view=$UM01_VIEW_BLOB base=$BASE other critical blobs unchanged"
+          for entry in \
+            "tests/ask-user-question.test.ts:$UM02_ASK_TEST_BLOB" \
+            "lib/questionnaire/questionnaire-view.ts:$UM02_VIEW_BLOB" \
+            "extensions/ask-user-question.ts:$UM02_ASK_BLOB"; do
+            path="${entry%%:*}"
+            blob="${entry#*:}"
+            test "$(git rev-parse "HEAD:$path")" = "$blob"
+            test "$(git hash-object -- "$path")" = "$blob"
+          done
+          echo "UM-02 GREEN checkout=$EXPECTED_SHA test=$UM02_TEST_BLOB ask_test=$UM02_ASK_TEST_BLOB view=$UM02_VIEW_BLOB ask=$UM02_ASK_BLOB base=$BASE other critical blobs unchanged"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -127,7 +133,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, UM-01 baseline, Herdr and isolated UM-02 RED offline
+      - name: Run strict types, full ask/view GREEN, Herdr, UM-01 and UM-02 offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -153,14 +159,15 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
-                --test-skip-pattern="^UM-02:" \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/questionnaire-baseline.tap
-              grep -Fx "1..56" /tmp/questionnaire-baseline.tap
-              grep -Fx "# tests 56" /tmp/questionnaire-baseline.tap
-              grep -Fx "# pass 56" /tmp/questionnaire-baseline.tap
-              grep -Fx "# fail 0" /tmp/questionnaire-baseline.tap
-              grep -Fx "# skipped 0" /tmp/questionnaire-baseline.tap
+                | tee /tmp/questionnaire-green.tap
+              grep -Fx "1..61" /tmp/questionnaire-green.tap
+              grep -Fx "# tests 61" /tmp/questionnaire-green.tap
+              grep -Fx "# pass 61" /tmp/questionnaire-green.tap
+              grep -Fx "# fail 0" /tmp/questionnaire-green.tap
+              grep -Fx "# cancelled 0" /tmp/questionnaire-green.tap
+              grep -Fx "# skipped 0" /tmp/questionnaire-green.tap
+              grep -Fx "# todo 0" /tmp/questionnaire-green.tap
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
                 /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
@@ -189,40 +196,27 @@ jobs:
                 grep -E "^ok [0-9]+ - UM-01: $name$" /tmp/um01-green.tap
               done
               grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um01-green.tap
-              set +e
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-02:" \
-                /source/tests/questionnaire-view.test.ts > /tmp/um02-red.tap 2>&1
-              red_status=$?
-              set -e
-              cat /tmp/um02-red.tap
-              test "$red_status" -ne 0
-              grep -Fx "TAP version 13" /tmp/um02-red.tap
-              grep -Fx "1..5" /tmp/um02-red.tap
-              grep -Fx "# tests 5" /tmp/um02-red.tap
-              grep -Fx "# pass 1" /tmp/um02-red.tap
-              grep -Fx "# fail 4" /tmp/um02-red.tap
-              grep -Fx "# cancelled 0" /tmp/um02-red.tap
-              grep -Fx "# skipped 0" /tmp/um02-red.tap
-              grep -Fx "# todo 0" /tmp/um02-red.tap
-              test "$(grep -Ec "^not ok [0-9]+ - UM-02:" /tmp/um02-red.tap)" -eq 4
-              test "$(grep -Fc "failureType: '\''testCodeFailure'\''" /tmp/um02-red.tap)" -eq 4
-              grep -E "^ok [0-9]+ - UM-02: large bracketed paste delivers expanded content instead of its marker$" /tmp/um02-red.tap
+                /source/tests/questionnaire-view.test.ts | tee /tmp/um02-green.tap
+              grep -Fx "TAP version 13" /tmp/um02-green.tap
+              grep -Fx "1..5" /tmp/um02-green.tap
+              grep -Fx "# tests 5" /tmp/um02-green.tap
+              grep -Fx "# pass 5" /tmp/um02-green.tap
+              grep -Fx "# fail 0" /tmp/um02-green.tap
+              grep -Fx "# cancelled 0" /tmp/um02-green.tap
+              grep -Fx "# skipped 0" /tmp/um02-green.tap
+              grep -Fx "# todo 0" /tmp/um02-green.tap
+              test "$(grep -Ec "^ok [0-9]+ - UM-02:" /tmp/um02-green.tap)" -eq 5
               for name in \
                 "typed newline edits custom text without submitting it" \
                 "bracketed multiline paste normalizes CRLF CR and tabs before custom commit" \
                 "Tab Esc and reopen preserve separate drafts and the editing caret" \
                 "MULTI custom multiline answer keeps toggles until explicit Submit"; do
-                grep -E "^not ok [0-9]+ - UM-02: $name$" /tmp/um02-red.tap
+                grep -E "^ok [0-9]+ - UM-02: $name$" /tmp/um02-green.tap
               done
-              for diagnostic in \
-                "typed newline must survive custom commit" \
-                "bracketed paste must retain normalized multiline content" \
-                "returning to a draft must preserve newline and caret" \
-                "MULTI custom multiline draft must keep its selected options"; do
-                grep -F "UM-02: $diagnostic" /tmp/um02-red.tap
-              done
-              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um02-red.tap
+              grep -E "^ok [0-9]+ - UM-02: large bracketed paste delivers expanded content instead of its marker$" /tmp/um02-green.tap
+              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um02-green.tap
             '
 
       - name: Recheck exact checkout and cleanliness

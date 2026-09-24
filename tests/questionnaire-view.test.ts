@@ -4,6 +4,7 @@ import {
 	CURSOR_MARKER,
 	KeybindingsManager,
 	TUI_KEYBINDINGS,
+	type TUI,
 	visibleWidth,
 	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
@@ -14,6 +15,8 @@ import {
 	type QuestionnaireTheme,
 } from "../lib/questionnaire/questionnaire-view.ts";
 import { CUSTOM_ROW_LABEL, type OptionData, type QuestionData } from "../lib/questionnaire/schema.ts";
+
+const tui = { terminal: { rows: 24 }, requestRender() {} } as TUI;
 
 const theme: QuestionnaireTheme = {
 	fg: (_color: string, text: string) => text,
@@ -50,6 +53,7 @@ function createView(
 	return new QuestionnaireView({
 		questions,
 		theme,
+		tui,
 		onComplete: options.onComplete,
 		...(options.keybindings === undefined ? {} : { keybindings: options.keybindings }),
 	});

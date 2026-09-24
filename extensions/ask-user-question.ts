@@ -282,6 +282,7 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 					const view = new QuestionnaireView({
 						questions: params.questions,
 						theme,
+						tui,
 						keybindings,
 						onComplete: (result) => done(result),
 					});

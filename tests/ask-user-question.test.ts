@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import type { TUI } from "@earendil-works/pi-tui";
 import askUserQuestion, { askMultiSelect } from "../extensions/ask-user-question.ts";
 
 /** Plain theme fake: identity styling keeps rendered assertions readable. */
@@ -20,8 +21,10 @@ interface Renderable {
 	handleInput?(data: string): void;
 }
 
+const fakeTui = { terminal: { rows: 24 }, requestRender() {} } as TUI;
+
 type CustomFactory = (
-	tui: { requestRender(): void },
+	tui: TUI,
 	theme: Theme,
 	keybindings: unknown,
 	done: (value: unknown) => void,
@@ -92,7 +95,7 @@ function tuiContext(inputs: readonly string[], rendered?: { value: string }, ass
 		ui: {
 			custom: async (factory: CustomFactory) => {
 				let result: unknown;
-				const component = factory({ requestRender() {} }, theme, {}, (value) => {
+				const component = factory(fakeTui, theme, {}, (value) => {
 					result = value;
 				});
 				if (rendered) rendered.value = component.render(100).join("\n");
@@ -446,7 +449,7 @@ test("ask_user_question mounts through ctx.ui.custom without an overlay option",
 				customArgCount = args.length;
 				const factory = args[0] as CustomFactory;
 				let result: unknown;
-				const component = factory({ requestRender() {} }, theme, {}, (value) => {
+				const component = factory(fakeTui, theme, {}, (value) => {
 					result = value;
 				});
 				component.handleInput?.("\r");
@@ -473,7 +476,7 @@ test("ask_user_question mounts exactly one active question and switches with Tab
 		mode: "tui",
 		ui: {
 			custom: (factory: CustomFactory) => new Promise((resolve) => {
-				component = factory({ requestRender() {} }, theme, {}, resolve);
+				component = factory(fakeTui, theme, {}, resolve);
 			}),
 		},
 	});
