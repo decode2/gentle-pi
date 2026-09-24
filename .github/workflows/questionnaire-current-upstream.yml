@@ -1,9 +1,9 @@
-name: Current-upstream questionnaire UM-04a partial cancellation GREEN
+name: Current-upstream questionnaire UM-04b abort lifecycle RED
 
 on:
   push:
     branches:
-      - fix/questionnaire-partial-cancel
+      - fix/questionnaire-abort-lifecycle
   pull_request:
     branches:
       - main
@@ -19,7 +19,7 @@ jobs:
        github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
       (github.event_name == 'push' ||
-       (github.head_ref == 'fix/questionnaire-partial-cancel' &&
+       (github.head_ref == 'fix/questionnaire-abort-lifecycle' &&
         (github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-shell' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-pi')))
@@ -27,11 +27,12 @@ jobs:
     timeout-minutes: 35
     env:
       BASE: 7f78c36d4b50070008557a79b8734dd37222c569
+      RED_BASE: 7fb49b4fc88f1978026d560e1cfce4be830b4932
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM03_TEST_BLOB: 1cc268512016a3a0b0a6c3e4b7fddbc9cdc9d26e
-      UM04A_ASK_TEST_BLOB: bff4677daa035e18d83b1c7a15f2663def2ce136
-      UM03_VIEW_BLOB: 145fbf99ed4a31bd781fab8bf6b251d3da2cffea
-      UM04A_ASK_BLOB: 98feeddecac4f1ea0471afd84824a2c4b1b7e86e
+      UM04B_VIEW_TEST_BLOB: 449e88dc9ff33958887e19f62dab18ca247daf57
+      UM04B_ASK_TEST_BLOB: 86bd0fe46849888ca264c982743dbf932eda37c4
+      FROZEN_VIEW_BLOB: 145fbf99ed4a31bd781fab8bf6b251d3da2cffea
+      FROZEN_ASK_BLOB: 98feeddecac4f1ea0471afd84824a2c4b1b7e86e
     steps:
       - name: Checkout exact event revision without credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -40,7 +41,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove UM-04a GREEN producer and frozen test/view identity
+      - name: Prove UM-04b RED test blobs and frozen producer/view identity
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -50,6 +51,14 @@ jobs:
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
           git cat-file -e "$BASE^{commit}"
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
+          git cat-file -e "$RED_BASE^{commit}"
+          test "$(git merge-base "$RED_BASE" HEAD)" = "$RED_BASE"
+          while IFS= read -r path; do
+            case "$path" in
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts) ;;
+              *) echo "unexpected RED change: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only "$RED_BASE" HEAD)
           while IFS= read -r path; do
             case "$path" in
               .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts|extensions/ask-user-question.ts) ;;
@@ -66,18 +75,17 @@ jobs:
             test "$(git rev-parse "HEAD:$path")" = "$base_blob"
             test "$(git hash-object -- "$path")" = "$base_blob"
           done
-          test "$(git rev-parse HEAD:tests/ask-user-question.test.ts)" = "$UM04A_ASK_TEST_BLOB"
-          test "$(git hash-object -- tests/ask-user-question.test.ts)" = "$UM04A_ASK_TEST_BLOB"
           for entry in \
-            "tests/questionnaire-view.test.ts:$UM03_TEST_BLOB" \
-            "lib/questionnaire/questionnaire-view.ts:$UM03_VIEW_BLOB" \
-            "extensions/ask-user-question.ts:$UM04A_ASK_BLOB"; do
+            "tests/ask-user-question.test.ts:$UM04B_ASK_TEST_BLOB" \
+            "tests/questionnaire-view.test.ts:$UM04B_VIEW_TEST_BLOB" \
+            "lib/questionnaire/questionnaire-view.ts:$FROZEN_VIEW_BLOB" \
+            "extensions/ask-user-question.ts:$FROZEN_ASK_BLOB"; do
             path="${entry%%:*}"
             blob="${entry#*:}"
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          echo "UM-04a GREEN checkout=$EXPECTED_SHA ask_test=$UM04A_ASK_TEST_BLOB view_test=$UM03_TEST_BLOB view=$UM03_VIEW_BLOB ask=$UM04A_ASK_BLOB base=$BASE other critical blobs unchanged"
+          echo "UM-04b RED checkout=$EXPECTED_SHA ask_test=$UM04B_ASK_TEST_BLOB view_test=$UM04B_VIEW_TEST_BLOB view=$FROZEN_VIEW_BLOB ask=$FROZEN_ASK_BLOB base=$BASE red_base=$RED_BASE other critical blobs unchanged"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -133,7 +141,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, ratchet, full ask/view, Herdr and focused GREEN gates offline
+      - name: Run strict types, ratchet, baseline, Herdr, prior gates and isolated RED offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -159,12 +167,14 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
+                --test-skip-pattern="^UM-04b:" \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
                 | tee /tmp/questionnaire-full.tap
-              for expected in "TAP version 13" "1..70" "# tests 70" "# pass 70" "# fail 0" \
-                "# cancelled 0" "# skipped 0" "# todo 0"; do
+              for expected in "TAP version 13" "# pass 70" "# fail 0" \
+                "# cancelled 0" "# todo 0"; do
                 grep -Fx "$expected" /tmp/questionnaire-full.tap
               done
+              test "$(grep -Ec '^ok [0-9]+ - ' /tmp/questionnaire-full.tap)" -ge 70
               ! grep -Fq "Invalid questionnaire:" /tmp/questionnaire-full.tap
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
@@ -262,6 +272,30 @@ jobs:
               done
               ! grep -Fq "Invalid questionnaire:" /tmp/um04a-green.tap
               grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um04a-green.tap
+              set +e
+              node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="^UM-04b:" \
+                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
+                > /tmp/um04b-red.tap 2>&1
+              red_status=$?
+              set -e
+              test "$red_status" -ne 0
+              grep -Fx "TAP version 13" /tmp/um04b-red.tap
+              grep -Fx "# fail 5" /tmp/um04b-red.tap
+              grep -Fx "# cancelled 0" /tmp/um04b-red.tap
+              test "$(grep -Ec '^not ok [0-9]+ - UM-04b:' /tmp/um04b-red.tap)" -eq 5
+              test "$(grep -Ec '^not ok [0-9]+ - ' /tmp/um04b-red.tap)" -eq 5
+              test "$(grep -Ec 'code:.*ERR_ASSERTION' /tmp/um04b-red.tap)" -eq 5
+              for name in \
+                "pre-aborted valid TUI signal never mounts or emits blocked" \
+                "active abort delivers committed preview once through host done and ignores late input" \
+                "abort discards an uncommitted custom draft" \
+                "user completion wins and abort listeners are removed on settlement and rejection" \
+                "callable view cancel snapshots committed rows once and rejects late edits"; do
+                grep -E "^not ok [0-9]+ - UM-04b: $name$" /tmp/um04b-red.tap
+              done
+              ! grep -Fq "Invalid questionnaire:" /tmp/um04b-red.tap
+              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um04b-red.tap
             '
 
       - name: Recheck exact checkout and cleanliness

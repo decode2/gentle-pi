@@ -116,6 +116,31 @@ function run(tool: RegisteredTool, params: unknown, ctx: unknown): Promise<ToolR
 	return tool.execute("call", params, new AbortController().signal, undefined, ctx);
 }
 
+/** Synchronous factory mount, with settlement exclusively through the host's done callback. */
+function deferredTuiHost() {
+	let component: Renderable | undefined;
+	let doneCalls = 0;
+	const ctx = { mode: "tui", ui: { custom: (factory: CustomFactory) => new Promise<unknown>((resolve) => {
+		component = factory(fakeTui, theme, {}, (value) => { doneCalls++; resolve(value); });
+	}) } };
+	return { ctx, mounted: () => component, doneCalls: () => doneCalls };
+}
+
+function trackedSignal() {
+	const controller = new AbortController();
+	let added = 0;
+	let removed = 0;
+	const add = controller.signal.addEventListener.bind(controller.signal);
+	const remove = controller.signal.removeEventListener.bind(controller.signal);
+	Object.defineProperty(controller.signal, "addEventListener", { value: (
+		type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions,
+	) => { if (type === "abort") added++; add(type, listener, options); } });
+	Object.defineProperty(controller.signal, "removeEventListener", { value: (
+		type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions,
+	) => { if (type === "abort") removed++; remove(type, listener, options); } });
+	return { controller, counts: () => ({ added, removed }) };
+}
+
 const INTERACTIVE_HOST_ENV = "GENTLE_SHELL_INTERACTIVE_HOST";
 
 /** Fake interactive-RPC-host ctx: scripted `select` answers, one per call. */
@@ -630,6 +655,95 @@ test("UM-04a: renderResult shows partial rows alongside cancellation without cha
 	const empty = tool.renderResult({ content: [], details: { cancelled: true } }, { expanded: false }, theme)
 		.render(200).join("\n");
 	assert.equal(empty.trimEnd(), "Cancelled");
+});
+
+test("UM-04b: pre-aborted valid TUI signal never mounts or emits blocked", async () => {
+	const { tool, emitted } = registerQuestionTool();
+	const signal = new AbortController();
+	signal.abort();
+	let mounts = 0;
+	const result = await tool.execute("call", { questions: single() }, signal.signal, undefined, {
+		mode: "tui", ui: { custom: async () => { mounts++; return undefined; } },
+	});
+	assert.equal(mounts, 0, "pre-abort must not create the native dock");
+	assert.deepEqual(emitted, []);
+	assert.equal(result.content[0]?.text, "User cancelled the questionnaire");
+	assert.deepEqual(result.details, { cancelled: true });
+});
+
+test("UM-04b: active abort delivers committed preview once through host done and ignores late input", async () => {
+	const { tool, emitted } = registerQuestionTool();
+	const { ctx, mounted, doneCalls } = deferredTuiHost();
+	const signal = new AbortController();
+	const questions = [
+		{ question: "First?", header: "First", options: [option("Alpha", "First choice", "Preview A"), option("Beta")] },
+		{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
+	];
+	const pending = tool.execute("call", { questions }, signal.signal, undefined, ctx);
+	assert.ok(mounted());
+	mounted()!.handleInput?.("\r"); // Commit Alpha, then move to the unanswered second question.
+	mounted()!.handleInput?.("\r");
+	signal.abort();
+	signal.abort();
+	assert.equal(doneCalls(), 1, "abort must settle the mounted host exactly once");
+	const result = await pending;
+	mounted()!.handleInput?.("\r");
+	mounted()!.handleInput?.("\x1b");
+	assert.equal(doneCalls(), 1, "late input cannot overwrite the settled result");
+	assert.equal(result.content[0]?.text,
+		"User cancelled the questionnaire\nPartial answers:\n1. First? — Alpha\n   selected preview: Preview A");
+	assert.deepEqual(result.details, { cancelled: true, answers: [
+		{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha", preview: "Preview A" },
+	] });
+	assert.deepEqual(emitted, [
+		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
+		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
+	]);
+});
+
+test("UM-04b: abort discards an uncommitted custom draft", async () => {
+	const { tool } = registerQuestionTool();
+	const { ctx, mounted, doneCalls } = deferredTuiHost();
+	const signal = new AbortController();
+	const pending = tool.execute("call", { questions: single() }, signal.signal, undefined, ctx);
+	assert.ok(mounted());
+	for (const input of ["\x1b[B", "\x1b[B", "\r", "unsent draft"]) mounted()!.handleInput?.(input);
+	signal.abort();
+	assert.equal(doneCalls(), 1, "abort must deliver through the mounted host");
+	const result = await pending;
+	assert.equal(result.content[0]?.text, "User cancelled the questionnaire");
+	assert.deepEqual(result.details, { cancelled: true });
+});
+
+test("UM-04b: user completion wins and abort listeners are removed on settlement and rejection", async () => {
+	const { tool, emitted } = registerQuestionTool();
+	const host = deferredTuiHost();
+	const success = trackedSignal();
+	const pending = tool.execute("call", { questions: single() }, success.controller.signal, undefined, host.ctx);
+	assert.ok(host.mounted());
+	host.mounted()!.handleInput?.("\r");
+	host.mounted()!.handleInput?.("\r"); // Explicit Submit wins before abort.
+	const result = await pending;
+	assert.equal(result.content[0]?.text, "1. Proceed? — Alpha");
+	assert.deepEqual(result.details, { answers: [
+		{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha" },
+	] });
+	assert.deepEqual(success.counts(), { added: 1, removed: 1 });
+	success.controller.abort();
+	assert.equal(host.doneCalls(), 1);
+
+	const rejected = trackedSignal();
+	const failure = new Error("host rejected");
+	await assert.rejects(() => tool.execute("call", { questions: single() }, rejected.controller.signal,
+		undefined, { mode: "tui", ui: { custom: async () => { throw failure; } } }), (error: unknown) => error === failure);
+	assert.deepEqual(rejected.counts(), { added: 1, removed: 1 });
+	rejected.controller.abort();
+	assert.deepEqual(emitted, [
+		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
+		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
+		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
+		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
+	]);
 });
 
 test("ask_user_question reports cancellation without answers", async () => {

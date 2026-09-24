@@ -769,6 +769,27 @@ test("height stays bounded as the question count grows", () => {
 	assert.match(rendered, /❯ A/);
 });
 
+test("UM-04b: callable view cancel snapshots committed rows once and rejects late edits", () => {
+	const { view, completed } = viewWithResult([
+		question("First?", [option("Alpha", "First choice", "Preview A"), option("Beta")], { header: "First" }),
+		question("Second?", [option("Gamma"), option("Delta")], { header: "Second" }),
+	]);
+	view.handleInput(KEY.enter); // Commit the preview-bearing first row.
+	view.handleInput(KEY.enter); // Next; second remains uncommitted.
+	const cancellable = view as QuestionnaireView & { cancel?: () => void };
+	assert.equal(typeof cancellable.cancel, "function", "abort needs a callable view cancellation boundary");
+	cancellable.cancel?.();
+	const snapshot = { cancelled: true, answers: [
+		{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha", preview: "Preview A" },
+	] };
+	assert.deepEqual(completed, [snapshot]);
+	cancellable.cancel?.();
+	view.handleInput(KEY.enter);
+	view.handleInput(KEY.escape);
+	assert.deepEqual(completed, [snapshot], "cancel and late input cannot deliver twice");
+	assert.deepEqual(view.getResult(), snapshot);
+});
+
 test("Escape cancels the questionnaire with a cancelled result", () => {
 	const { view, completed } = viewWithResult(single());
 	view.handleInput(KEY.escape);
