@@ -1,0 +1,58 @@
+name: Manual native artifact preflight
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, converted_to_draft, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  artifact-preflight:
+    if: github.event.pull_request.draft == true && github.event.pull_request.head.repo.fork == true
+    name: artifact preflight (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 12
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    env:
+      GH_TOKEN: ""
+      NODE_AUTH_TOKEN: ""
+      NPM_TOKEN: ""
+    steps:
+      - name: Checkout fork draft source without persisted credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+
+      - name: Select hosted Node.js toolchain (not Gentle-Shell setup)
+        uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: "24"
+
+      - name: Run pure artifact-preflight tests only (no install, postinstall, setup, or launcher)
+        run: node --experimental-strip-types --test tests/manual-native-preflight.test.ts
+
+      - name: Prepare runner-disposable artifact scratch
+        run: node scripts/manual-native-preflight.mjs prepare
+
+      - name: Stage pinned npm archives with lifecycle scripts disabled
+        shell: bash
+        env:
+          HOME: ${{ runner.temp }}/gentle-shell-manual-native-preflight/home
+          USERPROFILE: ${{ runner.temp }}/gentle-shell-manual-native-preflight/home
+          NPM_CONFIG_USERCONFIG: ${{ runner.temp }}/gentle-shell-manual-native-preflight/npmrc
+          NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/gentle-shell-manual-native-preflight/global-npmrc
+          NPM_CONFIG_CACHE: ${{ runner.temp }}/gentle-shell-manual-native-preflight/npm-cache
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+        run: |
+          if ! npm pack --ignore-scripts --pack-destination "$RUNNER_TEMP/gentle-shell-manual-native-preflight" gentle-pi@3.7.0 @earendil-works/pi-coding-agent@0.85.1 >/dev/null 2>&1; then
+            printf '%s\n' 'Pinned npm artifact staging failed; lifecycle scripts were disabled.' >&2
+            exit 1
+          fi
+
+      - name: Verify staged npm and official Engram release artifacts only
+        run: node scripts/manual-native-preflight.mjs verify
