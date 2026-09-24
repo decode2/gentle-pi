@@ -9,6 +9,9 @@ import {
 	closeSync,
 	constants as fsConstants,
 	existsSync,
+	fchmodSync,
+	fsyncSync,
+	lstatSync,
 	mkdirSync,
 	openSync,
 	readdirSync,
@@ -248,15 +251,73 @@ function readRawConfig(configPath) {
 	return parseRawLauncherConfig(readJsonIfExists(configPath));
 }
 
+// External-ready requires every config directory to exist already; the external
+// owner creates them after approval. Never create directories for this marker.
+// Returns existing directory components leaf-to-root after checking root-to-leaf.
+function durableConfigDirectories(configDir) {
+	if (fsConstants.O_DIRECTORY === undefined || fsConstants.O_NOFOLLOW === undefined) {
+		throw new Error("Platform does not support safe directory fsync for external-ready config");
+	}
+	const directories = [];
+	for (let directory = configDir; ; directory = dirname(directory)) {
+		directories.push(directory);
+		if (dirname(directory) === directory) break;
+	}
+	// Preflight is not atomic against concurrent same-user path replacement.
+	for (let index = directories.length - 1; index >= 0; index--) {
+		const directory = directories[index];
+		let directoryStat;
+		try {
+			directoryStat = lstatSync(directory);
+		} catch (error) {
+			if (error.code === "ENOENT") throw new Error(`Missing launcher config directory ${directory}; create it after approval before setup --external-ready.`);
+			throw error;
+		}
+		if (directoryStat.isSymbolicLink() || !directoryStat.isDirectory()) {
+			throw new Error(`Refusing unsafe durable launcher config directory ${directory}`);
+		}
+	}
+	return directories;
+}
+
 // Atomic (temp file in the same directory, then rename): a crash or kill
 // mid-write must never leave config.json truncated or partially written,
 // since it also carries the S7 provisioning marker every plain launch reads.
-function writeRawConfig(configPath, config) {
-	const configDir = dirname(configPath);
-	if (!existsSync(configDir)) mkdirSync(configDir, { recursive: true, mode: 0o700 });
+function writeRawConfig(configPath, config, { durable = false } = {}) {
+	const absoluteConfigPath = resolvePath(configPath);
+	const configDir = dirname(absoluteConfigPath);
+	const durableDirectories = durable ? durableConfigDirectories(configDir) : undefined;
+	if (!durable && !existsSync(configDir)) mkdirSync(configDir, { recursive: true, mode: 0o700 });
 	const tempPath = join(configDir, `.${basenameOf(configPath)}.gentle-shell-${process.pid}.tmp`);
-	writeFileSync(tempPath, `${JSON.stringify(config, null, 2)}\n`, "utf8");
-	renameSync(tempPath, configPath);
+	let mode;
+	try {
+		const configStat = lstatSync(absoluteConfigPath);
+		if (configStat.isSymbolicLink()) throw new Error(`Refusing to replace symlinked launcher config ${configPath}`);
+		mode = configStat.mode & 0o777;
+	} catch (error) {
+		if (error.code !== "ENOENT") throw error;
+	}
+	const flags = fsConstants.O_WRONLY | fsConstants.O_CREAT | fsConstants.O_EXCL | (fsConstants.O_NOFOLLOW ?? 0);
+	const fd = openSync(tempPath, flags, mode ?? 0o600);
+	try {
+		writeFileSync(fd, `${JSON.stringify(config, null, 2)}\n`, "utf8");
+		fchmodSync(fd, mode ?? 0o600);
+		fsyncSync(fd);
+	} finally {
+		closeSync(fd);
+	}
+	renameSync(tempPath, absoluteConfigPath);
+	if (durableDirectories !== undefined) {
+		const directoryFlags = fsConstants.O_RDONLY | fsConstants.O_DIRECTORY | fsConstants.O_NOFOLLOW;
+		for (const directory of durableDirectories) {
+			const directoryFd = openSync(directory, directoryFlags);
+			try {
+				fsyncSync(directoryFd);
+			} finally {
+				closeSync(directoryFd);
+			}
+		}
+	}
 }
 
 function loadConfig() {
@@ -820,6 +881,51 @@ async function handleSetupCommand(commandArgs, home, runtime) {
 	process.exit(result.exitCode);
 }
 
+// Records an advisory post-Ready marker only; the external owner remains
+// responsible for approval, source binding, and independently verifying Ready.
+function handleExternalReadyCommand(commandArgs, args, home) {
+	if (commandArgs.length !== 1 || commandArgs[0] !== "--external-ready" || args.version) {
+		fail("Use 'gentle-shell [home selector] setup --external-ready' alone; it cannot be combined with other setup options.", 2);
+	}
+	if (args.packageRoot !== undefined) fail("--package-root cannot be combined with setup --external-ready.", 2);
+	if (home.mode === "link") fail("setup --external-ready does not apply to --link homes.", 2);
+	if (!isDirectory(home.dir)) fail(`setup --external-ready home ${home.dir} must already exist as a directory.`, 2);
+
+	const homeKey = safeRealpath(home.dir);
+	const configPath = resolveConfigPath();
+	const configText = readJsonIfExists(configPath);
+	const invalidConfig = "gentle-shell: refusing external-ready marker because launcher config is invalid; no files were changed.";
+	let config = {};
+	if (configText !== undefined) {
+		try {
+			config = JSON.parse(configText);
+		} catch {
+			fail(invalidConfig, 1);
+		}
+		const isPlainObject = (value) => typeof value === "object" && value !== null && !Array.isArray(value) && Object.getPrototypeOf(value) === Object.prototype;
+		if (!isPlainObject(config) || (Object.prototype.hasOwnProperty.call(config, "provisioned") && !isPlainObject(config.provisioned))) {
+			fail(invalidConfig, 1);
+		}
+	}
+	const entries = Object.prototype.hasOwnProperty.call(config, "provisioned") ? config.provisioned : {};
+	const recorded = {
+		...config,
+		provisioned: {
+			...entries,
+			[homeKey]: {
+				gentleAi: resolveSetupGentleAiPin(),
+				gentlePi: ownPackageVersion(),
+				at: new Date().toISOString(),
+				externalReady: true,
+			},
+		},
+	};
+	writeRawConfig(configPath, recorded, { durable: true });
+	process.stdout.write(
+		`gentle-shell: recorded an external-ready advisory marker for ${home.dir}; caller must bind this launcher source and home after its own Ready check. This marker does not authenticate the caller or verify Ready.\n`,
+	);
+}
+
 const AUTO_SETUP_OPT_OUT_ENV = "GENTLE_SHELL_NO_AUTO_SETUP";
 const SETUP_LOCK_STALE_MS = 15 * 60 * 1000;
 
@@ -1058,6 +1164,12 @@ async function main() {
 	const config = loadConfig();
 	let home = resolveHome({ args, env: process.env, homedir: homedir(), config });
 	if (home.mode === "path") home = { ...home, dir: resolvePath(home.dir) };
+
+	// This opt-in post-Ready annotation runs before runtime resolution and home bootstrap.
+	if (args.command === "setup" && args.commandArgs.some((arg) => arg.startsWith("--external-ready"))) {
+		handleExternalReadyCommand(args.commandArgs, args, home);
+		return;
+	}
 
 	const runtime = resolvePiRuntime({
 		env: process.env,
