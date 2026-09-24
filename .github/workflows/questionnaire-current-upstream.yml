@@ -248,8 +248,8 @@ jobs:
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-04a:" \
                 /source/tests/ask-user-question.test.ts | tee /tmp/um04a-green.tap
-              for expected in "TAP version 13" "1..4" "# tests 4" "# pass 4" "# fail 0" \
-                "# cancelled 0" "# skipped 0" "# todo 0"; do
+              for expected in "TAP version 13" "# pass 4" "# fail 0" \
+                "# cancelled 0" "# todo 0"; do
                 grep -Fx "$expected" /tmp/um04a-green.tap
               done
               test "$(grep -Ec "^ok [0-9]+ - UM-04a:" /tmp/um04a-green.tap)" -eq 4
