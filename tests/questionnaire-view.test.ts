@@ -436,6 +436,49 @@ test("UM-03a: scrolling and width resize reject stale hits but fresh owned targe
 	assert.deepEqual(completed[0]?.answers.map((answer) => answer.answer), ["Route 0"]);
 });
 
+test("UM-03a-editor: long wrapped question keeps the real custom Editor draft and caret on screen", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as TUI;
+	const completed: QuestionnaireResult[] = [];
+	const longQuestion = question("Choose a route with enough wrapped context to fill the native viewport. ".repeat(14),
+		Array.from({ length: 12 }, (_, i) => option(`Route ${i}`, `Detail ${i}: ${"wrapped text ".repeat(4)}`)));
+	const makeView = () => new QuestionnaireView({ questions: [longQuestion], theme, tui: compactTui,
+		onComplete: (result) => completed.push(result) });
+	const view = makeView();
+	for (let i = 0; i < longQuestion.options.length; i++) view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter); // Open the real per-question Editor, not a simulated input.
+	view.focused = true;
+	const draft = "editor reachability draft";
+	view.handleInput(draft);
+	assert.equal(completed.length, 0, "opening and typing in Editor must not deliver");
+	const lines = view.render(40);
+	assert.ok(lines.length <= compactTui.terminal.rows - 2, "Editor must leave both native borders at 40x20");
+	assert.ok(lines.some((line) => plain(line).includes(draft) && line.includes(CURSOR_MARKER)),
+		"UM-03a-editor: draft and caret must remain visible in the 18-row native viewport");
+	view.handleInput(KEY.enter); // Commit custom text, not Submit.
+	assert.equal(completed.length, 0, "custom commit must not submit");
+	assert.equal(view.getResult().answers[0]?.answer, draft);
+	const actions = view.render(40);
+	assert.ok(actions.some((line) => plain(line).includes("Submit")) &&
+		actions.some((line) => plain(line).includes("Cancel")), "Submit and Cancel remain separate visible actions");
+	view.handleInput(KEY.enter); // Explicit Submit.
+	assert.deepEqual(completed[0], { cancelled: false, answers: [
+		{ questionIndex: 0, question: longQuestion.question, kind: "custom", answer: draft },
+	] });
+	const cancelled = makeView();
+	for (let i = 0; i < longQuestion.options.length; i++) cancelled.handleInput(KEY.down[0]);
+	cancelled.handleInput(KEY.enter);
+	cancelled.handleInput("discarded draft");
+	cancelled.handleInput(KEY.escape); // Return to choices, not questionnaire cancellation.
+	assert.equal(completed.length, 1);
+	const cancelLines = cancelled.render(40);
+	const cancelRow = cancelLines.findIndex((line) => plain(line).includes("Cancel"));
+	assert.ok(cancelRow >= 0, "Cancel must stay visible after leaving Editor");
+	assert.equal(cancelled.handleMouse({ ...mouseEvent(cancelLines, cancelRow, "click", 40),
+		x: plain(cancelLines[cancelRow]!).indexOf("Cancel") })?.handled, true);
+	assert.equal(completed[1]?.cancelled, true);
+	assert.equal(completed[1]?.answers.length, 0, "Cancel must not submit an uncommitted draft");
+});
+
 test("pointer click on an editor text row after its header moves the caret", () => {
 	const { view, completed } = viewWithResult(single());
 	view.handleInput(KEY.down[0]);
