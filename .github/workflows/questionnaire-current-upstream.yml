@@ -99,7 +99,7 @@ jobs:
             GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
             EXPECTED_SHA="$EXPECTED_SHA" /bin/bash -euo pipefail -c '
               mkdir -p /artifact/{home,tmp,npm-cache,pnpm-home}
-              git -c safe.directory=/workspace clone --no-local --no-checkout /workspace /artifact/source
+              git -c safe.directory=/workspace -c safe.directory=/workspace/.git clone --no-local --no-checkout /workspace /artifact/source
               cd /artifact/source
               git checkout --detach "$EXPECTED_SHA"
               test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
