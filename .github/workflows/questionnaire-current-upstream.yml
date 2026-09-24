@@ -145,13 +145,14 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
-                --test-name-pattern="^(?!UM-01:)" \
+                --test-skip-pattern="^UM-01:" \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
                 | tee /tmp/questionnaire-baseline.tap
-              grep -Fx "# tests 55" /tmp/questionnaire-baseline.tap
+              grep -Fx "1..49" /tmp/questionnaire-baseline.tap
+              grep -Fx "# tests 49" /tmp/questionnaire-baseline.tap
               grep -Fx "# pass 49" /tmp/questionnaire-baseline.tap
               grep -Fx "# fail 0" /tmp/questionnaire-baseline.tap
-              grep -Fx "# skipped 6" /tmp/questionnaire-baseline.tap
+              grep -Fx "# skipped 0" /tmp/questionnaire-baseline.tap
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
                 /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
@@ -165,10 +166,12 @@ jobs:
               else
                 test "$?" -eq 1
               fi
-              grep -Fx "# tests 55" /tmp/um01-red.tap
+              grep -Fx "TAP version 13" /tmp/um01-red.tap
+              grep -Fx "1..6" /tmp/um01-red.tap
+              grep -Fx "# tests 6" /tmp/um01-red.tap
               grep -Fx "# pass 0" /tmp/um01-red.tap
               grep -Fx "# fail 6" /tmp/um01-red.tap
-              grep -Fx "# skipped 49" /tmp/um01-red.tap
+              grep -Fx "# skipped 0" /tmp/um01-red.tap
               test "$(grep -Ec "^not ok [0-9]+ - UM-01:" /tmp/um01-red.tap)" -eq 6
               test "$(grep -Ec "^not ok [0-9]+ - " /tmp/um01-red.tap)" -eq 6
               for name in \
@@ -187,7 +190,7 @@ jobs:
                 "accepting custom text must not auto-submit" \
                 "Submit must have a visible pointer target" \
                 "Submit and Cancel must both be visible as separate actions"; do
-                grep -E "^[[:space:]]+error: .*UM-01: $diagnostic" /tmp/um01-red.tap
+                grep -F "UM-01: $diagnostic" /tmp/um01-red.tap
               done
               grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um01-red.tap
             '
