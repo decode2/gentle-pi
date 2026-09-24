@@ -86,7 +86,7 @@ function assertFits(view: QuestionnaireView, width: number): void {
 	}
 }
 
-function mouseEvent(lines: string[], row: number, type: TuiMouseEvent["type"]): TuiMouseEvent {
+function mouseEvent(lines: string[], row: number, type: TuiMouseEvent["type"], width = 100): TuiMouseEvent {
 	return {
 		type,
 		button: "left",
@@ -94,7 +94,7 @@ function mouseEvent(lines: string[], row: number, type: TuiMouseEvent["type"]): 
 		y: row,
 		screenX: 1,
 		screenY: row,
-		width: 100,
+		width,
 		height: lines.length,
 		shift: false,
 		alt: false,
@@ -352,6 +352,88 @@ test("UM-02: MULTI custom multiline answer keeps toggles until explicit Submit",
 	view.handleInput(KEY.enter);
 	assert.deepEqual(completed[0]?.answers, view.getResult().answers);
 	assert.equal(completed.length, 1, "MULTI custom text needs one explicit Submit");
+});
+
+test("UM-03a: a 40x20 long wrapped body keeps Next Submit and Cancel reachable without answer-time delivery", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as TUI;
+	const completed: QuestionnaireResult[] = [];
+	const first = question("Choose a route with a deliberately long wrapped question?", Array.from({ length: 12 }, (_, i) =>
+		option(`Route ${i}`, `Detail ${i}: ${"wrapped body text ".repeat(4)}`)));
+	const view = new QuestionnaireView({ questions: [first, question("Finish?", [option("Yes")])],
+		theme, tui: compactTui, onComplete: (result) => completed.push(result) });
+	view.handleInput(KEY.enter); // Record Route 0, not Next.
+	assert.equal(completed.length, 0);
+	const narrow = view.render(40);
+	assert.ok(narrow.length <= compactTui.terminal.rows - 2,
+		"UM-03a: the view must leave room for both real native custom TUI borders at 40x20");
+	assertFits(view, 40);
+	assert.ok(narrow.some((line) => plain(line).includes("Next")) &&
+		narrow.some((line) => plain(line).includes("Cancel")), "both actions must remain visible");
+	const bodyBefore = plain(narrow.join("\n"));
+	const wheel = { ...mouseEvent(narrow, 3, "wheel", 40), button: "none" as const, wheelDelta: 12 };
+	assert.equal(view.handleMouse(wheel)?.handled, true, "body wheel must browse the clipped option list");
+	const scrolled = view.render(40);
+	assert.notEqual(plain(scrolled.join("\n")), bodyBefore, "the body must be browsable");
+	const nextRow = scrolled.findIndex((line) => plain(line).includes("Next"));
+	assert.equal(view.handleMouse({ ...mouseEvent(scrolled, nextRow, "click", 40), x: plain(scrolled[nextRow]!).indexOf("Next") })?.handled, true);
+	assert.equal(view.activeQuestion, 1);
+	assert.equal(completed.length, 0, "Next does not deliver");
+	view.handleInput(KEY.enter); // Record Yes, not Submit.
+	assert.equal(completed.length, 0);
+	const final = view.render(40);
+	assert.ok(final.length <= compactTui.terminal.rows - 2);
+	const submitRow = final.findIndex((line) => plain(line).includes("Submit"));
+	assert.ok(submitRow >= 0 && final.some((line) => plain(line).includes("Cancel")));
+	assert.equal(view.handleMouse({ ...mouseEvent(final, submitRow, "click", 40), x: plain(final[submitRow]!).indexOf("Submit") })?.handled, true);
+	assert.deepEqual(completed[0]?.answers.map((answer) => answer.answer), ["Route 0", "Yes"]);
+	const cancelled: QuestionnaireResult[] = [];
+	const other = new QuestionnaireView({ questions: [first], theme, tui: compactTui,
+		onComplete: (result) => cancelled.push(result) });
+	const otherLines = other.render(40);
+	const cancelRow = otherLines.findIndex((line) => plain(line).includes("Cancel"));
+	assert.ok(otherLines.length <= compactTui.terminal.rows - 2 && cancelRow >= 0);
+	assert.equal(other.handleMouse({ ...mouseEvent(otherLines, cancelRow, "click", 40), x: plain(otherLines[cancelRow]!).indexOf("Cancel") })?.handled, true);
+	assert.equal(cancelled[0]?.cancelled, true);
+});
+
+test("UM-03a: scrolling and width resize reject stale hits but fresh owned targets retain the Editor draft", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as TUI;
+	const completed: QuestionnaireResult[] = [];
+	const view = new QuestionnaireView({ questions: [question("Pick a route?", Array.from({ length: 10 }, (_, i) =>
+		option(`Route ${i}`, `Description ${i} ${"wrap ".repeat(12)}`)))],
+		theme, tui: compactTui, onComplete: (result) => completed.push(result) });
+	for (let i = 0; i < 10; i++) view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter); // Editor, then keep its uncommitted draft across scrolling.
+	view.handleInput("preserved draft");
+	view.handleInput(KEY.escape);
+	for (let i = 0; i < 10; i++) view.handleInput(KEY.up[0]);
+	view.handleInput(KEY.enter); // Record Route 0 without delivering.
+	const before = view.render(40);
+	const oldOptionRow = before.findIndex((line) => plain(line).includes("Route 0"));
+	assert.ok(oldOptionRow >= 0);
+	assert.equal(view.handleMouse({ ...mouseEvent(before, 3, "wheel", 40), button: "none" as const, wheelDelta: 10 })?.handled, true,
+		"UM-03a: wheel must scroll the owned body without delivering");
+	assert.equal(view.handleMouse(mouseEvent(before, oldOptionRow, "click", 40)), undefined,
+		"a pointer from before the scroll cannot commit an obsolete cell");
+	const scrolled = view.render(40);
+	assert.notEqual(plain(scrolled.join("\n")), plain(before.join("\n")));
+	const resized = view.render(48);
+	const submitRow = resized.findIndex((line) => plain(line).includes("Submit"));
+	assert.ok(submitRow >= 0);
+	const submitX = plain(resized[submitRow]!).indexOf("Submit");
+	assert.equal(view.handleMouse({ ...mouseEvent(scrolled, submitRow, "click", 40), x: submitX }), undefined,
+		"old-width pointer geometry cannot hit a newly rendered action");
+	assert.equal(view.handleMouse({ ...mouseEvent(resized, submitRow, "click", 48), x: submitX + 6 }), undefined,
+		"blank cells adjacent to Submit cannot commit");
+	assert.equal(completed.length, 0);
+	for (let i = 0; i < 10; i++) view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter); // Reopen the retained public Editor.
+	assert.match(plain(render(view, 48)), /preserved draft/);
+	view.handleInput(KEY.escape);
+	const fresh = view.render(48);
+	const freshRow = fresh.findIndex((line) => plain(line).includes("Submit"));
+	assert.equal(view.handleMouse({ ...mouseEvent(fresh, freshRow, "click", 48), x: plain(fresh[freshRow]!).indexOf("Submit") })?.handled, true);
+	assert.deepEqual(completed[0]?.answers.map((answer) => answer.answer), ["Route 0"]);
 });
 
 test("pointer click on an editor text row after its header moves the caret", () => {
