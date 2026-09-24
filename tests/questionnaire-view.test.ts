@@ -354,6 +354,34 @@ test("UM-02: MULTI custom multiline answer keeps toggles until explicit Submit",
 	assert.equal(completed.length, 1, "MULTI custom text needs one explicit Submit");
 });
 
+test("pointer click on an editor text row after its header moves the caret", () => {
+	const { view, completed } = viewWithResult(single());
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput("abcd");
+	const lines = view.render(100);
+	const headerRow = lines.findIndex((line) => plain(line).includes("Custom response"));
+	const textRow = lines.findIndex((line) => plain(line).includes("abcd"));
+	assert.ok(headerRow >= 0 && textRow > headerRow + 1, "editor text follows the custom header and border");
+	assert.equal(view.handleMouse(mouseEvent(lines, headerRow, "click")), undefined,
+		"the custom header does not belong to the editor");
+	assert.equal(view.handleMouse(mouseEvent(lines, 1, "click")), undefined,
+		"the blank tab spacer does not belong to the editor");
+	assert.equal(view.handleMouse(mouseEvent(lines, textRow, "wheel")), undefined,
+		"unhandled wheel events pass through");
+	assert.equal(view.handleMouse(mouseEvent(lines, textRow, "drag")), undefined,
+		"editor text selection remains the renderer's responsibility");
+	const click = view.handleMouse(mouseEvent(lines, textRow, "click"));
+	assert.equal(click?.handled, true);
+	assert.equal(click?.target.component, view, "the container owns the mouse dispatch target");
+	view.handleInput("X");
+	view.handleInput(KEY.enter);
+	assert.equal(view.getResult().answers[0]?.answer, "aXbcd",
+		"a click on the visible text row positions the editing caret, not the header or border");
+	assert.equal(completed.length, 0, "custom commit still requires explicit Submit");
+});
+
 test("renders exactly one active question plus a tab strip for all questions", () => {
 	const { view } = viewWithResult(two());
 	const rendered = render(view);

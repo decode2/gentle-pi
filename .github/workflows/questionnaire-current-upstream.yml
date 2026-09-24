@@ -28,9 +28,9 @@ jobs:
     env:
       BASE: 7f78c36d4b50070008557a79b8734dd37222c569
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM02_TEST_BLOB: a6efdc3ee8b7ad18083899d87083367acec458a0
+      UM02_TEST_BLOB: 39056489630016f70da44e646285e88dc17303bb
       UM02_ASK_TEST_BLOB: 26e4b48d86cf91f9865be8efbbdee5f7443c80bb
-      UM02_VIEW_BLOB: 0934debcde27a79476d5378c7d79631500559498
+      UM02_VIEW_BLOB: 1b6c22f8905b0b29bb460dd1190d1e672ca63203
       UM02_ASK_BLOB: ba896274d384cab18b84ffeacf4e52cf7b66d78a
     steps:
       - name: Checkout exact event revision without credentials
@@ -161,9 +161,9 @@ jobs:
               node --experimental-strip-types --test --test-reporter=tap \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
                 | tee /tmp/questionnaire-green.tap
-              grep -Fx "1..61" /tmp/questionnaire-green.tap
-              grep -Fx "# tests 61" /tmp/questionnaire-green.tap
-              grep -Fx "# pass 61" /tmp/questionnaire-green.tap
+              grep -Fx "1..62" /tmp/questionnaire-green.tap
+              grep -Fx "# tests 62" /tmp/questionnaire-green.tap
+              grep -Fx "# pass 62" /tmp/questionnaire-green.tap
               grep -Fx "# fail 0" /tmp/questionnaire-green.tap
               grep -Fx "# cancelled 0" /tmp/questionnaire-green.tap
               grep -Fx "# skipped 0" /tmp/questionnaire-green.tap

@@ -63,6 +63,7 @@ interface QuestionState {
 
 type LineOwner =
 	| { questionIndex: number; rowIndex: number }
+	| { editorRow: number; editorHeight: number }
 	| { action: "advance" | "cancel"; width: number };
 
 /**
@@ -225,12 +226,21 @@ export class QuestionnaireView extends Container implements Focusable {
 		}
 	}
 
-	override handleMouse(event: TuiMouseEvent) {
+	override handleMouse(event: TuiMouseEvent): ReturnType<Container["handleMouse"]> {
 		if (this.completed) return undefined;
-		if (this.editingQuestion !== undefined) return this.editors[this.editingQuestion]!.handleMouse(event);
-
 		const owner = this.lineOwners[event.y];
-		if (!owner || event.button !== "left") return undefined;
+		if (!owner) return undefined;
+		if ("editorRow" in owner) {
+			if (this.editingQuestion === undefined) return undefined;
+			const result = this.editors[this.editingQuestion]!.handleMouse({
+				...event,
+				y: owner.editorRow,
+				height: owner.editorHeight,
+			});
+			if (!result || (!result.handled && !result.capture && !result.focus)) return undefined;
+			return { ...result, handled: true, target: this.mouseTarget(event) };
+		}
+		if (this.editingQuestion !== undefined || event.button !== "left") return undefined;
 		if ("action" in owner) {
 			if (event.x < 0 || event.x >= owner.width) return undefined;
 			if (event.type === "press") {
@@ -366,9 +376,10 @@ export class QuestionnaireView extends Container implements Focusable {
 		if (this.editingQuestion === this.focusedQuestion) {
 			push("Custom response", headerOwner);
 			push("> ", headerOwner);
-			for (const line of this.editors[this.focusedQuestion]!.render(width)) {
+			const editorLines = this.editors[this.focusedQuestion]!.render(width);
+			for (const [editorRow, line] of editorLines.entries()) {
 				lines.push(line);
-				owners.push(headerOwner);
+				owners.push({ editorRow, editorHeight: editorLines.length });
 			}
 			push("Enter to submit • Esc to return to choices", headerOwner);
 			return { lines, owners };
