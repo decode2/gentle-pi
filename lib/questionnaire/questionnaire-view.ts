@@ -325,18 +325,24 @@ export class QuestionnaireView extends Container implements Focusable {
 		}
 		push("");
 		const preview = this.currentPreview();
-		const split = preview !== undefined && viewport >= MIN_PREVIEW_WIDTH;
-		const leftWidth = split ? Math.max(1, Math.floor(viewport * PREVIEW_SPLIT)) : viewport;
-		const body = this.renderBody(leftWidth, preview !== undefined && !split);
-		const right = split ? this.wrap(this.theme.fg("dim", preview!),
-			Math.max(1, viewport - leftWidth - PREVIEW_GAP.length)) : [];
+		let split = preview !== undefined && viewport >= MIN_PREVIEW_WIDTH;
+		let leftWidth = split ? Math.max(1, Math.floor(viewport * PREVIEW_SPLIT)) : viewport;
 		const action = this.focusedQuestion === this.questions.length - 1 ? "Submit" : "Next";
 		const chrome = 1 + (this.editingQuestion === undefined
 			? this.wrap(action, viewport).length + this.wrap("Cancel", viewport).length : 0)
 			+ this.wrap(this.hint(), viewport).length;
 		const bodyHeight = Math.max(1, this.tui.terminal.rows - 2 - lines.length - chrome);
+		let right = split ? this.wrap(this.theme.fg("dim", preview!),
+			Math.max(1, viewport - leftWidth - PREVIEW_GAP.length)) : [];
+		// A taller split preview has no scroll owner. Put it in the owned body instead.
+		if (right.length > bodyHeight) {
+			split = false;
+			leftWidth = viewport;
+			right = [];
+		}
+		const body = this.renderBody(leftWidth, preview !== undefined && !split);
 		const total = Math.max(body.lines.length, right.length);
-		// The preview is not a scroll owner; only overflow in the left body enables wheel input.
+		// Only overflow in the owned body enables wheel input.
 		this.bodyMaxOffset = Math.max(0, body.lines.length - bodyHeight);
 		this.bodyOffset = Math.min(this.bodyOffset, this.bodyMaxOffset);
 		if (this.followCursor) {

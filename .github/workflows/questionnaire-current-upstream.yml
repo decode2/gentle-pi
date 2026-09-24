@@ -1,4 +1,4 @@
-name: Current-upstream questionnaire UM-03a preview RED
+name: Current-upstream questionnaire UM-03a preview GREEN
 
 on:
   push:
@@ -30,7 +30,7 @@ jobs:
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
       UM03_TEST_BLOB: 1cc268512016a3a0b0a6c3e4b7fddbc9cdc9d26e
       UM02_ASK_TEST_BLOB: 26e4b48d86cf91f9865be8efbbdee5f7443c80bb
-      UM03_VIEW_BLOB: 154e9c81c462cd510757d32f545a58a1d19d519a
+      UM03_VIEW_BLOB: 0adbb7e49722dfe800bd930c6e0ec9a5e2142067
       UM02_ASK_BLOB: ba896274d384cab18b84ffeacf4e52cf7b66d78a
     steps:
       - name: Checkout exact event revision without credentials
@@ -40,7 +40,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove UM-03a preview RED test and frozen GREEN view/producer identity
+      - name: Prove UM-03a preview GREEN test and view/producer identity
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -77,7 +77,7 @@ jobs:
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          echo "UM-03a preview RED checkout=$EXPECTED_SHA test=$UM03_TEST_BLOB ask_test=$UM02_ASK_TEST_BLOB frozen_view=$UM03_VIEW_BLOB ask=$UM02_ASK_BLOB base=$BASE other critical blobs unchanged"
+          echo "UM-03a preview GREEN checkout=$EXPECTED_SHA test=$UM03_TEST_BLOB ask_test=$UM02_ASK_TEST_BLOB view=$UM03_VIEW_BLOB ask=$UM02_ASK_BLOB base=$BASE other critical blobs unchanged"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -133,7 +133,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, prior 65-test baseline, Herdr, UM-01/02, UM-03a, editor and preview RED offline
+      - name: Run strict types, full 66-test GREEN, Herdr, UM-01/02, UM-03a, editor and preview offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -159,10 +159,9 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
-                --test-skip-pattern="^UM-03a-preview:" \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
                 | tee /tmp/questionnaire-baseline.tap
-              for expected in "1..65" "# tests 65" "# pass 65" "# fail 0" \
+              for expected in "1..66" "# tests 66" "# pass 66" "# fail 0" \
                 "# cancelled 0" "# skipped 0" "# todo 0"; do
                 grep -Fx "$expected" /tmp/questionnaire-baseline.tap
               done
@@ -236,22 +235,15 @@ jobs:
                 grep -Fx "$expected" /tmp/um03a-editor-green.tap
               done
               grep -E "^ok [0-9]+ - UM-03a-editor: long wrapped question keeps the real custom Editor draft and caret on screen$" /tmp/um03a-editor-green.tap
-              set +e
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-03a-preview:" \
-                /source/tests/questionnaire-view.test.ts > /tmp/um03a-preview-red.tap 2>&1
-              red_status=$?
-              set -e
-              test "$red_status" -ne 0
-              grep -Fx "TAP version 13" /tmp/um03a-preview-red.tap
-              for expected in "1..1" "# tests 1" "# pass 0" "# fail 1" \
+                /source/tests/questionnaire-view.test.ts | tee /tmp/um03a-preview-green.tap
+              for expected in "TAP version 13" "1..1" "# tests 1" "# pass 1" "# fail 0" \
                 "# cancelled 0" "# skipped 0" "# todo 0"; do
-                grep -Fx "$expected" /tmp/um03a-preview-red.tap
+                grep -Fx "$expected" /tmp/um03a-preview-green.tap
               done
-              test "$(grep -Ec "^not ok [0-9]+ - UM-03a-preview:" /tmp/um03a-preview-red.tap)" -eq 1
-              grep -E "^not ok [0-9]+ - UM-03a-preview: long split preview remains reachable with a short left body at 80x20$" /tmp/um03a-preview-red.tap
-              grep -F "UM-03a-preview: owned wheel must reveal the preview tail" /tmp/um03a-preview-red.tap
-              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um03a-preview-red.tap
+              grep -E "^ok [0-9]+ - UM-03a-preview: long split preview remains reachable with a short left body at 80x20$" /tmp/um03a-preview-green.tap
+              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um03a-preview-green.tap
             '
 
       - name: Recheck exact checkout and cleanliness
