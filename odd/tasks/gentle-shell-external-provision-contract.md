@@ -15,7 +15,8 @@ Allow Gentle AI to use `setup --external-ready` as an advisory marker only, afte
 - The external Gentle AI owner owns approval, Ready verification, effect inventory, and rollback for external effects. Gentle Shell owns only recording its advisory marker after the owner requests it.
 - The marker neither authenticates the caller nor verifies Ready, approval, source, home, runtime, or Apply outcome.
 - Marker config handling rejects symlinked config/temp paths and missing, symlinked, or non-directory existing path components before mutation; it merges the selected home entry while preserving other config keys.
-- Write and fsync a temporary file, rename it into place, then fsync existing directory ancestors leaf-to-root before reporting success.
+- On Linux/Darwin, write and fsync an exclusive same-directory temporary file, rename it into place, then fsync existing directory ancestors leaf-to-root before reporting success. Check existing ancestors and the config leaf before reading or writing; reject missing, symlinked, and non-directory ancestors without creating them.
+- Windows marker authoring currently **fails closed**: Node does not provide a reliable way to reject every ancestor reparse-point type. No Windows success or power-loss durability guarantee is claimed. The proposed weaker Windows file-sync/rename/readback contract is **not implemented** pending a reviewed path-security solution and native testing.
 
 ## Limits
 
