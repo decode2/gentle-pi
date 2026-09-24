@@ -565,6 +565,73 @@ test("ask_user_question keeps toggled options in a multiSelect custom answer", a
 	assert.equal(rendered.trimEnd(), "✓ Pick? — (custom) free note — selected: One");
 });
 
+test("UM-04a: Escape preserves a committed option and preview in partial cancellation", async () => {
+	const { tool } = registerQuestionTool();
+	const questions = [
+		{ question: "First?", header: "First", options: [option("Alpha", "First choice", "Preview A"), option("Beta")] },
+		{ question: "Second?", header: "Second", options: [option("Gamma"), option("Delta")] },
+	];
+	const result = await run(tool, { questions }, tuiContext(["\r", "\r", "\x1b"]));
+
+	assert.equal(result.content[0]?.text,
+		"User cancelled the questionnaire\nPartial answers:\n1. First? — Alpha\n   selected preview: Preview A",
+		"UM-04a: cancelled option transcript retains its committed preview");
+	assert.deepEqual(result.details, { cancelled: true, answers: [
+		{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha", preview: "Preview A" },
+	] });
+});
+
+test("UM-04a: Escape preserves committed MULTI and custom rows in question order", async () => {
+	const { tool } = registerQuestionTool();
+	const questions = [
+		{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true },
+		{ question: "Skipped?", header: "Skipped", options: [option("Ignore"), option("Other")] },
+		{ question: "Explain?", header: "Explain", options: [option("Yes"), option("No")], multiSelect: true },
+	];
+	const result = await run(tool, { questions }, tuiContext([
+		" ", "\r", "\t", "\t", // Commit One as MULTI, then skip the middle question.
+		" ", "\x1b[B", "\x1b[B", "\r", "a reason", "\r", // Commit custom + selected Yes.
+		"\x1b", // Cancel after both commits, without Submit.
+	]));
+	assert.equal(result.content[0]?.text,
+		"User cancelled the questionnaire\nPartial answers:\n1. Pick? — selected: One\n3. Explain? — (custom) a reason — selected: Yes",
+		"UM-04a: cancelled MULTI and custom transcript keeps original indices and order");
+	assert.deepEqual(result.details, { cancelled: true, answers: [
+		{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: ["One"] },
+		{ questionIndex: 2, question: "Explain?", kind: "custom", answer: "a reason", selected: ["Yes"] },
+	] });
+});
+
+test("UM-04a: cancellation excludes later uncommitted MULTI toggles and custom draft", async () => {
+	const { tool } = registerQuestionTool();
+	const questions = [
+		{ question: "First?", header: "First", options: [option("Alpha"), option("Beta")] },
+		{ question: "Later?", header: "Later", options: [option("One"), option("Two")], multiSelect: true },
+	];
+	const result = await run(tool, { questions }, tuiContext([
+		"\r", "\r", " ", "\x1b[B", "\x1b[B", "\r", "uncommitted draft", "\x1b", "\x1b",
+	]));
+	assert.equal(result.content[0]?.text, "User cancelled the questionnaire\nPartial answers:\n1. First? — Alpha",
+		"UM-04a: cancelled transcript excludes uncommitted later toggles and draft");
+	assert.deepEqual(result.details, { cancelled: true, answers: [
+		{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha" },
+	] });
+});
+
+test("UM-04a: renderResult shows partial rows alongside cancellation without changing answerless rendering", () => {
+	const { tool } = registerQuestionTool();
+	const partial = tool.renderResult({ content: [], details: { cancelled: true, answers: [
+			{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha" },
+			{ questionIndex: 2, question: "Pick?", kind: "multi", answer: null, selected: ["One"] },
+		] } }, { expanded: false }, theme).render(200).join("\n");
+	assert.match(partial, /Cancelled/);
+	assert.match(partial, /First\? — Alpha/, "UM-04a: committed option row remains visible on cancellation");
+	assert.match(partial, /Pick\? — One/, "UM-04a: committed MULTI row remains visible on cancellation");
+	const empty = tool.renderResult({ content: [], details: { cancelled: true } }, { expanded: false }, theme)
+		.render(200).join("\n");
+	assert.equal(empty.trimEnd(), "Cancelled");
+});
+
 test("ask_user_question reports cancellation without answers", async () => {
 	const { tool, emitted } = registerQuestionTool();
 
