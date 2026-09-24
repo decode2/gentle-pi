@@ -45,7 +45,7 @@ function ownGentlePiVersion(): string {
 // GENTLE_SHELL_GENTLE_AI_BIN. The auto-provision test section below opts
 // back in per test via enableAutoProvision.
 function fixture(t: test.TestContext) {
-	const root = mkdtempSync(join(tmpdir(), "gentle-shell-bin-"));
+	const root = realpathSync(mkdtempSync(join(tmpdir(), "gentle-shell-bin-")));
 	t.after(() => rmSync(root, { recursive: true, force: true }));
 	const home = join(root, "home");
 	mkdirSync(home, { recursive: true });
@@ -712,7 +712,7 @@ test("setup --external-ready marks an existing home without provisioning and lat
 
 	const marked = run(env, ["--isolated", "setup", "--external-ready"]);
 	if (process.platform === "win32") {
-		assertWindowsMarkerBlocked(marked, env.GENTLE_SHELL_CONFIG!);
+		assertWindowsMarkerBlocked(marked, f.env.GENTLE_SHELL_CONFIG!);
 		assert.equal(existsSync(counterPath), false);
 		assert.equal(existsSync(piCounterPath), false);
 		assert.equal(readFileSync(settingsPath, "utf8"), originalSettings);
@@ -1101,7 +1101,11 @@ test("external-ready guard ignores non-external legacy entries and malformed sib
 			[join(f.root, "other-home")]: { externalReady: false, gentleAi: null },
 		} });
 	writeFileSync(f.configPath, text);
-	const result = run({ ...f.env, GENTLE_SHELL_NO_AUTO_SETUP: "1" }, ["list"]);
+	// On Windows a .mjs file cannot be spawned directly; use the launcher's
+	// .cmd spawn path while still counting both Pi invocations in the stub.
+	const piCommand = process.platform === "win32" ? join(f.root, "fake-pi.cmd") : f.piScript;
+	if (process.platform === "win32") writeFileSync(piCommand, `@echo off\r\n"${process.execPath}" "${f.piScript}" %*\r\n`);
+	const result = run({ ...f.env, GENTLE_SHELL_PI: piCommand, GENTLE_SHELL_NO_AUTO_SETUP: "1" }, ["list"]);
 	assert.equal(result.status, 0, result.stderr);
 	assert.equal(result.stdout, "");
 	assert.equal(readFileSync(f.configPath, "utf8"), text);
