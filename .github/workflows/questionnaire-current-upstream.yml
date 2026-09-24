@@ -1,4 +1,4 @@
-name: Current-upstream questionnaire baseline
+name: Current-upstream questionnaire UM-01 RED
 
 on:
   push:
@@ -26,6 +26,7 @@ jobs:
     env:
       BASE: 7f78c36d4b50070008557a79b8734dd37222c569
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
+      UM01_TEST_BLOB: 5def3e34bfcc01b3c23788862a841bcb06e5baf9
     steps:
       - name: Checkout exact event revision without credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -34,7 +35,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove baseline source identity and scope
+      - name: Prove UM-01 test identity and unchanged baseline sources
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -46,7 +47,7 @@ jobs:
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md) ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts) ;;
               *) echo "unexpected changed path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
@@ -55,12 +56,14 @@ jobs:
             scripts/check-types.mjs scripts/types-baseline.json \
             extensions/ask-user-question.ts extensions/gentle-ai.ts \
             lib/questionnaire/questionnaire-view.ts lib/native-fullscreen-interaction.ts \
-            tests/ask-user-question.test.ts tests/questionnaire-view.test.ts tests/gentle-ai.test.ts; do
+            tests/ask-user-question.test.ts tests/gentle-ai.test.ts; do
             base_blob="$(git rev-parse "$BASE:$path")"
             test "$(git rev-parse "HEAD:$path")" = "$base_blob"
             test "$(git hash-object -- "$path")" = "$base_blob"
           done
-          echo "baseline checkout=$EXPECTED_SHA base=$BASE critical blobs unchanged"
+          test "$(git rev-parse HEAD:tests/questionnaire-view.test.ts)" = "$UM01_TEST_BLOB"
+          test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM01_TEST_BLOB"
+          echo "UM-01 RED checkout=$EXPECTED_SHA test=$UM01_TEST_BLOB base=$BASE other critical blobs unchanged"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -116,7 +119,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run focused baseline and strict type gates offline
+      - name: Run strict types, unchanged baseline, then expected UM-01 RED offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -142,16 +145,51 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="^(?!UM-01:)" \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/questionnaire.tap
+                | tee /tmp/questionnaire-baseline.tap
+              grep -Fx "# tests 55" /tmp/questionnaire-baseline.tap
+              grep -Fx "# pass 49" /tmp/questionnaire-baseline.tap
+              grep -Fx "# fail 0" /tmp/questionnaire-baseline.tap
+              grep -Fx "# skipped 6" /tmp/questionnaire-baseline.tap
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
                 /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
-              for log in /tmp/questionnaire.tap /tmp/herdr.tap; do
-                grep -Eq "^# tests [1-9][0-9]*$" "$log"
-                grep -Fx "# fail 0" "$log" >/dev/null
-                grep -E "^(1\\.\\.[0-9]+|# (tests|pass|fail|cancelled|skipped|todo) [0-9]+)$" "$log"
+              grep -Fx "# pass 3" /tmp/herdr.tap
+              grep -Fx "# fail 0" /tmp/herdr.tap
+              if node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="^UM-01:" \
+                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
+                | tee /tmp/um01-red.tap; then
+                echo "UM-01 unexpectedly passed" >&2; exit 1
+              else
+                test "$?" -eq 1
+              fi
+              grep -Fx "# tests 55" /tmp/um01-red.tap
+              grep -Fx "# pass 0" /tmp/um01-red.tap
+              grep -Fx "# fail 6" /tmp/um01-red.tap
+              grep -Fx "# skipped 49" /tmp/um01-red.tap
+              test "$(grep -Ec "^not ok [0-9]+ - UM-01:" /tmp/um01-red.tap)" -eq 6
+              test "$(grep -Ec "^not ok [0-9]+ - " /tmp/um01-red.tap)" -eq 6
+              for name in \
+                "keyboard Next and final Submit require separate actions after answering" \
+                "earlier answers remain editable until explicit Submit" \
+                "an empty optional MULTI can be explicitly submitted" \
+                "custom draft and MULTI toggles survive editing before Submit" \
+                "pointer Submit accepts only the visible action hit span" \
+                "visible Cancel remains distinct from Submit"; do
+                grep -E "^not ok [0-9]+ - UM-01: $name$" /tmp/um01-red.tap
               done
+              for diagnostic in \
+                "Next must be visible after selecting the first answer" \
+                "completing all answers must not freeze earlier answers" \
+                "empty MULTI must offer Submit without a selection" \
+                "accepting custom text must not auto-submit" \
+                "Submit must have a visible pointer target" \
+                "Submit and Cancel must both be visible as separate actions"; do
+                grep -E "^[[:space:]]+error: .*UM-01: $diagnostic" /tmp/um01-red.tap
+              done
+              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um01-red.tap
             '
 
       - name: Recheck exact checkout and cleanliness

@@ -109,6 +109,109 @@ const KEY = {
 	escape: "\x1b",
 } as const;
 
+test("UM-01: keyboard Next and final Submit require separate actions after answering", () => {
+	const { view, completed } = viewWithResult(two());
+
+	view.handleInput(KEY.enter); // Select Alpha; do not advance or deliver yet.
+	assert.equal(completed.length, 0);
+	assert.match(render(view), /\bNext\b/, "UM-01: Next must be visible after selecting the first answer");
+	view.handleInput(KEY.enter); // Activate Next.
+	assert.equal(view.activeQuestion, 1);
+
+	view.handleInput(KEY.enter); // Select Gamma; do not deliver yet.
+	assert.equal(completed.length, 0, "UM-01: the final answer must not deliver the questionnaire");
+	assert.match(render(view), /\bSubmit\b/);
+	view.handleInput(KEY.enter); // Activate Submit.
+	assert.equal(completed.length, 1);
+	assert.deepEqual(completed[0], { cancelled: false, answers: [
+		{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha" },
+		{ questionIndex: 1, question: "Second?", kind: "option", answer: "Gamma" },
+	] });
+});
+
+test("UM-01: earlier answers remain editable until explicit Submit", () => {
+	const { view, completed } = viewWithResult(two());
+	view.handleInput(KEY.enter); // Record the first answer.
+	view.handleInput(KEY.enter); // Explicit Next, without submitting.
+	view.handleInput(KEY.enter); // Record the second answer.
+	assert.equal(completed.length, 0, "UM-01: completing all answers must not freeze earlier answers");
+
+	view.handleInput(KEY.shiftTab);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter); // Replace Alpha with Beta.
+	assert.equal(completed.length, 0);
+	assert.deepEqual(view.getResult().answers.map((answer) => answer.answer), ["Beta", "Gamma"]);
+	view.handleInput(KEY.tab);
+	assert.match(render(view), /\bSubmit\b/);
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 1);
+	assert.deepEqual(completed[0]?.answers.map((answer) => answer.answer), ["Beta", "Gamma"]);
+});
+
+test("UM-01: an empty optional MULTI can be explicitly submitted", () => {
+	const { view, completed } = viewWithResult([
+		question("Pick?", [option("One"), option("Two")], { multiSelect: true }),
+	]);
+	assert.match(render(view), /\bSubmit\b/, "UM-01: empty MULTI must offer Submit without a selection");
+	view.handleInput(KEY.enter); // Activate Submit without toggling an option.
+	assert.equal(completed.length, 1);
+	assert.deepEqual(completed[0], { cancelled: false, answers: [
+		{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: [] },
+	] });
+});
+
+test("UM-01: custom draft and MULTI toggles survive editing before Submit", () => {
+	const { view, completed } = viewWithResult([
+		question("Pick?", [option("One"), option("Two")], { multiSelect: true }),
+	]);
+	view.handleInput(KEY.space); // Keep One selected.
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter); // Open custom editor.
+	view.handleInput("draft note");
+	view.handleInput(KEY.escape); // Return to choices, preserving draft.
+	assert.match(render(view), /\[x\] One/);
+	view.handleInput(KEY.enter); // Reopen custom editor.
+	assert.match(plain(render(view)), /draft note/);
+	view.handleInput(KEY.enter); // Accept custom answer, not the entire questionnaire.
+	assert.equal(completed.length, 0, "UM-01: accepting custom text must not auto-submit");
+	assert.deepEqual(view.getResult().answers, [
+		{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "draft note", selected: ["One"] },
+	]);
+	assert.match(render(view), /\bSubmit\b/);
+});
+
+test("UM-01: pointer Submit accepts only the visible action hit span", () => {
+	const { view, completed } = viewWithResult(single());
+	view.handleInput(KEY.enter); // Choose Alpha; action must remain reachable.
+	const lines = view.render(100);
+	const row = lines.findIndex((line) => /\bSubmit\b/.test(plain(line)));
+	assert.ok(row >= 0, "UM-01: Submit must have a visible pointer target");
+	const start = plain(lines[row]!).indexOf("Submit");
+	const end = start + "Submit".length - 1;
+	assert.equal(view.handleMouse({ ...mouseEvent(lines, row, "click"), x: end + 1 }), undefined,
+		"a click immediately beyond Submit must not submit");
+	assert.equal(completed.length, 0);
+	assert.equal(view.handleMouse({ ...mouseEvent(lines, row, "click"), x: end })?.handled, true,
+		"the final visible Submit cell must be actionable");
+	assert.equal(completed.length, 1);
+});
+
+test("UM-01: visible Cancel remains distinct from Submit", () => {
+	const { view, completed } = viewWithResult(single());
+	view.handleInput(KEY.enter); // Draft an answer, but do not deliver it.
+	const lines = view.render(100);
+	const submitRow = lines.findIndex((line) => /\bSubmit\b/.test(plain(line)));
+	const cancelRow = lines.findIndex((line) => /\bCancel\b/.test(plain(line)));
+	assert.ok(submitRow >= 0 && cancelRow >= 0,
+		"UM-01: Submit and Cancel must both be visible as separate actions");
+	const cancelX = plain(lines[cancelRow]!).indexOf("Cancel");
+	assert.equal(view.handleMouse({ ...mouseEvent(lines, cancelRow, "click"), x: cancelX })?.handled, true);
+	assert.equal(completed.length, 1);
+	assert.equal(completed[0]?.cancelled, true);
+	assert.equal(completed[0]?.answers[0]?.answer, "Alpha");
+});
+
 test("renders exactly one active question plus a tab strip for all questions", () => {
 	const { view } = viewWithResult(two());
 	const rendered = render(view);
