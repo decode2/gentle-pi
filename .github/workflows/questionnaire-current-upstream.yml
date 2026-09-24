@@ -30,7 +30,7 @@ jobs:
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
       UM03_TEST_BLOB: 1cc268512016a3a0b0a6c3e4b7fddbc9cdc9d26e
       UM02_ASK_TEST_BLOB: 26e4b48d86cf91f9865be8efbbdee5f7443c80bb
-      UM03_VIEW_BLOB: 0adbb7e49722dfe800bd930c6e0ec9a5e2142067
+      UM03_VIEW_BLOB: 145fbf99ed4a31bd781fab8bf6b251d3da2cffea
       UM02_ASK_BLOB: ba896274d384cab18b84ffeacf4e52cf7b66d78a
     steps:
       - name: Checkout exact event revision without credentials

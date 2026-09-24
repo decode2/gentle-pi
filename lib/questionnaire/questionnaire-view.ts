@@ -23,6 +23,9 @@ const PREVIEW_SPLIT = 0.45;
 /** Two-space gutter between the option column and the preview pane. No divider frame. */
 const PREVIEW_GAP = "  ";
 
+/** Readable inline column for previews too tall to fit beside the owned body. */
+const OVERSIZED_PREVIEW_COLUMN_WIDTH = 40;
+
 /** Theme surface used by the questionnaire, compatible with the Pi TUI theme. */
 export interface QuestionnaireTheme {
 	fg(color: string, text: string): string;
@@ -335,12 +338,14 @@ export class QuestionnaireView extends Container implements Focusable {
 		let right = split ? this.wrap(this.theme.fg("dim", preview!),
 			Math.max(1, viewport - leftWidth - PREVIEW_GAP.length)) : [];
 		// A taller split preview has no scroll owner. Put it in the owned body instead.
-		if (right.length > bodyHeight) {
+		const oversizedPreview = right.length > bodyHeight;
+		if (oversizedPreview) {
 			split = false;
 			leftWidth = viewport;
 			right = [];
 		}
-		const body = this.renderBody(leftWidth, preview !== undefined && !split);
+		const body = this.renderBody(leftWidth, preview !== undefined && !split,
+			oversizedPreview ? Math.min(leftWidth - 4, OVERSIZED_PREVIEW_COLUMN_WIDTH) : leftWidth - 4);
 		const total = Math.max(body.lines.length, right.length);
 		// Only overflow in the owned body enables wheel input.
 		this.bodyMaxOffset = Math.max(0, body.lines.length - bodyHeight);
@@ -419,7 +424,7 @@ export class QuestionnaireView extends Container implements Focusable {
 	}
 
 	/** Body for the active question only. */
-	private renderBody(width: number, inlinePreview: boolean): { lines: string[]; owners: Array<LineOwner | undefined> } {
+	private renderBody(width: number, inlinePreview: boolean, previewWidth: number): { lines: string[]; owners: Array<LineOwner | undefined> } {
 		const lines: string[] = [];
 		const owners: Array<LineOwner | undefined> = [];
 		const push = (text: string, owner?: LineOwner) => {
@@ -458,7 +463,7 @@ export class QuestionnaireView extends Container implements Focusable {
 			push(`${cursor}${marker}${option.label}`, owner);
 			push(`    ${this.theme.fg("dim", option.description)}`, owner);
 			if (inlinePreview && state.cursor === optionIndex && option.preview !== undefined) {
-				for (const line of this.wrap(this.theme.fg("dim", option.preview), Math.max(1, width - 4))) {
+				for (const line of this.wrap(this.theme.fg("dim", option.preview), Math.max(1, previewWidth))) {
 					push(`    ${line}`, owner);
 				}
 			}
