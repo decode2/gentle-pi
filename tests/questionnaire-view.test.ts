@@ -251,6 +251,105 @@ test("UM-01: visible Cancel remains distinct from Submit", () => {
 	assert.equal(completed[0]?.answers[0]?.answer, "Alpha");
 });
 
+test("UM-02: typed newline edits custom text without submitting it", () => {
+	const { view, completed } = viewWithResult(single());
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter); // Open custom editor.
+	view.handleInput("first");
+	view.handleInput("\x1b[13;2~"); // Shift-Enter: editor newline, not custom commit.
+	view.handleInput("second");
+	assert.equal(completed.length, 0, "UM-02: typed newline must not deliver the questionnaire");
+	view.handleInput(KEY.enter); // Commit custom text, not Submit.
+	assert.deepEqual(view.getResult().answers, [
+		{ questionIndex: 0, question: "Proceed?", kind: "custom", answer: "first\nsecond" },
+	], "UM-02: typed newline must survive custom commit");
+	assert.equal(completed.length, 0);
+	view.handleInput(KEY.enter); // Explicit Submit only now.
+	assert.equal(completed.length, 1);
+});
+
+test("UM-02: bracketed multiline paste normalizes CRLF CR and tabs before custom commit", () => {
+	const { view, completed } = viewWithResult(single());
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput("\x1b[200~one\r\ntwo\rthree\tend\x1b[201~");
+	view.handleInput(KEY.enter);
+	assert.deepEqual(view.getResult().answers, [
+		{ questionIndex: 0, question: "Proceed?", kind: "custom", answer: "one\ntwo\nthree    end" },
+	], "UM-02: bracketed paste must retain normalized multiline content");
+	assert.equal(completed.length, 0, "custom commit is not Submit");
+});
+
+test("UM-02: large bracketed paste delivers expanded content instead of its marker", () => {
+	const { view, completed } = viewWithResult(single());
+	const pasted = `prefix ${"x".repeat(1100)} suffix`;
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput(`\x1b[200~${pasted}\x1b[201~`);
+	view.handleInput(KEY.enter);
+	assert.deepEqual(view.getResult().answers, [
+		{ questionIndex: 0, question: "Proceed?", kind: "custom", answer: pasted },
+	], "UM-02: large paste must expand its marker at custom commit");
+	assert.equal(completed.length, 0);
+});
+
+test("UM-02: Tab Esc and reopen preserve separate drafts and the editing caret", () => {
+	const { view, completed } = viewWithResult(two());
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput("start");
+	view.handleInput("\x1b[13;2~");
+	view.handleInput("end");
+	view.handleInput("\x1b[D"); // Caret before the final d.
+	view.handleInput(KEY.tab); // Save first draft while switching questions.
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput("other");
+	view.handleInput(KEY.escape); // Save second draft, without cancelling.
+	view.handleInput(KEY.shiftTab);
+	view.handleInput(KEY.enter); // Reopen first custom row at its prior caret.
+	view.handleInput("!");
+	view.handleInput(KEY.enter);
+	assert.deepEqual(view.getResult().answers, [
+		{ questionIndex: 0, question: "First?", kind: "custom", answer: "start\nen!d" },
+	], "UM-02: returning to a draft must preserve newline and caret");
+	view.handleInput(KEY.tab);
+	view.handleInput(KEY.enter); // Reopen second custom row.
+	view.handleInput(KEY.enter); // Commit its unchanged draft.
+	assert.deepEqual(view.getResult().answers.map((answer) => answer.answer), ["start\nen!d", "other"]);
+	assert.equal(completed.length, 0, "both custom commits still require explicit Submit");
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 1);
+});
+
+test("UM-02: MULTI custom multiline answer keeps toggles until explicit Submit", () => {
+	const { view, completed } = viewWithResult([
+		question("Pick?", [option("One"), option("Two")], { multiSelect: true }),
+	]);
+	view.handleInput(KEY.space);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput("line one");
+	view.handleInput("\x1b[13;2~");
+	view.handleInput("line two");
+	view.handleInput(KEY.escape);
+	view.handleInput(KEY.enter); // Reopen the preserved MULTI custom draft.
+	view.handleInput(KEY.enter); // Commit, not Submit.
+	assert.deepEqual(view.getResult().answers, [
+		{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "line one\nline two", selected: ["One"] },
+	], "UM-02: MULTI custom multiline draft must keep its selected options");
+	assert.equal(completed.length, 0);
+	view.handleInput(KEY.enter);
+	assert.deepEqual(completed[0]?.answers, view.getResult().answers);
+	assert.equal(completed.length, 1, "MULTI custom text needs one explicit Submit");
+});
+
 test("renders exactly one active question plus a tab strip for all questions", () => {
 	const { view } = viewWithResult(two());
 	const rendered = render(view);
