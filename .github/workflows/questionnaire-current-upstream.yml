@@ -303,7 +303,7 @@ jobs:
               done
               test "$(grep -Ec "^not ok [0-9]+ - " /tmp/um03b-red.tap)" -eq 3
               test "$(grep -Ec "^not ok [0-9]+ - UM-03b-wheel:" /tmp/um03b-red.tap)" -eq 3
-              test "$(grep -Ec "code: .ERR_ASSERTION." /tmp/um03b-red.tap)" -eq 3
+              test "$(grep -Ec "code: .ERR_TEST_FAILURE." /tmp/um03b-red.tap)" -eq 3
               for diagnostic in \
                 "UM-03b-wheel: blank cells beyond the rendered row owner must fall through" \
                 "UM-03b-wheel: a zero-delta event cannot own a scroll movement" \
