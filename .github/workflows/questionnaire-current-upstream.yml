@@ -1,0 +1,164 @@
+name: Current-upstream questionnaire baseline
+
+on:
+  push:
+    branches:
+      - fix/questionnaire-explicit-submit
+  pull_request:
+    branches:
+      - main
+
+permissions:
+  contents: read
+
+jobs:
+  baseline:
+    # Only the designated fork/upstream branch; no arbitrary PR head in the networked lane.
+    if: >-
+      (github.repository == 'Gentleman-Programming/gentle-pi' ||
+       github.repository == 'decode2/gentle-pi') &&
+      (github.event_name == 'push' ||
+       (github.head_ref == 'fix/questionnaire-explicit-submit' &&
+        (github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' ||
+         github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-pi')))
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      BASE: 7f78c36d4b50070008557a79b8734dd37222c569
+      IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
+    steps:
+      - name: Checkout exact event revision without credentials
+        uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Prove baseline source identity and scope
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          git cat-file -e "$BASE^{commit}"
+          test "$(git merge-base "$BASE" HEAD)" = "$BASE"
+          while IFS= read -r path; do
+            case "$path" in
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md) ;;
+              *) echo "unexpected changed path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only "$BASE" HEAD)
+          for path in \
+            package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json \
+            scripts/check-types.mjs scripts/types-baseline.json \
+            extensions/ask-user-question.ts extensions/gentle-ai.ts \
+            lib/questionnaire/questionnaire-view.ts lib/native-fullscreen-interaction.ts \
+            tests/ask-user-question.test.ts tests/questionnaire-view.test.ts tests/gentle-ai.test.ts; do
+            base_blob="$(git rev-parse "$BASE:$path")"
+            test "$(git rev-parse "HEAD:$path")" = "$base_blob"
+            test "$(git hash-object -- "$path")" = "$base_blob"
+          done
+          echo "baseline checkout=$EXPECTED_SHA base=$BASE critical blobs unchanged"
+
+      - name: Acquire pinned Node image and verify image identity
+        id: image
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$IMAGE"
+          image_id="$(docker image inspect --format '{{.Id}}' "$IMAGE")"
+          test "$image_id" = sha256:b795e77f6c253b171f482eff27b9b882dc4cdcb42d773372e298481c7318fbc2
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = linux/amd64
+          echo "id=$image_id" >> "$GITHUB_OUTPUT"
+          echo "acquisition image=$IMAGE id=$image_id"
+
+      - name: Install independent frozen dependencies in networked acquisition artifact
+        shell: bash
+        env:
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = "$IMAGE_ID"
+          artifact="$RUNNER_TEMP/questionnaire-baseline"
+          test ! -e "$artifact"
+          mkdir "$artifact"
+          chmod 0777 "$artifact"
+          docker run --rm --network=bridge --read-only \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$artifact,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --cap-drop=ALL --security-opt=no-new-privileges --user 1000:1000 \
+            -e EXPECTED_SHA "$IMAGE" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/artifact/home TMPDIR=/artifact/tmp NPM_CONFIG_CACHE=/artifact/npm-cache \
+            NPM_CONFIG_USERCONFIG=/artifact/home/user.npmrc NPM_CONFIG_GLOBALCONFIG=/artifact/home/global.npmrc \
+            PNPM_HOME=/artifact/pnpm-home GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 \
+            GIT_CONFIG_SYSTEM=/dev/null GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 \
+            EXPECTED_SHA="$EXPECTED_SHA" /bin/bash -euo pipefail -c '
+              mkdir -p /artifact/{home,tmp,npm-cache,pnpm-home}
+              git -c safe.directory=/workspace clone --no-local --no-checkout /workspace /artifact/source
+              cd /artifact/source
+              git checkout --detach "$EXPECTED_SHA"
+              test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+              test -z "$(git status --porcelain=v1 --untracked-files=all)"
+              npm install --prefix /artifact/pnpm-bootstrap --no-save --package-lock=false \
+                --ignore-scripts --no-audit --no-fund pnpm@11.1.1
+              pnpm=/artifact/pnpm-bootstrap/node_modules/.bin/pnpm
+              test "$("$pnpm" --version)" = 11.1.1
+              "$pnpm" install --frozen-lockfile --ignore-scripts --ignore-pnpmfile --reporter=append-only
+              test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+              test -z "$(git status --porcelain=v1 --untracked-files=all)"
+              echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
+            '
+
+      - name: Run focused baseline and strict type gates offline
+        shell: bash
+        env:
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = "$IMAGE_ID"
+          source="$RUNNER_TEMP/questionnaire-baseline/source"
+          test -d "$source/node_modules/typescript"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$source,target=/source,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --cap-drop=ALL --security-opt=no-new-privileges --user 1000:1000 -w /source "$IMAGE" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/tmp/home TMPDIR=/tmp NODE_OPTIONS=--max-old-space-size=1536 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 /bin/bash -euo pipefail -c '
+              if touch /source/.read-only-probe 2>/dev/null; then exit 1; fi
+              node /source/node_modules/typescript/bin/tsc \
+                --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
+                --allowImportingTsExtensions --lib ESNext,DOM \
+                --typeRoots /source/node_modules/@types --types node \
+                /source/extensions/ask-user-question.ts /source/lib/questionnaire/questionnaire-view.ts \
+                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
+              node /source/scripts/check-types.mjs
+              node --experimental-strip-types --test --test-reporter=tap \
+                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
+                | tee /tmp/questionnaire.tap
+              node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
+                /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
+              for log in /tmp/questionnaire.tap /tmp/herdr.tap; do
+                grep -Eq "^# tests [1-9][0-9]*$" "$log"
+                grep -Fx "# fail 0" "$log" >/dev/null
+                grep -E "^(1\\.\\.[0-9]+|# (tests|pass|fail|cancelled|skipped|todo) [0-9]+)$" "$log"
+              done
+            '
+
+      - name: Recheck exact checkout and cleanliness
+        if: always()
+        shell: bash
+        env:
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          echo "final clean checkout=$EXPECTED_SHA"
