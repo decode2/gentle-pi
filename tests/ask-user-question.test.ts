@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import test from "node:test";
 import type { TUI } from "@earendil-works/pi-tui";
 import askUserQuestion, { askMultiSelect } from "../extensions/ask-user-question.ts";
@@ -69,6 +72,61 @@ interface ExtensionSlot {
 }
 
 const OURS_PATH = "gentle-pi/extensions/ask-user-question.ts";
+
+/** Isolated Pi agent profile; the unrelated Gentle config store is deliberately separate. */
+function ownerProfile(t: { after(fn: () => void): void }) {
+	const root = mkdtempSync(join(tmpdir(), "um05a-owner-"));
+	const previous = {
+		agent: process.env.GENTLE_PI_AGENT_HOME,
+		pi: process.env.PI_CODING_AGENT_DIR,
+		config: process.env.GENTLE_PI_CONFIG_HOME,
+	};
+	const agent = join(root, "pi-agent");
+	process.env.GENTLE_PI_AGENT_HOME = agent;
+	process.env.PI_CODING_AGENT_DIR = join(root, "other-agent");
+	process.env.GENTLE_PI_CONFIG_HOME = join(root, "config-not-agent");
+	t.after(() => {
+		for (const [key, value] of [
+			["GENTLE_PI_AGENT_HOME", previous.agent],
+			["PI_CODING_AGENT_DIR", previous.pi],
+			["GENTLE_PI_CONFIG_HOME", previous.config],
+		] as const) {
+			if (value === undefined) delete process.env[key];
+			else process.env[key] = value;
+		}
+		rmSync(root, { recursive: true, force: true });
+	});
+	const path = join(agent, "gentle-ai", "question-owner.json");
+	const writeOwner = (content: string) => {
+		mkdirSync(join(agent, "gentle-ai"), { recursive: true });
+		writeFileSync(path, content);
+	};
+	return { root, path, writeOwner };
+}
+
+/** Capture the actual lifecycle callback; an incumbent may be inactive yet discoverable. */
+function ownerRegistration(incumbents: readonly { name: string }[] = [], preRegistered?: RegisteredTool) {
+	const registered: RegisteredTool[] = preRegistered ? [preRegistered] : [];
+	let start: ((event: unknown, ctx: { mode: string }) => unknown) | undefined;
+	const pi = {
+		registerTool(tool: RegisteredTool) { registered.push(tool); },
+		on(event: string, handler: (event: unknown, ctx: { mode: string }) => unknown) {
+			if (event === "session_start") start = handler;
+		},
+		getAllTools: () => incumbents,
+		events: { emit() {} },
+	};
+	askUserQuestion(pi as never);
+	return {
+		registered,
+		start: async (mode: string) => {
+			assert.ok(start, "UM-05a: owner decision must be made at session_start");
+			await start({}, { mode });
+		},
+	};
+}
+
+const enabledOwner = JSON.stringify({ version: 1, owner: "gentle-pi", enabled: true });
 
 function registerQuestionTool(slot?: ExtensionSlot): { tool: RegisteredTool; slot: ExtensionSlot; emitted: LifecycleEvent[] } {
 	const target: ExtensionSlot = slot ?? { path: OURS_PATH, tools: new Map() };
@@ -179,6 +237,67 @@ const option = (label: string, description = `${label} description`, preview?: s
 const single = () => [
 	{ question: "Proceed?", header: "Proceed", options: [option("Alpha"), option("Beta")] },
 ];
+
+test("UM-05a: exact enabled agent-profile owner registers only after TUI session_start", async (t) => {
+	const profile = ownerProfile(t);
+	profile.writeOwner(enabledOwner);
+	mkdirSync(join(profile.root, "config-not-agent", "gentle-ai"), { recursive: true });
+	writeFileSync(join(profile.root, "config-not-agent", "gentle-ai", "question-owner.json"),
+		JSON.stringify({ version: 1, owner: "external", enabled: true }));
+	const registration = ownerRegistration();
+	assert.equal(registration.registered.length, 0, "UM-05a: no eager registration before session_start");
+	await registration.start("tui");
+	assert.deepEqual(registration.registered.map((tool) => tool.name), ["ask_user_question"],
+		"UM-05a: agent-profile ownership (not the separate config store) enables one TUI tool");
+});
+
+test("UM-05a: missing malformed unreadable disabled and external ownership fail closed", async (t) => {
+	const profile = ownerProfile(t);
+	const cases: Array<[string, () => void]> = [
+		["missing", () => {}],
+		["malformed", () => profile.writeOwner("{not-json")],
+		["unreadable", () => mkdirSync(profile.path)], // EISDIR is unreadable as a JSON file for any UID.
+		["disabled", () => profile.writeOwner(JSON.stringify({ version: 1, owner: "gentle-pi", enabled: false }))],
+		["legacy external", () => profile.writeOwner(JSON.stringify({ owner: "external", enabled: true }))],
+		["wrong version", () => profile.writeOwner(JSON.stringify({ version: 2, owner: "gentle-pi", enabled: true }))],
+		["extra keys", () => profile.writeOwner(JSON.stringify({ version: 1, owner: "gentle-pi", enabled: true, other: true }))],
+	];
+	for (const [label, arrange] of cases) {
+		rmSync(profile.path, { recursive: true, force: true });
+		mkdirSync(join(profile.root, "pi-agent", "gentle-ai"), { recursive: true });
+		arrange();
+		const registration = ownerRegistration();
+		assert.equal(registration.registered.length, 0, `UM-05a: ${label} must not register before session_start`);
+		await registration.start("tui");
+		assert.equal(registration.registered.length, 0, `UM-05a: ${label} must not register`);
+	}
+});
+
+test("UM-05a: detectable inactive incumbent and pre-registered name are never displaced", async (t) => {
+	ownerProfile(t).writeOwner(enabledOwner);
+	for (const incumbent of [
+		{ name: "ask_user_question", active: false },
+		{ name: "ask_user_question", active: true },
+	]) {
+		const registration = ownerRegistration([incumbent]);
+		assert.equal(registration.registered.length, 0, "UM-05a: incumbent must block eager registration");
+		await registration.start("tui");
+		assert.equal(registration.registered.length, 0, "UM-05a: getAllTools incumbent blocks registration even when inactive");
+	}
+	const external = { name: "ask_user_question" } as RegisteredTool;
+	const registration = ownerRegistration([external], external);
+	await registration.start("tui");
+	assert.deepEqual(registration.registered, [external], "UM-05a: pre-registered provider must not be displaced");
+});
+
+test("UM-05a: enabled owner never registers rich RPC even on interactive host", async (t) => {
+	ownerProfile(t).writeOwner(enabledOwner);
+	withInteractiveHostEnv(t);
+	const registration = ownerRegistration();
+	assert.equal(registration.registered.length, 0, "UM-05a: RPC must not register before session_start");
+	await registration.start("rpc");
+	assert.equal(registration.registered.length, 0, "UM-05a: interactive RPC is not a registration lane");
+});
 
 test("ask_user_question opts out of the painted shell and pins the schema limits", () => {
 	const { tool } = registerQuestionTool();

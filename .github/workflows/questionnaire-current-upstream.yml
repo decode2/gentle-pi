@@ -1,9 +1,9 @@
-name: Current-upstream questionnaire UM-04b abort lifecycle GREEN
+name: Current-upstream questionnaire UM-05a owner registration RED
 
 on:
   push:
     branches:
-      - fix/questionnaire-abort-lifecycle
+      - feat/questionnaire-profile-owner-um05a
   pull_request:
     branches:
       - main
@@ -19,7 +19,7 @@ jobs:
        github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
       (github.event_name == 'push' ||
-       (github.head_ref == 'fix/questionnaire-abort-lifecycle' &&
+       (github.head_ref == 'feat/questionnaire-profile-owner-um05a' &&
         (github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-shell' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-pi')))
@@ -27,12 +27,12 @@ jobs:
     timeout-minutes: 35
     env:
       BASE: 7f78c36d4b50070008557a79b8734dd37222c569
-      RED_BASE: 7fb49b4fc88f1978026d560e1cfce4be830b4932
+      RED_BASE: b109311dc8951140d369e65f9c2947c54d442c59
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM04B_VIEW_TEST_BLOB: 449e88dc9ff33958887e19f62dab18ca247daf57
-      UM04B_ASK_TEST_BLOB: 86bd0fe46849888ca264c982743dbf932eda37c4
-      GREEN_VIEW_BLOB: 821b52c61d6f0b4da45547e74784aff1d094fa62
-      GREEN_ASK_BLOB: f8c0e57b9668fb2001ed0e8812defa3a3911bc62
+      VIEW_TEST_BLOB: 449e88dc9ff33958887e19f62dab18ca247daf57
+      UM05A_ASK_TEST_BLOB: af99d76043017e53c26c9a1db19a26db3c346214
+      VIEW_BLOB: 821b52c61d6f0b4da45547e74784aff1d094fa62
+      ASK_BLOB: f8c0e57b9668fb2001ed0e8812defa3a3911bc62
     steps:
       - name: Checkout exact event revision without credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -41,7 +41,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove UM-04b frozen RED tests and GREEN producer/view identity
+      - name: Prove UM-05a RED test and frozen producer/view identity
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -55,8 +55,8 @@ jobs:
           test "$(git merge-base "$RED_BASE" HEAD)" = "$RED_BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts|extensions/ask-user-question.ts) ;;
-              *) echo "unexpected UM-04b change: $path" >&2; exit 1 ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/ask-user-question.test.ts) ;;
+              *) echo "unexpected UM-05a change: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$RED_BASE" HEAD)
           while IFS= read -r path; do
@@ -68,24 +68,25 @@ jobs:
           for path in \
             package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json \
             scripts/check-types.mjs scripts/types-baseline.json \
-            extensions/gentle-ai.ts \
+            extensions/gentle-ai.ts extensions/ask-user-choice.ts \
+            lib/agent-home.ts lib/rpc-host.ts \
             lib/native-fullscreen-interaction.ts \
-            tests/gentle-ai.test.ts; do
+            tests/gentle-ai.test.ts tests/ask-user-choice.test.ts; do
             base_blob="$(git rev-parse "$BASE:$path")"
             test "$(git rev-parse "HEAD:$path")" = "$base_blob"
             test "$(git hash-object -- "$path")" = "$base_blob"
           done
           for entry in \
-            "tests/ask-user-question.test.ts:$UM04B_ASK_TEST_BLOB" \
-            "tests/questionnaire-view.test.ts:$UM04B_VIEW_TEST_BLOB" \
-            "lib/questionnaire/questionnaire-view.ts:$GREEN_VIEW_BLOB" \
-            "extensions/ask-user-question.ts:$GREEN_ASK_BLOB"; do
+            "tests/ask-user-question.test.ts:$UM05A_ASK_TEST_BLOB" \
+            "tests/questionnaire-view.test.ts:$VIEW_TEST_BLOB" \
+            "lib/questionnaire/questionnaire-view.ts:$VIEW_BLOB" \
+            "extensions/ask-user-question.ts:$ASK_BLOB"; do
             path="${entry%%:*}"
             blob="${entry#*:}"
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          echo "UM-04b GREEN checkout=$EXPECTED_SHA ask_test=$UM04B_ASK_TEST_BLOB view_test=$UM04B_VIEW_TEST_BLOB view=$GREEN_VIEW_BLOB ask=$GREEN_ASK_BLOB base=$BASE red_base=$RED_BASE other critical blobs unchanged"
+          echo "UM-05a RED checkout=$EXPECTED_SHA ask_test=$UM05A_ASK_TEST_BLOB view_test=$VIEW_TEST_BLOB view=$VIEW_BLOB ask=$ASK_BLOB base=$BASE red_base=$RED_BASE other critical blobs unchanged"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -141,7 +142,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, ratchet, full suite, Herdr and focused GREEN gates offline
+      - name: Run strict types, ratchet, prior baseline, Herdr and focused RED offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -167,6 +168,7 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
+                --test-skip-pattern="^UM-05a:" \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
                 | tee /tmp/questionnaire-full.tap
               for expected in "TAP version 13" "# tests 75" "# pass 75" "# fail 0" \
@@ -290,6 +292,28 @@ jobs:
               done
               ! grep -Fq "Invalid questionnaire:" /tmp/um04b-green.tap
               grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um04b-green.tap
+              set +e
+              node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="^UM-05a:" \
+                /source/tests/ask-user-question.test.ts | tee /tmp/um05a-red.tap
+              red_status=${PIPESTATUS[0]}
+              set -e
+              test "$red_status" -ne 0
+              for expected in "TAP version 13" "1..4" "# tests 4" "# pass 0" "# fail 4" \
+                "# cancelled 0" "# skipped 0" "# todo 0"; do
+                grep -Fx "$expected" /tmp/um05a-red.tap
+              done
+              test "$(grep -Ec "^not ok [0-9]+ - UM-05a:" /tmp/um05a-red.tap)" -eq 4
+              test "$(grep -Ec "code: .*ERR_ASSERTION" /tmp/um05a-red.tap)" -eq 4
+              for name in \
+                "exact enabled agent-profile owner registers only after TUI session_start" \
+                "missing malformed unreadable disabled and external ownership fail closed" \
+                "detectable inactive incumbent and pre-registered name are never displaced" \
+                "enabled owner never registers rich RPC even on interactive host"; do
+                grep -E "^not ok [0-9]+ - UM-05a: $name$" /tmp/um05a-red.tap
+              done
+              ! grep -Fq "Invalid questionnaire:" /tmp/um05a-red.tap
+              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um05a-red.tap
             '
 
       - name: Recheck exact checkout and cleanliness
