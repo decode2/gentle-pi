@@ -16,16 +16,30 @@ const MANIFESTS = Object.freeze({
 });
 const fail = (message) => { throw new Error(message); };
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
-const FAILURE_REASONS = new Set(["archive-read", "archive-digest", "native-reader-invocation", "native-reader-list", "native-reader-manifest", "native-reader-verbose", "native-reader-extract", "darwin-private-root", "darwin-write", "darwin-readback"]);
+const READER_CONDITIONS = ["executable", "cwd", "spawn", "exit", "zero-output"];
+const READER_OPERATIONS = new Map(["list", "verbose", "extract"].map((operation) => [operation, READER_CONDITIONS.map((condition) => `native-reader-${operation}-${condition}`)]));
+const READER_FAILURES = [...READER_OPERATIONS.values()].flat();
+const LIST_OUTPUT_FAILURES = ["native-reader-list-invalid-utf8", "native-reader-list-empty-output", "native-reader-list-newline", "native-reader-list-malformed-output"];
+const VERBOSE_OUTPUT_FAILURES = ["native-reader-verbose-invalid-utf8", "native-reader-verbose-empty-output", "native-reader-verbose-newline", "native-reader-verbose-malformed-output"];
+const FAILURE_REASONS = new Set(["archive-read", "archive-digest", "native-reader-invocation", "native-reader-list", "native-reader-manifest", "native-reader-verbose", "native-reader-extract", ...READER_FAILURES, ...LIST_OUTPUT_FAILURES, ...VERBOSE_OUTPUT_FAILURES, "darwin-private-root", "darwin-write", "darwin-readback"]);
 const NESTED_FAILURES = new Map([
-	["native-reader-list", ["native-reader-invocation"]],
-	["native-reader-verbose", ["native-reader-invocation"]],
-	["native-reader-extract", ["darwin-private-root", "darwin-write", "darwin-readback"]]]);
+	["native-reader-list", ["native-reader-invocation", ...READER_OPERATIONS.get("list"), ...LIST_OUTPUT_FAILURES]],
+	["native-reader-verbose", ["native-reader-invocation", ...READER_OPERATIONS.get("verbose"), ...VERBOSE_OUTPUT_FAILURES]],
+	["native-reader-extract", ["native-reader-invocation", ...READER_OPERATIONS.get("extract"), "darwin-private-root", "darwin-write", "darwin-readback"]]]);
 const failureBrand = new WeakMap();
 function brandedFailure(reason) { const error = new Error("member validation failed"); if (FAILURE_REASONS.has(reason)) failureBrand.set(error, reason); return error; }
+function readerFailure(operation, condition) {
+	const reason = READER_OPERATIONS.get(operation)?.find((candidate) => candidate === `native-reader-${operation}-${condition}`);
+	return reason ? brandedFailure(reason) : new Error("member validation failed");
+}
 export async function withFailureReason(reason, operation) {
 	try { return await operation(); } catch (error) {
-		throw NESTED_FAILURES.get(reason)?.includes(failureBrand.get(error)) ? error : brandedFailure(reason);
+		if (NESTED_FAILURES.has(reason)) {
+			const nested = failureBrand.get(error);
+			if (!nested) throw error;
+			if (NESTED_FAILURES.get(reason).includes(nested)) throw error;
+		}
+		throw brandedFailure(reason);
 	}
 }
 export function safeFailureCode(error) { const reason = failureBrand.get(error); return FAILURE_REASONS.has(reason) ? `member-validation-${reason}` : "unknown"; }
@@ -167,37 +181,59 @@ function tarExecutable(platform, environment = process.env) {
 	fail("unsupported native platform");
 }
 
-async function runTar(bytes, args, cwd, maxOutput, reason = "native-reader-invocation") {
-	return withFailureReason(reason, async () => {
-	const executable = tarExecutable(process.platform);
+async function checkReaderExecutable(platform, environment) {
+	const executable = tarExecutable(platform, environment);
 	await assertRealDirectoryChain(dirname(executable));
 	const reader = await lstat(executable);
 	if (!reader.isFile() || reader.isSymbolicLink()) fail("native archive reader unavailable");
-	const env = process.platform === "win32"
-		? { SystemRoot: process.env.SystemRoot ?? process.env.WINDIR }
-		: { PATH: "/usr/bin:/bin", LC_ALL: "C" };
-	await assertRealDirectoryChain(cwd);
-	const result = spawnSync(executable, args, { cwd, env, input: bytes, maxBuffer: maxOutput, windowsHide: true, encoding: null, stdio: ["pipe", "pipe", "ignore"] });
-	if (result.error || result.status !== 0 || !result.stdout) fail("native archive reader failed");
-	return result.stdout;
-	});
+	return executable;
 }
 
-function outputLines(bytes) {
+export async function runNativeReader(bytes, args, cwd, maxOutput, dependencies = {}) {
+	const operation = dependencies.operation;
+	if (!READER_OPERATIONS.has(operation)) throw new Error("invalid native reader operation");
+	const platform = dependencies.platform ?? process.platform;
+	const environment = dependencies.environment ?? process.env;
+	let executable;
+	try {
+		executable = await (dependencies.checkExecutable ?? (() => checkReaderExecutable(platform, environment)))();
+		if (typeof executable !== "string" || !executable) fail("native archive reader unavailable");
+	} catch { throw readerFailure(operation, "executable"); }
+	try { await (dependencies.checkCwd ?? assertRealDirectoryChain)(cwd); } catch { throw readerFailure(operation, "cwd"); }
+	const env = platform === "win32"
+		? { SystemRoot: environment.SystemRoot ?? environment.WINDIR }
+		: { PATH: "/usr/bin:/bin", LC_ALL: "C" };
+	let result;
+	try {
+		result = (dependencies.spawnSync ?? spawnSync)(executable, args, {
+			cwd, env, input: bytes, maxBuffer: maxOutput, windowsHide: true, encoding: null, stdio: ["pipe", "pipe", "ignore"],
+		});
+	} catch { throw readerFailure(operation, "spawn"); }
+	if (result?.error) throw readerFailure(operation, "spawn");
+	if (result?.status !== 0) throw readerFailure(operation, "exit");
+	if (!(result.stdout instanceof Uint8Array) || result.stdout.byteLength === 0) throw readerFailure(operation, "zero-output");
+	return result.stdout;
+}
+
+export function parseReaderOutput(bytes, phase) {
+	if (phase !== "list" && phase !== "verbose") fail("invalid reader output phase");
+	const failure = (kind) => { throw brandedFailure(`native-reader-${phase}-${kind}`); };
+	if (!(bytes instanceof Uint8Array) || bytes.byteLength === 0) failure("empty-output");
 	let text;
-	try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { fail("invalid archive manifest"); }
-	if (!text.endsWith("\n")) fail("invalid archive manifest");
+	try { text = new TextDecoder("utf-8", { fatal: true }).decode(bytes); } catch { failure("invalid-utf8"); }
+	if (!text.endsWith("\n")) failure("newline");
 	const lines = text.slice(0, -1).split(/\r?\n/);
-	if (lines.some((line) => !line)) fail("invalid archive manifest");
+	if (lines.some((line) => !line)) failure("empty-output");
+	if (lines.some((line) => /[\0-\x08\x0b\x0c\x0e-\x1f\x7f\r]/.test(line))) failure("malformed-output");
 	return lines;
 }
 
 async function selectVerifiedMember(archiveBytes, archiveName, memberName, platform, architecture, cwd) {
 	const expected = MANIFESTS[`${platform}/${architecture}`];
 	if (!expected || expected.at(-1) !== memberName) fail("unsupported archive manifest");
-	const names = await withFailureReason("native-reader-list", async () => outputLines(await runTar(archiveBytes, archiveReaderArgs(archiveName, "list"), cwd, 64 * 1024)));
+	const names = parseReaderOutput(await runNativeReader(archiveBytes, archiveReaderArgs(archiveName, "list"), cwd, 64 * 1024, { operation: "list" }), "list");
 	if (names.length !== expected.length || names.some((name, index) => name !== expected[index])) throw brandedFailure("native-reader-manifest");
-	const rows = await withFailureReason("native-reader-verbose", async () => outputLines(await runTar(archiveBytes, archiveReaderArgs(archiveName, "verbose"), cwd, 64 * 1024)));
+	const rows = parseReaderOutput(await runNativeReader(archiveBytes, archiveReaderArgs(archiveName, "verbose"), cwd, 64 * 1024, { operation: "verbose" }), "verbose");
 	if (rows.length !== names.length) throw brandedFailure("native-reader-verbose");
 	const entries = names.map((name, index) => ({ name, type: rows[index][0] === "-" ? "file" : "non-regular" }));
 	return withFailureReason("native-reader-manifest", () => selectEngramMember(entries, memberName));
@@ -220,7 +256,7 @@ async function stage() {
 	if (sha256(archiveBytes) !== asset.sha256) throw brandedFailure("archive-digest");
 	const memberName = platform === "win32" ? "engram.exe" : "engram";
 	await selectVerifiedMember(archiveBytes, asset.name, memberName, platform, process.arch, layout.preflight);
-	const extracted = await runTar(archiveBytes, archiveReaderArgs(asset.name, "extract", memberName), layout.preflight, MAX_BINARY_BYTES, "native-reader-extract");
+	const extracted = await runNativeReader(archiveBytes, archiveReaderArgs(asset.name, "extract", memberName), layout.preflight, MAX_BINARY_BYTES, { operation: "extract" });
 	const disposition = await withFailureReason("native-reader-extract", () => deliverEngramMember(platform, extracted, async (bytes) => {
 		const expectedDigest = sha256(bytes);
 		await withFailureReason("darwin-private-root", () => prepareBin(layout));
