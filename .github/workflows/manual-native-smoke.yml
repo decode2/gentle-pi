@@ -1,4 +1,4 @@
-name: Manual native artifact preflight
+name: Manual native npm install smoke
 
 on:
   pull_request:
@@ -10,9 +10,9 @@ permissions:
 jobs:
   artifact-preflight:
     if: github.event.pull_request.draft == true && github.event.pull_request.head.repo.fork == true
-    name: artifact preflight (${{ matrix.os }})
+    name: npm install smoke (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    timeout-minutes: 12
+    timeout-minutes: 35
     strategy:
       fail-fast: false
       matrix:
@@ -33,8 +33,20 @@ jobs:
         with:
           node-version: "24"
 
-      - name: Run pure artifact-preflight tests only (no install, postinstall, setup, or launcher)
+      - name: Run pure artifact-preflight tests only (no package install, postinstall, setup, or launcher)
         run: node --experimental-strip-types --test tests/manual-native-preflight.test.ts
+
+      - name: Test isolated staging guards and npm invocation
+        env:
+          HOME: ${{ runner.temp }}/manual-native-tests/home
+          USERPROFILE: ${{ runner.temp }}/manual-native-tests/home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/manual-native-tests/xdg
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/manual-native-tests/agent
+          GENTLE_PI_CONFIG_HOME: ${{ runner.temp }}/manual-native-tests/config
+          TMPDIR: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: node --experimental-strip-types --test tests/manual-native-runtime.test.ts tests/manual-native-staging.test.ts
 
       - name: Prepare runner-disposable artifact scratch
         run: node scripts/manual-native-preflight.mjs prepare
@@ -56,3 +68,9 @@ jobs:
 
       - name: Verify staged npm and official Engram release artifacts only
         run: node scripts/manual-native-preflight.mjs verify
+
+      - name: Prepare disposable npm staging directories
+        run: node scripts/manual-native-staging.mjs prepare
+
+      - name: Run isolated npm install smoke (installed bytes unverified)
+        run: node scripts/manual-native-staging.mjs install
