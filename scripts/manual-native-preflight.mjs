@@ -23,6 +23,69 @@ export const ENGRAM_RELEASE_ASSETS = Object.freeze({
 });
 
 const fail = (message) => { throw new Error(message); };
+export const SAFE_FAILURE_CODES = Object.freeze([
+	"staged-npm-read-or-digest",
+	"release-metadata-fetch-forbidden",
+	"release-metadata-fetch-rate-limited",
+	"release-metadata-fetch-server-error",
+	"release-metadata-fetch-http-status",
+	"release-metadata-fetch-transport",
+	"release-metadata-fetch-invalid-response",
+	"release-metadata-fetch-response-too-large",
+	"checksums-fetch-forbidden",
+	"checksums-fetch-rate-limited",
+	"checksums-fetch-server-error",
+	"checksums-fetch-http-status",
+	"checksums-fetch-transport",
+	"checksums-fetch-invalid-response",
+	"checksums-fetch-response-too-large",
+	"native-archive-fetch-forbidden",
+	"native-archive-fetch-rate-limited",
+	"native-archive-fetch-server-error",
+	"native-archive-fetch-http-status",
+	"native-archive-fetch-transport",
+	"native-archive-fetch-invalid-response",
+	"native-archive-fetch-response-too-large",
+	"release-digest-checksum-mismatch",
+	"unknown",
+]);
+const allowedFailureCodes = new Set(SAFE_FAILURE_CODES);
+const failureCodes = new WeakMap();
+const fetchFailureCodes = Object.freeze({
+	release: Object.freeze({
+		forbidden: "release-metadata-fetch-forbidden", rateLimited: "release-metadata-fetch-rate-limited", serverError: "release-metadata-fetch-server-error",
+		httpStatus: "release-metadata-fetch-http-status", transport: "release-metadata-fetch-transport", invalid: "release-metadata-fetch-invalid-response", tooLarge: "release-metadata-fetch-response-too-large",
+	}),
+	checksums: Object.freeze({
+		forbidden: "checksums-fetch-forbidden", rateLimited: "checksums-fetch-rate-limited", serverError: "checksums-fetch-server-error",
+		httpStatus: "checksums-fetch-http-status", transport: "checksums-fetch-transport", invalid: "checksums-fetch-invalid-response", tooLarge: "checksums-fetch-response-too-large",
+	}),
+	archive: Object.freeze({
+		forbidden: "native-archive-fetch-forbidden", rateLimited: "native-archive-fetch-rate-limited", serverError: "native-archive-fetch-server-error",
+		httpStatus: "native-archive-fetch-http-status", transport: "native-archive-fetch-transport", invalid: "native-archive-fetch-invalid-response", tooLarge: "native-archive-fetch-response-too-large",
+	}),
+});
+
+function codedFailure(code) {
+	const error = new Error();
+	failureCodes.set(error, allowedFailureCodes.has(code) ? code : "unknown");
+	return error;
+}
+
+function failWithCode(code) {
+	throw codedFailure(code);
+}
+
+export function safeFailureCode(error) {
+	if ((typeof error !== "object" || error === null) && typeof error !== "function") return "unknown";
+	const code = failureCodes.get(error);
+	return allowedFailureCodes.has(code) ? code : "unknown";
+}
+
+export function formatPreflightFailure(error) {
+	return `Artifact preflight failed closed (${safeFailureCode(error)}); no package was installed and postinstall, setup, or launcher was run.`;
+}
+
 const sha256 = (bytes) => createHash("sha256").update(bytes).digest("hex");
 
 export function verifyNpmIntegrity(bytes, expected) {
@@ -72,15 +135,65 @@ export function verifyEngramArtifacts({ release, checksumText, checksumSha256, a
 	return target.name;
 }
 
-async function responseBytes(url, maxBytes) {
-	const response = await fetch(url, { headers: { Accept: "application/vnd.github+json", "User-Agent": "gentle-pi-manual-native-preflight", "X-GitHub-Api-Version": "2022-11-28" } });
-	if (!response.ok || !response.body) fail("artifact fetch failed");
+export function verifyStagedNpmArchives(gentlePi, pi) {
+	try {
+		verifyNpmIntegrity(gentlePi, GENTLE_PI_NPM_SRI);
+		verifyNpmIntegrity(pi, PI_NPM_SRI);
+	} catch {
+		failWithCode("staged-npm-read-or-digest");
+	}
+}
+
+export function verifyPinnedEngramArtifacts(artifacts) {
+	try {
+		return verifyEngramArtifacts(artifacts);
+	} catch {
+		failWithCode("release-digest-checksum-mismatch");
+	}
+}
+
+export async function responseBytes(url, maxBytes, stage, fetcher = fetch) {
+	const codes = fetchFailureCodes[stage];
+	if (!codes) failWithCode("unknown");
+	let response;
+	try {
+		response = await fetcher(url, { headers: { Accept: "application/vnd.github+json", "User-Agent": "gentle-pi-manual-native-preflight", "X-GitHub-Api-Version": "2022-11-28" } });
+	} catch {
+		failWithCode(codes.transport);
+	}
+	if (!response || typeof response.ok !== "boolean" || !Number.isInteger(response.status)) failWithCode(codes.invalid);
+	if (!response.ok) {
+		const remaining = stage === "release" ? response.headers?.get?.("x-ratelimit-remaining") : null;
+		if (response.status === 429 || remaining === "0") failWithCode(codes.rateLimited);
+		if (response.status === 403) failWithCode(codes.forbidden);
+		if (response.status >= 500 && response.status <= 599) failWithCode(codes.serverError);
+		failWithCode(codes.httpStatus);
+	}
+	if (!response.body) failWithCode(codes.invalid);
+	const contentLength = response.headers?.get?.("content-length");
+	if (typeof contentLength === "string" && /^\d+$/.test(contentLength) && Number(contentLength) > maxBytes) failWithCode(codes.tooLarge);
 	const chunks = [];
 	let size = 0;
-	for await (const chunk of response.body) {
-		size += chunk.length;
-		if (size > maxBytes) fail("artifact exceeds size limit");
-		chunks.push(chunk);
+	let localStreamFailure;
+	let hasLocalStreamFailure = false;
+	try {
+		for await (const chunk of response.body) {
+			if (!(chunk instanceof Uint8Array)) {
+				localStreamFailure = codedFailure(codes.invalid);
+				hasLocalStreamFailure = true;
+				throw localStreamFailure;
+			}
+			size += chunk.byteLength;
+			if (size > maxBytes) {
+				localStreamFailure = codedFailure(codes.tooLarge);
+				hasLocalStreamFailure = true;
+				throw localStreamFailure;
+			}
+			chunks.push(chunk);
+		}
+	} catch (error) {
+		if (hasLocalStreamFailure && error === localStreamFailure) throw error;
+		failWithCode(codes.transport);
 	}
 	return Buffer.concat(chunks);
 }
@@ -106,22 +219,25 @@ async function scratchFile(root, name, maxBytes = MAX_ARTIFACT_BYTES) {
 
 async function verify() {
 	const root = resolveScratchDirectory(process.env.RUNNER_TEMP);
-	await realDirectory(root);
-	const gentlePi = await scratchFile(root, "gentle-pi-3.7.0.tgz");
-	const pi = await scratchFile(root, PI_NPM_ARCHIVE_NAME);
-	verifyNpmIntegrity(gentlePi, GENTLE_PI_NPM_SRI);
-	verifyNpmIntegrity(pi, PI_NPM_SRI);
+	try {
+		await realDirectory(root);
+		const gentlePi = await scratchFile(root, "gentle-pi-3.7.0.tgz");
+		const pi = await scratchFile(root, PI_NPM_ARCHIVE_NAME);
+		verifyStagedNpmArchives(gentlePi, pi);
+	} catch {
+		failWithCode("staged-npm-read-or-digest");
+	}
 
 	const target = resolveEngramReleaseAsset(process.platform, process.arch);
 	const [releaseBytes, checksumBytes, archiveBytes] = await Promise.all([
-		responseBytes(RELEASE_API, 2 * 1024 * 1024),
-		responseBytes(`${RELEASE_DOWNLOAD}checksums.txt`, 64 * 1024),
-		responseBytes(`${RELEASE_DOWNLOAD}${target.name}`, MAX_ARTIFACT_BYTES),
+		responseBytes(RELEASE_API, 2 * 1024 * 1024, "release"),
+		responseBytes(`${RELEASE_DOWNLOAD}checksums.txt`, 64 * 1024, "checksums"),
+		responseBytes(`${RELEASE_DOWNLOAD}${target.name}`, MAX_ARTIFACT_BYTES, "archive"),
 	]);
 	let release;
-	try { release = JSON.parse(releaseBytes.toString("utf8")); } catch { fail("invalid release metadata"); }
+	try { release = JSON.parse(releaseBytes.toString("utf8")); } catch { failWithCode("release-digest-checksum-mismatch"); }
 	const checksumText = checksumBytes.toString("utf8");
-	verifyEngramArtifacts({ release, checksumText, checksumSha256: sha256(checksumBytes), archiveSha256: sha256(archiveBytes), platform: process.platform, architecture: process.arch });
+	verifyPinnedEngramArtifacts({ release, checksumText, checksumSha256: sha256(checksumBytes), archiveSha256: sha256(archiveBytes), platform: process.platform, architecture: process.arch });
 	await writeFile(join(root, "checksums.txt"), checksumBytes, { flag: "wx", mode: 0o600 });
 	await writeFile(join(root, target.name), archiveBytes, { flag: "wx", mode: 0o600 });
 }
@@ -142,8 +258,8 @@ async function runCli(args) {
 }
 
 if (process.argv[1] && pathToFileURL(resolve(process.argv[1])).href === import.meta.url) {
-	runCli(process.argv.slice(2)).catch(() => {
-		console.error("Artifact preflight failed closed; no package was installed and postinstall, setup, or launcher was run.");
+	runCli(process.argv.slice(2)).catch((error) => {
+		console.error(formatPreflightFailure(error));
 		process.exitCode = 1;
 	});
 }

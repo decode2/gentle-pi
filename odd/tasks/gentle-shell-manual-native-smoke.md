@@ -11,11 +11,19 @@
 - Resolve official core Engram `v2.1.0` separately. Require the exact native OS/architecture asset, release API SHA-256 digest, pinned release digest, and matching row in the verified official `checksums.txt`; keep verified archives in runner-disposable scratch.
 - This unit does not install or unpack packages, execute any lifecycle script, postinstall, setup, or launcher, access real user config, run a Go source build, or claim setup/RPC/TUI/Ready evidence. It is artifact-integrity evidence only; runtime smoke evidence belongs to a later unit.
 
-## This unit: isolated native npm install smoke only
+## This unit: bounded native artifact-preflight failure diagnosis
+
+- Receipt: PR#8 Actions run `36081864141`, attempts 1 and 2 on the same head. Windows npm install smoke succeeded; macOS failed `Verify staged npm and official Engram release artifacts only` before npm install. The exact macOS cause is unknown; do not reinterpret the successful Windows evidence or Linux scratch evidence.
+- Add pure mock-based tests and closed, explicitly enumerated safe failure codes so the preflight CLI reports only a fixed category: staged pinned npm read/digest, release metadata fetch, checksums fetch, native archive fetch, release/digest/checksum mismatch, or unknown. Fetch diagnostics may distinguish fixed HTTP classes (forbidden, rate-limited, server error, other status) from transport failure. Never print or forward URLs, paths, argv, raw exceptions, status text, headers, response bodies, or metadata.
+- Bound every fetch response and preserve npm SRI, official release API digests, exact checksum row and digest, native archive pins, scratch checks, and the lifecycle-disabled workflow. No install, postinstall, setup, launcher, real config, or runtime harness is authorized locally; no workflow edit is needed because native CI executes the current script.
+- Tests use mock fetch/errors only; no live fetch. Sanitized preflight tests passed 12/12; a parent-run `env -i` scratch invocation also passed all 20 artifact/staging tests, including the disposable symlink fixture. No local npm install, config change, or product runtime harness was run. The subsequent native CI may identify a safe failure category, but the category is diagnostic evidence, not permission to loosen verification.
+- Rollback: revert only this diagnostic unit's script/tests and this section. Preserve the successful Windows evidence, PR#7 evidence, Linux scratch, and all earlier failed scratch attempts.
+
+## Prior unit: isolated native npm install smoke only
 
 - After artifact preflight passes, create owner-only runner-disposable scratch with real non-symlink ancestors, bounded-reverify both staged archive SRIs, and invoke the exact npm CLI bundled beside setup-node's `process.execPath`. Use only the two staged archives as package inputs, `--ignore-scripts`, the isolated prefix/config/cache/temp, and an allowlisted environment; never forward host PATH, credentials, or NODE_OPTIONS. Suppress npm output and report a fixed failure category.
 - Success means only `npm install` returned zero. The staged paths can change between SRI verification and npm reopening them; installed bytes are unverified. Do not extract archives, read installed manifests or locks, claim package-content identity, execute lifecycle/postinstall, set up Go, execute a binary, run setup/launcher/Pi RPC/TUI, or claim Ready.
-- Focused tests establish RED before GREEN for Node/npm CLI layout selection, missing/symlinked/oversized scratch inputs, exact arguments, and environment isolation. Native CI receipts remain pending.
+- Focused tests establish RED before GREEN for Node/npm CLI layout selection, missing/symlinked/oversized scratch inputs, exact arguments, and environment isolation. PR#8 native Windows npm-install smoke passed; macOS failed earlier artifact preflight in both attempts, so its npm-install smoke remains unverified.
 - Rollback: revert only this npm-smoke workflow/script/tests and this unit's record text; preserve the preceding artifact-preflight unit and receipts.
 
 ## Next unit: verify installed package bytes before postinstall

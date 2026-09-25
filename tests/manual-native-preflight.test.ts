@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { tmpdir } from "node:os";
 import { join, resolve, sep } from "node:path";
+import { fileURLToPath } from "node:url";
 import * as preflight from "../scripts/manual-native-preflight.mjs";
 import {
 	ENGRAM_CHECKSUMS_SHA256,
@@ -89,4 +91,111 @@ test("Engram archive must agree with pinned release API digests and exact checks
 	assert.throws(() => verifyEngramArtifacts({ release: changedDigest, checksumText, checksumSha256: ENGRAM_CHECKSUMS_SHA256, archiveSha256: selected.sha256, platform: "darwin", architecture: "arm64" }), /release drift/);
 	assert.throws(() => verifyEngramArtifacts({ release: release(), checksumText, checksumSha256: "0".repeat(64), archiveSha256: selected.sha256, platform: "darwin", architecture: "arm64" }), /checksum file digest mismatch/);
 	assert.throws(() => verifyEngramArtifacts({ release: release(), checksumText: `${windowsX64Sha}  ${windowsX64}\n`, checksumSha256: ENGRAM_CHECKSUMS_SHA256, archiveSha256: selected.sha256, platform: "darwin", architecture: "arm64" }), /missing or invalid checksum row/);
+});
+
+const failure = async (operation) => {
+	const result = await Promise.allSettled([operation()]);
+	assert.equal(result[0].status, "rejected", "expected the operation to fail closed");
+	return result[0].reason;
+};
+
+function mockResponse(status, { body = [], headers = {}, stream } = {}) {
+	return {
+		ok: status >= 200 && status < 300,
+		status,
+		headers: { get: (name) => headers[name.toLowerCase()] ?? null },
+		body: stream ?? (async function* () { for (const chunk of body) yield chunk; })(),
+	};
+}
+
+test("native fetch diagnostics use fixed stage and HTTP reason codes", async () => {
+	const releaseForbidden = await failure(() => preflight.responseBytes("https://sentinel.invalid/release", 16, "release", async () => mockResponse(403)));
+	assert.equal(preflight.safeFailureCode(releaseForbidden), "release-metadata-fetch-forbidden");
+
+	const checksumsLimited = await failure(() => preflight.responseBytes("https://sentinel.invalid/checksums", 16, "checksums", async () => mockResponse(429)));
+	assert.equal(preflight.safeFailureCode(checksumsLimited), "checksums-fetch-rate-limited");
+
+	const archiveServerError = await failure(() => preflight.responseBytes("https://sentinel.invalid/archive", 16, "archive", async () => mockResponse(503)));
+	assert.equal(preflight.safeFailureCode(archiveServerError), "native-archive-fetch-server-error");
+
+	const releaseRateHeader = await failure(() => preflight.responseBytes("https://sentinel.invalid/release", 16, "release", async () => mockResponse(403, { headers: { "x-ratelimit-remaining": "0" } })));
+	assert.equal(preflight.safeFailureCode(releaseRateHeader), "release-metadata-fetch-rate-limited");
+
+	const otherStatus = await failure(() => preflight.responseBytes("https://sentinel.invalid/release", 16, "release", async () => mockResponse(418)));
+	assert.equal(preflight.safeFailureCode(otherStatus), "release-metadata-fetch-http-status");
+});
+
+test("transport and oversized responses are distinct fixed fetch failures", async () => {
+	const transport = await failure(() => preflight.responseBytes("https://sentinel.invalid/archive", 16, "archive", async () => { throw new Error("RAW_EXCEPTION_SENTINEL"); }));
+	assert.equal(preflight.safeFailureCode(transport), "native-archive-fetch-transport");
+	const oversized = await failure(() => preflight.responseBytes("https://sentinel.invalid/checksums", 2, "checksums", async () => mockResponse(200, { body: [Buffer.from("too large")] })));
+	assert.equal(preflight.safeFailureCode(oversized), "checksums-fetch-response-too-large");
+});
+
+test("invalid fetch responses and content-length overflow use fixed stage codes", async () => {
+	const invalidResponse = await failure(() => preflight.responseBytes("https://sentinel.invalid/release", 16, "release", async () => ({ ok: true, status: 200 })));
+	assert.equal(preflight.safeFailureCode(invalidResponse), "release-metadata-fetch-invalid-response");
+
+	const invalidChunk = await failure(() => preflight.responseBytes("https://sentinel.invalid/checksums", 16, "checksums", async () => mockResponse(200, { body: ["not bytes"] })));
+	assert.equal(preflight.safeFailureCode(invalidChunk), "checksums-fetch-invalid-response");
+
+	let bodyRead = false;
+	const contentLengthOverflow = await failure(() => preflight.responseBytes("https://sentinel.invalid/archive", 2, "archive", async () => mockResponse(200, {
+		headers: { "content-length": "3" },
+		stream: (async function* () { bodyRead = true; yield Buffer.from("abc"); })(),
+	})));
+	assert.equal(preflight.safeFailureCode(contentLengthOverflow), "native-archive-fetch-response-too-large");
+	assert.equal(bodyRead, false);
+});
+
+test("stream errors are attributed to their current fetch stage", async () => {
+	const sentinel = "RAW_STREAM_URL_AND_ERROR_SENTINEL";
+	const raw = new Error(`stream failed at https://${sentinel}.invalid`);
+	const transport = await failure(() => preflight.responseBytes(`https://${sentinel}.invalid`, 16, "checksums", async () => mockResponse(200, {
+		stream: (async function* () { throw raw; })(),
+	})));
+	assert.equal(preflight.safeFailureCode(transport), "checksums-fetch-transport");
+
+	const foreignBrandedError = await failure(() => preflight.responseBytes("https://sentinel.invalid/checksums", 16, "checksums", async () => mockResponse(200, { body: ["not bytes"] })));
+	const reattributed = await failure(() => preflight.responseBytes("https://sentinel.invalid/archive", 16, "archive", async () => mockResponse(200, {
+		stream: (async function* () { throw foreignBrandedError; })(),
+	})));
+	assert.equal(preflight.safeFailureCode(reattributed), "native-archive-fetch-transport");
+	assert.equal(preflight.formatPreflightFailure(reattributed).includes(sentinel), false);
+});
+
+test("CLI invalid-argument output contains only the fixed failure category", () => {
+	const sentinel = "RAW_ARG_SENTINEL";
+	const cliPath = fileURLToPath(new URL("../scripts/manual-native-preflight.mjs", import.meta.url));
+	const child = spawnSync(process.execPath, [cliPath, sentinel], { encoding: "utf8", env: { PATH: "", HOME: "" } });
+	assert.equal(child.status, 1);
+	assert.equal(child.stdout, "");
+	assert.equal(child.stderr, "Artifact preflight failed closed (unknown); no package was installed and postinstall, setup, or launcher was run.\n");
+	assert.equal(child.stderr.includes(sentinel), false);
+});
+
+test("staged npm and release integrity failures have bounded public categories", () => {
+	assert.equal(preflight.safeFailureCode(failureSync(() => preflight.verifyStagedNpmArchives(Buffer.from("changed"), Buffer.from("changed")))), "staged-npm-read-or-digest");
+	const selected = resolveEngramReleaseAsset("darwin", "arm64");
+	const changed = release();
+	changed.tag_name = "v9.9.9";
+	assert.equal(preflight.safeFailureCode(failureSync(() => preflight.verifyPinnedEngramArtifacts({ release: changed, checksumText, checksumSha256: ENGRAM_CHECKSUMS_SHA256, archiveSha256: selected.sha256, platform: "darwin", architecture: "arm64" }))), "release-digest-checksum-mismatch");
+});
+
+function failureSync(operation) {
+	try { operation(); } catch (error) { return error; }
+	assert.fail("expected the operation to fail closed");
+}
+
+test("failure formatting never includes a URL or raw exception text", async () => {
+	const sentinel = "SENSITIVE_SENTINEL_URL_AND_EXCEPTION";
+	const raw = new Error(`raw failure ${sentinel}`);
+	const coded = await failure(() => preflight.responseBytes(`https://${sentinel}.invalid`, 16, "release", async () => { throw raw; }));
+	for (const error of [coded, raw, new Error(`untrusted ${sentinel}`)]) {
+		const message = preflight.formatPreflightFailure(error);
+		assert.equal(message.includes(sentinel), false);
+		assert.equal(message.includes("raw failure"), false);
+	}
+	assert.equal(preflight.formatPreflightFailure(coded), "Artifact preflight failed closed (release-metadata-fetch-transport); no package was installed and postinstall, setup, or launcher was run.");
+	assert.equal(preflight.formatPreflightFailure(raw), "Artifact preflight failed closed (unknown); no package was installed and postinstall, setup, or launcher was run.");
 });
