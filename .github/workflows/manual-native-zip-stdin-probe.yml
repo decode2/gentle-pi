@@ -1,0 +1,139 @@
+name: Manual native ZIP stdin reader experiment
+
+on:
+  pull_request:
+    types: [opened, reopened, synchronize]
+
+permissions: {}
+
+jobs:
+  synthetic-zip-reader:
+    if: github.repository == 'decode2/gentle-pi' && github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' && github.event.pull_request.draft == true
+    runs-on: windows-latest
+    steps:
+      - name: Compare synthetic ZIP path and stdin readers
+        shell: pwsh
+        run: |
+          $probe = @'
+          const fs = require("node:fs");
+          const os = require("node:os");
+          const path = require("node:path");
+          const { spawnSync } = require("node:child_process");
+          let scratch;
+          let failed = false;
+          const report = (category) => console.log(category);
+          const crc32 = (bytes) => {
+            let crc = 0xffffffff;
+            for (const byte of bytes) {
+              crc ^= byte;
+              for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+            }
+            return (crc ^ 0xffffffff) >>> 0;
+          };
+          const zipFixture = () => {
+            const name = Buffer.from("fixture.txt", "utf8");
+            const contents = Buffer.from("synthetic reader fixture\n", "utf8");
+            const checksum = crc32(contents);
+            const local = Buffer.alloc(30 + name.length);
+            local.writeUInt32LE(0x04034b50, 0);
+            local.writeUInt16LE(20, 4);
+            local.writeUInt32LE(checksum, 14);
+            local.writeUInt32LE(contents.length, 18);
+            local.writeUInt32LE(contents.length, 22);
+            local.writeUInt16LE(name.length, 26);
+            name.copy(local, 30);
+            const localRecord = Buffer.concat([local, contents]);
+            const central = Buffer.alloc(46 + name.length);
+            central.writeUInt32LE(0x02014b50, 0);
+            central.writeUInt16LE(20, 4);
+            central.writeUInt16LE(20, 6);
+            central.writeUInt32LE(checksum, 16);
+            central.writeUInt32LE(contents.length, 20);
+            central.writeUInt32LE(contents.length, 24);
+            central.writeUInt16LE(name.length, 28);
+            name.copy(central, 46);
+            const end = Buffer.alloc(22);
+            end.writeUInt32LE(0x06054b50, 0);
+            end.writeUInt16LE(1, 8);
+            end.writeUInt16LE(1, 10);
+            end.writeUInt32LE(central.length, 12);
+            end.writeUInt32LE(localRecord.length, 16);
+            return Buffer.concat([localRecord, central, end]);
+          };
+          const listsFixture = (output) => Buffer.isBuffer(output) && output.toString("utf8").replace(/\r\n/g, "\n") === "fixture.txt\n";
+          try {
+            if (!process.env.SystemRoot) throw new Error();
+            const tarPath = path.win32.join(process.env.SystemRoot, "System32", "tar.exe");
+            scratch = fs.mkdtempSync(path.join(os.tmpdir(), "gentle-pi-zip-stdin-"));
+            const archivePath = path.join(scratch, "fixture.zip");
+            const archiveBytes = zipFixture();
+            fs.writeFileSync(archivePath, archiveBytes);
+            const pathResult = spawnSync(tarPath, ["-tf", archivePath], { windowsHide: true, maxBuffer: 65536 });
+            const pathValid = !pathResult.error && pathResult.status === 0 && listsFixture(pathResult.stdout);
+            report(pathValid ? "path-reader-valid" : "path-reader-invalid");
+            if (!pathValid) failed = true;
+            const stdinResult = spawnSync(tarPath, ["-tf", "-"], { input: archiveBytes, windowsHide: true, maxBuffer: 65536 });
+            if (stdinResult.error || stdinResult.status !== 0) {
+              report("stdin-exit");
+              failed = true;
+            } else if (!Buffer.isBuffer(stdinResult.stdout) || stdinResult.stdout.length === 0) {
+              report("stdin-empty");
+              failed = true;
+            } else {
+              report("stdin-nonempty");
+              const memberValid = listsFixture(stdinResult.stdout);
+              report(memberValid ? "stdin-member-valid" : "stdin-member-invalid");
+              if (!memberValid) failed = true;
+            }
+          } catch {
+            report("probe-error");
+            failed = true;
+          } finally {
+            if (scratch) {
+              try {
+                fs.rmSync(scratch, { recursive: true, force: true });
+              } catch {
+                report("fixture-cleanup-failed");
+                failed = true;
+              }
+            }
+          }
+          process.exitCode = failed ? 1 : 0;
+          '@
+          $ErrorActionPreference = 'Stop'
+          $allowedCategories = @(
+            'path-reader-valid'
+            'path-reader-invalid'
+            'stdin-exit'
+            'stdin-empty'
+            'stdin-nonempty'
+            'stdin-member-valid'
+            'stdin-member-invalid'
+            'probe-error'
+            'fixture-cleanup-failed'
+          )
+          try {
+            $probeOutput = & node -e $probe 2>$null
+            $nodeExitCode = $LASTEXITCODE
+          } catch {
+            [Console]::Out.WriteLine('probe-launch-failed')
+            exit 1
+          }
+          if ($null -eq $probeOutput -or $null -eq $nodeExitCode) {
+            [Console]::Out.WriteLine('probe-launch-failed')
+            exit 1
+          }
+          $invalidOutput = $false
+          foreach ($line in @($probeOutput)) {
+            $category = [string]$line
+            if ($allowedCategories -contains $category) {
+              [Console]::Out.WriteLine($category)
+            } else {
+              $invalidOutput = $true
+            }
+          }
+          if ($invalidOutput) {
+            [Console]::Out.WriteLine('probe-launch-failed')
+            exit 1
+          }
+          if ($nodeExitCode -ne 0) { exit 1 }
