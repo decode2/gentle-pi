@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { constants } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
@@ -47,12 +49,34 @@ test("rejects symlink members and symlinked archive directories", () => {
 	assert.throws(() => selectEngramMember([{ name: "tools", type: "directory", size: 0 }, regular("engram")], "engram"), /non-regular archive member/);
 });
 
-test("Windows verifies member bytes in memory without invoking a binary writer", async () => {
-	assert.equal(typeof staging.deliverEngramMember, "function");
+test("whitelists injected diagnostics and preserves Windows memory-only behavior", async () => {
 	const writes = [];
-	const disposition = await staging.deliverEngramMember("win32", Buffer.from("verified member"), async (bytes) => writes.push(bytes));
-	assert.equal(disposition, "memory-only");
+	assert.equal(await staging.deliverEngramMember("win32", Buffer.from("verified member"), async (bytes) => writes.push(bytes)), "memory-only");
 	assert.deepEqual(writes, []);
+	const error = await staging.withFailureReason("archive-read", async () => { throw new Error("HOSTILE_SENTINEL /private/path"); }).catch((failure) => failure);
+	assert.equal(staging.safeFailureCode(error), "member-validation-archive-read");
+	const unlisted = await staging.withFailureReason("HOSTILE_SENTINEL", async () => { throw new Error("HOSTILE_SENTINEL"); }).catch((failure) => failure);
+	assert.equal(staging.safeFailureCode(unlisted), "unknown");
+	assert.equal(staging.safeFailureCode(new Error("HOSTILE_SENTINEL /private/path")), "unknown");
+	const script = fileURLToPath(new URL("../scripts/manual-native-engram-stage.mjs", import.meta.url));
+	const result = spawnSync(process.execPath, [script, "invalid"], { encoding: "utf8", env: {} });
+	assert.equal(result.status, 1);
+	assert.equal(result.stdout, "");
+	assert.equal(result.stderr, "unknown\n");
+});
+
+test("preserves only stage-approved nested diagnostics", async () => {
+	const cases = [["native-reader-list", "archive-read", "member-validation-native-reader-list"],
+		["native-reader-list", "native-reader-invocation", "member-validation-native-reader-invocation"],
+		["native-reader-verbose", "native-reader-invocation", "member-validation-native-reader-invocation"],
+		["native-reader-extract", "darwin-private-root", "member-validation-darwin-private-root"],
+		["native-reader-extract", "darwin-write", "member-validation-darwin-write"],
+		["native-reader-extract", "darwin-readback", "member-validation-darwin-readback"],
+	];
+	for (const [outer, inner, expected] of cases) {
+		const error = await staging.withFailureReason(outer, () => staging.withFailureReason(inner, async () => { throw new Error("HOSTILE_SENTINEL"); })).catch((failure) => failure);
+		assert.equal(staging.safeFailureCode(error), expected);
+	}
 });
 
 test("refuses symlinked filesystem leaves and creates output exclusively without following links", () => {
