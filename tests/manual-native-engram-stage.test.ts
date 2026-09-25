@@ -18,6 +18,21 @@ import {
 
 const regular = (name, size = 1) => ({ name, type: "file", size });
 
+function readerDependencies(overrides = {}) {
+	return {
+		operation: "list",
+		checkExecutable: async () => "/native/archive-reader",
+		checkCwd: async () => {},
+		spawnSync: () => ({ status: 0, stdout: Buffer.from("member\n") }),
+		...overrides,
+	};
+}
+
+function assertFailureCode(error, expected) {
+	assert.equal(staging.safeFailureCode(error), expected);
+	assert.equal(error.message.includes("HOSTILE_SENTINEL"), false);
+}
+
 // Pure guard tests: no archive extraction, executable invocation, or scratch writes.
 test("uses explicit stdin reader modes for the pinned gzip and ZIP formats", () => {
 	assert.deepEqual(archiveReaderArgs("engram_2.1.0_darwin_arm64.tar.gz", "list"), ["-tzf", "-"]);
@@ -65,10 +80,73 @@ test("whitelists injected diagnostics and preserves Windows memory-only behavior
 	assert.equal(result.stderr, "unknown\n");
 });
 
+test("classifies injected reader failures by each closed operation label", async () => {
+	const hostile = () => { throw new Error("HOSTILE_SENTINEL /private/path --raw-arg"); };
+	const failures = [
+		["executable", { checkExecutable: async () => hostile() }],
+		["cwd", { checkCwd: async () => hostile() }],
+		["spawn", { spawnSync: hostile }],
+		["spawn", { spawnSync: () => ({ error: new Error("HOSTILE_SENTINEL") }) }],
+		["exit", { spawnSync: () => ({ status: 7, stdout: Buffer.from("HOSTILE_SENTINEL") }) }],
+		["zero-output", { spawnSync: () => ({ status: 0, stdout: Buffer.alloc(0) }) }],
+	];
+	for (const operation of ["list", "verbose", "extract"]) {
+		for (const [condition, overrides] of failures) {
+			const error = await staging.runNativeReader(Buffer.from("archive"), ["--HOSTILE_SENTINEL"], "/private/HOSTILE_SENTINEL", 1024, readerDependencies({ ...overrides, operation })).catch((failure) => failure);
+			assertFailureCode(error, `member-validation-native-reader-${operation}-${condition}`);
+		}
+	}
+	const output = Buffer.from("member\n");
+	assert.equal(await staging.runNativeReader(Buffer.from("archive"), [], "/safe/cwd", 1024, readerDependencies({
+		operation: "extract",
+		spawnSync: () => ({ status: 0, stdout: output }),
+	})), output);
+});
+
+test("rejects hostile reader operation labels without deriving a public code", async () => {
+	let invoked = false;
+	const dependencies = readerDependencies({
+		operation: "HOSTILE_SENTINEL/phase",
+		checkExecutable: async () => { invoked = true; return "/private/HOSTILE_SENTINEL"; },
+		spawnSync: () => { invoked = true; throw new Error("HOSTILE_SENTINEL"); },
+	});
+	const error = await staging.runNativeReader(Buffer.from("archive"), ["--HOSTILE_SENTINEL"], "/private/HOSTILE_SENTINEL", 1024, dependencies).catch((failure) => failure);
+	assertFailureCode(error, "unknown");
+	assert.equal(invoked, false);
+	let phaseError;
+	try { staging.parseReaderOutput(Buffer.from("member\\n"), "HOSTILE_SENTINEL/phase"); } catch (failure) { phaseError = failure; }
+	assertFailureCode(phaseError, "unknown");
+});
+
+test("separates invalid UTF-8, empty, newline, and malformed reader output", () => {
+	for (const phase of ["list", "verbose"]) {
+		const prefix = `member-validation-native-reader-${phase}`;
+		assert.deepEqual(staging.parseReaderOutput(Buffer.from("member\n"), phase), ["member"]);
+		for (const [bytes, suffix] of [
+			[Buffer.from([0xff]), "invalid-utf8"],
+			[Buffer.alloc(0), "empty-output"],
+			[Buffer.from("member"), "newline"],
+			[Buffer.from("member\n\n"), "empty-output"],
+			[Buffer.from("member\rbroken\n"), "malformed-output"],
+		]) {
+			let error;
+			try { staging.parseReaderOutput(bytes, phase); } catch (failure) { error = failure; }
+			assertFailureCode(error, `${prefix}-${suffix}`);
+		}
+	}
+});
+
 test("preserves only stage-approved nested diagnostics", async () => {
+	const arbitraryNested = await staging.withFailureReason("native-reader-list", async () => { throw new Error("HOSTILE_SENTINEL"); }).catch((failure) => failure);
+	assert.equal(staging.safeFailureCode(arbitraryNested), "unknown");
 	const cases = [["native-reader-list", "archive-read", "member-validation-native-reader-list"],
 		["native-reader-list", "native-reader-invocation", "member-validation-native-reader-invocation"],
+		["native-reader-list", "native-reader-list-executable", "member-validation-native-reader-list-executable"],
+		["native-reader-list", "native-reader-list-invalid-utf8", "member-validation-native-reader-list-invalid-utf8"],
 		["native-reader-verbose", "native-reader-invocation", "member-validation-native-reader-invocation"],
+		["native-reader-verbose", "native-reader-verbose-zero-output", "member-validation-native-reader-verbose-zero-output"],
+		["native-reader-verbose", "native-reader-verbose-newline", "member-validation-native-reader-verbose-newline"],
+		["native-reader-extract", "native-reader-extract-spawn", "member-validation-native-reader-extract-spawn"],
 		["native-reader-extract", "darwin-private-root", "member-validation-darwin-private-root"],
 		["native-reader-extract", "darwin-write", "member-validation-darwin-write"],
 		["native-reader-extract", "darwin-readback", "member-validation-darwin-readback"],
@@ -76,6 +154,8 @@ test("preserves only stage-approved nested diagnostics", async () => {
 	for (const [outer, inner, expected] of cases) {
 		const error = await staging.withFailureReason(outer, () => staging.withFailureReason(inner, async () => { throw new Error("HOSTILE_SENTINEL"); })).catch((failure) => failure);
 		assert.equal(staging.safeFailureCode(error), expected);
+		const repeated = await staging.withFailureReason(outer, async () => { throw error; }).catch((failure) => failure);
+		assert.equal(staging.safeFailureCode(repeated), expected);
 	}
 });
 
