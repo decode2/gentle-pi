@@ -36,6 +36,9 @@ jobs:
       - name: Run pure artifact-preflight tests only (no package install, postinstall, setup, or launcher)
         run: node --experimental-strip-types --test tests/manual-native-preflight.test.ts
 
+      - name: Test pure official Engram staging guards (no extraction or execution)
+        run: node --experimental-strip-types --test tests/manual-native-engram-stage.test.ts
+
       - name: Test isolated staging guards and npm invocation
         env:
           HOME: ${{ runner.temp }}/manual-native-tests/home
@@ -68,6 +71,9 @@ jobs:
 
       - name: Verify staged npm and official Engram release artifacts only
         run: node scripts/manual-native-preflight.mjs verify
+
+      - name: Validate official Engram member (Windows memory-only; Darwin scratch stage)
+        run: node scripts/manual-native-engram-stage.mjs validate
 
       - name: Prepare disposable npm staging directories
         run: node scripts/manual-native-staging.mjs prepare
