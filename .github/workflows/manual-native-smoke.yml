@@ -39,6 +39,9 @@ jobs:
       - name: Test pure official Engram staging guards (no extraction or execution)
         run: node --experimental-strip-types --test tests/manual-native-engram-stage.test.ts
 
+      - name: Test pure official ZIP inventory probe with synthetic buffers only
+        run: node --experimental-strip-types --test tests/manual-native-zip-buffer.test.ts tests/manual-native-zip-official-probe.test.ts
+
       - name: Test isolated staging guards and npm invocation
         env:
           HOME: ${{ runner.temp }}/manual-native-tests/home
@@ -71,6 +74,10 @@ jobs:
 
       - name: Verify staged npm and official Engram release artifacts only
         run: node scripts/manual-native-preflight.mjs verify
+
+      - name: Inventory official Windows Engram ZIP (metadata only)
+        if: runner.os == 'Windows'
+        run: node scripts/manual-native-zip-official-probe.mjs
 
       - name: Validate official Engram member (Windows memory-only; Darwin scratch stage)
         run: node scripts/manual-native-engram-stage.mjs validate
