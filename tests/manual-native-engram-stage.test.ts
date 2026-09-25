@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { constants } from "node:fs";
+import { constants, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import * as staging from "../scripts/manual-native-engram-stage.mjs";
@@ -186,4 +186,32 @@ test("verifies staged bytes against the immutable extracted buffer", () => {
 	assert.equal(assertBinaryIdentity(extracted, Buffer.from(extracted)), true);
 	assert.throws(() => assertBinaryIdentity(extracted, Buffer.from("changed")), /binary identity mismatch/);
 	assert.throws(() => assertBinaryIdentity(Buffer.alloc(MAX_BINARY_BYTES + 1), Buffer.alloc(0)), /oversized binary/);
+});
+
+test("keeps the synthetic Windows ZIP reader experiment isolated", () => {
+	const workflow = readFileSync(new URL("../.github/workflows/manual-native-zip-stdin-probe.yml", import.meta.url), "utf8");
+	assert.match(workflow, /permissions:\s*\{\}/);
+	assert.match(workflow, /runs-on:\s*windows-latest/);
+	assert.match(workflow, /github\.repository\s*==\s*'decode2\/gentle-pi'/);
+	assert.match(workflow, /github\.event\.pull_request\.head\.repo\.full_name\s*==\s*'decode2\/gentle-pi'/);
+	assert.match(workflow, /github\.event\.pull_request\.draft\s*==\s*true/);
+	assert.match(workflow, /spawnSync\(tarPath,\s*\["-tf",\s*archivePath\]/);
+	assert.match(workflow, /spawnSync\(tarPath,\s*\["-tf",\s*"-"\],\s*\{\s*input:\s*archiveBytes/);
+	assert.match(workflow, /fs\.mkdtempSync\(path\.join\(os\.tmpdir\(\),/);
+	assert.match(workflow, /fs\.rmSync\(scratch,\s*\{\s*recursive:\s*true,\s*force:\s*true\s*\}\)/);
+	assert.match(workflow, /const report = \(category\) => console\.log\(category\);/);
+	assert.equal([...workflow.matchAll(/console\./g)].length, 1);
+	const categories = ["path-reader-valid", "path-reader-invalid", "stdin-exit", "stdin-empty", "stdin-nonempty", "stdin-member-valid", "stdin-member-invalid", "probe-error", "fixture-cleanup-failed"];
+	for (const category of categories) assert.ok(workflow.includes(category), `missing fixed category: ${category}`);
+	const fixedReports = new Set(categories.map((category) => `"${category}"`));
+	for (const [, report] of workflow.matchAll(/\breport\(([^)]*)\)/g)) {
+		assert.ok(fixedReports.has(report) || report === 'pathValid ? "path-reader-valid" : "path-reader-invalid"' || report === 'memberValid ? "stdin-member-valid" : "stdin-member-invalid"', `non-fixed output category: ${report}`);
+	}
+	assert.match(workflow, /node -e \$probe 2>\$null/);
+	assert.match(workflow, /\$ErrorActionPreference = 'Stop'/);
+	assert.match(workflow, /\[Console\]::Out\.WriteLine\('probe-launch-failed'\)/);
+	assert.match(workflow, /\$allowedCategories -contains \$category/);
+	assert.doesNotMatch(workflow, /\$_\.Exception|Write-Error|Write-Host/);
+	assert.doesNotMatch(workflow, /actions\/checkout|GITHUB_TOKEN|npm (?:install|pack)|engram(?:\.exe)?/i);
+	assert.doesNotMatch(workflow, /process\.stderr|\.stderr\b|console\.(?:error|warn)|https?:\/\//);
 });
