@@ -1,9 +1,9 @@
-name: Current-upstream questionnaire UM-05a owner registration GREEN
+name: Current-upstream questionnaire UM-05b setup owner RED
 
 on:
   push:
     branches:
-      - feat/questionnaire-profile-owner-um05a
+      - fix/questionnaire-safe-setup-um05b
   pull_request:
     branches:
       - main
@@ -12,14 +12,14 @@ permissions:
   contents: read
 
 jobs:
-  baseline:
+  um05b-red:
     # Only the designated fork/upstream branch; no arbitrary PR head in the networked lane.
     if: >-
       (github.repository == 'Gentleman-Programming/gentle-shell' ||
        github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
       (github.event_name == 'push' ||
-       (github.head_ref == 'feat/questionnaire-profile-owner-um05a' &&
+       (github.head_ref == 'fix/questionnaire-safe-setup-um05b' &&
         (github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-shell' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-pi')))
@@ -31,6 +31,7 @@ jobs:
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
       VIEW_TEST_BLOB: 449e88dc9ff33958887e19f62dab18ca247daf57
       UM05A_ASK_TEST_BLOB: c1e85aa268a24a9e7efe9d06d0e9047efedef41f
+      UM05B_BIN_TEST_BLOB: 0422627dec6322cdd846e2408bea1c0368ebba7d
       VIEW_BLOB: 821b52c61d6f0b4da45547e74784aff1d094fa62
       ASK_BLOB: 8b1a71879d2003858a2a716d7729ba57be0bc1f4
     steps:
@@ -55,13 +56,13 @@ jobs:
           test "$(git merge-base "$RED_BASE" HEAD)" = "$RED_BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/ask-user-question.test.ts|extensions/ask-user-question.ts) ;;
-              *) echo "unexpected UM-05a change: $path" >&2; exit 1 ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/ask-user-question.test.ts|extensions/ask-user-question.ts|tests/gentle-shell-bin.test.ts) ;;
+              *) echo "unexpected UM-05a/UM-05b change: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$RED_BASE" HEAD)
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts|extensions/ask-user-question.ts) ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts|extensions/ask-user-question.ts|tests/gentle-shell-bin.test.ts) ;;
               *) echo "unexpected changed path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
@@ -71,12 +72,14 @@ jobs:
             extensions/gentle-ai.ts extensions/ask-user-choice.ts \
             lib/agent-home.ts lib/rpc-host.ts \
             lib/native-fullscreen-interaction.ts \
-            tests/gentle-ai.test.ts tests/ask-user-choice.test.ts; do
+            tests/gentle-ai.test.ts tests/ask-user-choice.test.ts \
+            bin/gentle-shell.mjs runtime/gentle-shell-launcher.mjs lib/gentle-shell-launcher.ts; do
             base_blob="$(git rev-parse "$BASE:$path")"
             test "$(git rev-parse "HEAD:$path")" = "$base_blob"
             test "$(git hash-object -- "$path")" = "$base_blob"
           done
           for entry in \
+            "tests/gentle-shell-bin.test.ts:$UM05B_BIN_TEST_BLOB" \
             "tests/ask-user-question.test.ts:$UM05A_ASK_TEST_BLOB" \
             "tests/questionnaire-view.test.ts:$VIEW_TEST_BLOB" \
             "lib/questionnaire/questionnaire-view.ts:$VIEW_BLOB" \
@@ -308,6 +311,40 @@ jobs:
               done
               ! grep -Fq "Invalid questionnaire:" /tmp/um05a-green.tap
               grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um05a-green.tap
+            '
+
+      - name: Prove UM-05b setup owner assertions RED offline after GREEN baseline
+        shell: bash
+        env:
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = "$IMAGE_ID"
+          source="$RUNNER_TEMP/questionnaire-baseline/source"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$source,target=/source,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --cap-drop=ALL --security-opt=no-new-privileges --user 1000:1000 -w /source "$IMAGE" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/tmp/home TMPDIR=/tmp NODE_OPTIONS=--max-old-space-size=1536 \
+            /bin/bash -euo pipefail -c '
+              set +e
+              node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="^UM-05b:" /source/tests/gentle-shell-bin.test.ts \
+                > /tmp/um05b-red.tap 2>&1
+              status=$?
+              set -e
+              tee /dev/stderr < /tmp/um05b-red.tap > /dev/null
+              test "$status" -ne 0
+              for expected in "TAP version 13" "# tests 3" "# pass 1" "# fail 2"; do
+                grep -Fx "$expected" /tmp/um05b-red.tap
+              done
+              test "$(grep -Ec "^not ok [0-9]+ - UM-05b:" /tmp/um05b-red.tap)" -eq 2
+              grep -E "^ok [0-9]+ - UM-05b: exact enabled first-party owner removes external provider and npm:gentle-pi after setup$" /tmp/um05b-red.tap
+              for name in "absent owner" "disabled first-party owner"; do
+                grep -E "^not ok [0-9]+ - UM-05b: $name preserves external question provider after setup$" /tmp/um05b-red.tap
+              done
+              test "$(grep -c ERR_ASSERTION /tmp/um05b-red.tap)" -eq 2
             '
 
       - name: Recheck exact checkout and cleanliness

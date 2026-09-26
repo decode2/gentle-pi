@@ -954,6 +954,38 @@ test("gentle-shell setup shell-quotes a --home path containing a space in the fa
 	);
 });
 
+// --- UM-05b: setup must respect the profile's question-tool owner -----------
+
+function setupForQuestionOwner(t: test.TestContext, owner?: string) {
+	const f = fixture(t);
+	mkdirSync(f.gentleShellHome, { recursive: true });
+	writeFileSync(join(f.gentleShellHome, "settings.json"), JSON.stringify({ tuiMode: "fullscreen" }));
+	if (owner !== undefined) {
+		const dir = join(f.gentleShellHome, "gentle-ai");
+		mkdirSync(dir, { recursive: true });
+		writeFileSync(join(dir, "question-owner.json"), owner);
+	}
+	const gentleAiScript = join(f.root, "fake-gentle-ai.mjs");
+	writeGentleAiScriptDeclaringGentlePi(gentleAiScript, ["npm:@juicesharp/rpiv-ask-user-question@1.2.3"]);
+	writePiScriptEditingSettingsOnRemove(f.piScript);
+	const result = run({ ...f.env, GENTLE_SHELL_GENTLE_AI_BIN: gentleAiScript }, ["setup"]);
+	assert.equal(result.status, 0, result.stderr);
+	return JSON.parse(readFileSync(join(f.gentleShellHome, "settings.json"), "utf8")).packages;
+}
+
+test("UM-05b: absent owner preserves external question provider after setup", (t) => {
+	assert.deepEqual(setupForQuestionOwner(t), ["npm:@juicesharp/rpiv-ask-user-question@1.2.3"]);
+});
+
+test("UM-05b: disabled first-party owner preserves external question provider after setup", (t) => {
+	assert.deepEqual(setupForQuestionOwner(t, JSON.stringify({ version: 1, owner: "gentle-pi", enabled: false })),
+		["npm:@juicesharp/rpiv-ask-user-question@1.2.3"]);
+});
+
+test("UM-05b: exact enabled first-party owner removes external provider and npm:gentle-pi after setup", (t) => {
+	assert.deepEqual(setupForQuestionOwner(t, JSON.stringify({ version: 1, owner: "gentle-pi", enabled: true })), []);
+});
+
 // --- persona snapshot/restore -----------------------------------------------
 //
 // gentle-ai's persona file always lives at the shared `~/.pi/gentle-ai/persona.json`
