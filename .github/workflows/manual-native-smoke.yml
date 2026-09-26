@@ -42,6 +42,18 @@ jobs:
       - name: Test pure official ZIP inventory probe with synthetic buffers only
         run: node --experimental-strip-types --test tests/manual-native-zip-buffer.test.ts tests/manual-native-zip-official-probe.test.ts
 
+      - name: Test published package comparison and unverified Pi dependency bounds only
+        env:
+          HOME: ${{ runner.temp }}/manual-native-identity-tests/home
+          USERPROFILE: ${{ runner.temp }}/manual-native-identity-tests/home
+          XDG_CONFIG_HOME: ${{ runner.temp }}/manual-native-identity-tests/xdg
+          PI_CODING_AGENT_DIR: ${{ runner.temp }}/manual-native-identity-tests/agent
+          GENTLE_PI_CONFIG_HOME: ${{ runner.temp }}/manual-native-identity-tests/config
+          TMPDIR: ${{ runner.temp }}
+          TEMP: ${{ runner.temp }}
+          TMP: ${{ runner.temp }}
+        run: node --experimental-strip-types --test tests/manual-native-installed-identity.test.ts
+
       - name: Test isolated staging guards and npm invocation
         env:
           HOME: ${{ runner.temp }}/manual-native-tests/home
@@ -87,3 +99,7 @@ jobs:
 
       - name: Run isolated npm install smoke (installed bytes unverified)
         run: node scripts/manual-native-staging.mjs install
+
+      - name: Compare published package files; nested Pi dependencies remain unverified; no postinstall/Pi execution or Ready
+        timeout-minutes: 12
+        run: node scripts/manual-native-installed-identity.mjs verify
