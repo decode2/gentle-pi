@@ -1,3 +1,5 @@
+import { inflateRawSync } from "node:zlib";
+
 export const ZIP_INVENTORY_LIMITS = Object.freeze({
 	maxArchiveBytes: 64 * 1024 * 1024,
 	maxCentralDirectoryBytes: 1024 * 1024,
@@ -168,5 +170,68 @@ export function inventoryZip(bytes) {
 		return parse(bytes);
 	} catch {
 		throw new Error(DIAGNOSTIC);
+	}
+}
+
+export const MAX_BINARY_BYTES = 32 * 1024 * 1024;
+const EXTRACTION_DIAGNOSTIC = "ZIP extraction rejected";
+const CRC32_TABLE = new Uint32Array(256);
+for (let index = 0; index < CRC32_TABLE.length; index++) {
+	let value = index;
+	for (let bit = 0; bit < 8; bit++) value = (value >>> 1) ^ ((value & 1) ? 0xedb88320 : 0);
+	CRC32_TABLE[index] = value >>> 0;
+}
+
+function crc32(bytes) {
+	let value = 0xffffffff;
+	for (const byte of bytes) value = CRC32_TABLE[(value ^ byte) & 0xff] ^ (value >>> 8);
+	return (value ^ 0xffffffff) >>> 0;
+}
+
+function rejectExtraction() {
+	throw new Error(EXTRACTION_DIAGNOSTIC);
+}
+
+export function extractZipMember(bytes, expectedName) {
+	try {
+		if (typeof expectedName !== "string" || expectedName.length === 0 || expectedName.length > ZIP_INVENTORY_LIMITS.maxNameBytes || /[^\x00-\x7f]/u.test(expectedName)) rejectExtraction();
+		const inventory = inventoryZip(bytes);
+		const matches = inventory.filter((entry) => entry.name === expectedName && entry.type === "regular");
+		if (matches.length !== 1) rejectExtraction();
+		const entry = matches[0];
+		if (entry.compressedSize > MAX_BINARY_BYTES || entry.uncompressedSize > MAX_BINARY_BYTES || entry.uncompressedSize === 0) rejectExtraction();
+
+		const offset = entry.localHeaderOffset;
+		range(bytes, offset, 30);
+		if (bytes.readUInt32LE(offset) !== LOCAL_SIGNATURE) rejectExtraction();
+		const flags = bytes.readUInt16LE(offset + 6);
+		const method = bytes.readUInt16LE(offset + 8);
+		const crc = bytes.readUInt32LE(offset + 14);
+		const compressedSize = bytes.readUInt32LE(offset + 18);
+		const uncompressedSize = bytes.readUInt32LE(offset + 22);
+		const nameLength = bytes.readUInt16LE(offset + 26);
+		const extraLength = bytes.readUInt16LE(offset + 28);
+		const nameBytes = Buffer.from(expectedName, "ascii");
+		if (flags !== entry.flags || method !== entry.method || crc !== entry.crc32 || compressedSize !== entry.compressedSize || uncompressedSize !== entry.uncompressedSize || nameLength !== nameBytes.length) rejectExtraction();
+		if (extraLength > ZIP_INVENTORY_LIMITS.maxExtraBytes) rejectExtraction();
+		const payloadOffset = offset + 30 + nameLength + extraLength;
+		range(bytes, offset + 30, nameLength + extraLength);
+		if (!bytes.subarray(offset + 30, offset + 30 + nameLength).equals(nameBytes)) rejectExtraction();
+		validateExtra(extraLength);
+		range(bytes, payloadOffset, compressedSize);
+		const compressed = bytes.subarray(payloadOffset, payloadOffset + compressedSize);
+		let output;
+		if (method === 0) {
+			if (compressedSize !== uncompressedSize) rejectExtraction();
+			output = Buffer.from(compressed);
+		} else if (method === 8) {
+			output = inflateRawSync(compressed, { maxOutputLength: MAX_BINARY_BYTES });
+		} else {
+			rejectExtraction();
+		}
+		if (output.length === 0 || output.length !== entry.uncompressedSize || output.length > MAX_BINARY_BYTES || crc32(output) !== entry.crc32) rejectExtraction();
+		return output;
+	} catch {
+		throw new Error(EXTRACTION_DIAGNOSTIC);
 	}
 }

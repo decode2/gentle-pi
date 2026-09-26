@@ -1,8 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { inventoryZip, ZIP_INVENTORY_LIMITS } from "../scripts/manual-native-zip-buffer.mjs";
+import * as zipModule from "../scripts/manual-native-zip-buffer.mjs";
+import { deflateRawSync } from "node:zlib";
 
+const { inventoryZip, ZIP_INVENTORY_LIMITS } = zipModule;
 const DIAGNOSTIC = "ZIP inventory rejected";
+const EXTRACTION_DIAGNOSTIC = "ZIP extraction rejected";
+const MAX_BINARY_BYTES = 32 * 1024 * 1024;
 
 function zip(entries = [], { comment = Buffer.alloc(0), disk = 0 } = {}) {
 	const locals = [];
@@ -64,6 +68,19 @@ function zip(entries = [], { comment = Buffer.alloc(0), disk = 0 } = {}) {
 
 function rejected(bytes) {
 	assert.throws(() => inventoryZip(bytes), (error) => error.message === DIAGNOSTIC);
+}
+
+function crc32(bytes) {
+	let crc = 0xffffffff;
+	for (const byte of bytes) {
+		crc ^= byte;
+		for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+	}
+	return (crc ^ 0xffffffff) >>> 0;
+}
+
+function extractionRejected(bytes, name) {
+	assert.throws(() => zipModule.extractZipMember(bytes, name), (error) => error instanceof Error && error.message === EXTRACTION_DIAGNOSTIC);
 }
 
 test("inventories stored and deflate entries as frozen metadata only", () => {
@@ -193,4 +210,50 @@ test("public failures never echo hostile names, bytes, or underlying metadata", 
 		return true;
 	});
 	assert.throws(() => inventoryZip("RAW_ARCHIVE_SENTINEL"), (error) => error.message === DIAGNOSTIC);
+});
+
+test("extracts exact stored and deflated members into fresh buffers", () => {
+	const storedBytes = Buffer.from("stored native bytes");
+	const storedArchive = zip([{ name: "engram.exe", data: storedBytes, crc: crc32(storedBytes) }]).bytes;
+	const before = Buffer.from(storedArchive);
+	const stored = zipModule.extractZipMember(storedArchive, "engram.exe");
+	assert.equal(Buffer.isBuffer(stored), true);
+	assert.deepEqual(stored, storedBytes);
+	assert.notStrictEqual(stored, storedBytes);
+	stored[0] ^= 0xff;
+	assert.deepEqual(storedArchive, before);
+
+	const deflatedBytes = Buffer.from("deflated native bytes");
+	const deflatedArchive = zip([{ name: "engram.exe", method: 8, data: deflateRawSync(deflatedBytes), uncompressedSize: deflatedBytes.length, crc: crc32(deflatedBytes) }]).bytes;
+	assert.deepEqual(zipModule.extractZipMember(deflatedArchive, "engram.exe"), deflatedBytes);
+	assert.equal(zipModule.MAX_BINARY_BYTES, MAX_BINARY_BYTES);
+});
+
+test("rejects extraction CRC/size corruption, overrun, mismatched headers, and unsupported methods", () => {
+	const bytes = Buffer.from("payload");
+	extractionRejected(zip([{ name: "engram.exe", data: bytes, crc: crc32(bytes) ^ 1 }]).bytes, "engram.exe");
+	const wrongLength = deflateRawSync(bytes);
+	extractionRejected(zip([{ name: "engram.exe", method: 8, data: wrongLength, uncompressedSize: bytes.length + 1, crc: crc32(bytes) }]).bytes, "engram.exe");
+
+	const overrun = deflateRawSync(Buffer.alloc(MAX_BINARY_BYTES + 1));
+	extractionRejected(zip([{ name: "engram.exe", method: 8, data: overrun, uncompressedSize: MAX_BINARY_BYTES, crc: 0 }]).bytes, "engram.exe");
+	extractionRejected(zip([{ name: "engram.exe", data: bytes, crc: crc32(bytes), localCrc: 0 }]).bytes, "engram.exe");
+	extractionRejected(zip([{ name: "engram.exe", method: 12, data: bytes }]).bytes, "engram.exe");
+	extractionRejected(zip([{ name: "engram.exe", method: 8, data: Buffer.from([0xff]), uncompressedSize: bytes.length }]).bytes, "engram.exe");
+	extractionRejected(zip([{ name: "engram.exe", data: Buffer.alloc(0), crc: 0 }]).bytes, "engram.exe");
+});
+
+test("requires one exact expected member and sanitizes hostile extraction failures", () => {
+	const bytes = Buffer.from("binary");
+	const archive = zip([{ name: "engram.exe", data: bytes, crc: crc32(bytes) }]).bytes;
+	extractionRejected(archive, "other.exe");
+	extractionRejected(archive, "../SECRET_MEMBER_PATH_SENTINEL");
+	extractionRejected(archive.subarray(0, archive.length - 1), "engram.exe");
+	const corrupt = zip([{ name: "engram.exe", method: 8, data: Buffer.from([0xff]), uncompressedSize: 5 }]).bytes;
+	assert.throws(() => zipModule.extractZipMember(corrupt, "engram.exe"), (error) => {
+		assert.equal(error.message, EXTRACTION_DIAGNOSTIC);
+		assert.equal(error.message.includes("SECRET_MEMBER_PATH_SENTINEL"), false);
+		assert.equal(error.message.includes("invalid block type"), false);
+		return true;
+	});
 });
