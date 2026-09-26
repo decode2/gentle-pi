@@ -53,7 +53,7 @@ test("UM-06a: explicit-path real Pi CLI TUI session_start sees exactly owned que
 			assert.deepEqual(records.map((item) => item.phase), ["factory", "session_start"]);
 			assert.equal(records[1].mode, "tui", JSON.stringify(report));
 			assert.deepEqual(records[1].tools, owned ? ["ask_user_question"] : [], JSON.stringify(report));
-			console.log(`UM-06a explicit-path owned=${owned} sdk=${sdk.version} mode=tui tools=${JSON.stringify(records[1].tools)} exit=${report.exit}`);
+			console.log(`UM-06a explicit-path owned=${owned} sdk=${sdk.version} mode=tui tools=${JSON.stringify(records[1].tools)} deadline=${report.deadline_reached} exit=${report.exit} modelStarts=0`);
 		}
 	} finally {
 		rmSync(temporary, { recursive: true, force: true });

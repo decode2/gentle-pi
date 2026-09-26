@@ -20,7 +20,7 @@ child = subprocess.Popen(
 )
 os.close(slave)
 output = bytearray()
-deadline = time.monotonic() + 40
+deadline = time.monotonic() + 15
 saw_start = False
 try:
     while time.monotonic() < deadline and child.poll() is None:
@@ -36,7 +36,8 @@ try:
                 saw_start = '"phase":"session_start"' in receipt.read()
             if saw_start:
                 os.write(master, b"/exit\r")
-    if child.poll() is None:
+    deadline_reached = child.poll() is None
+    if deadline_reached:
         os.killpg(child.pid, signal.SIGTERM)
     try:
         child.wait(timeout=5)
@@ -45,7 +46,8 @@ try:
         child.wait(timeout=5)
     with open(trace) as receipt:
         records = receipt.read()
-    print(json.dumps({"started": saw_start, "exit": child.returncode,
+    print(json.dumps({"started": saw_start, "deadline_reached": deadline_reached,
+                      "exit": child.returncode,
                       "trace": records,
                       "terminal_tail": output[-2000:].decode("utf-8", "replace")}))
 finally:
