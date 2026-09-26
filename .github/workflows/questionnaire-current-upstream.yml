@@ -109,7 +109,7 @@ jobs:
               git checkout --detach "$EXPECTED_SHA"
               test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
               test -z "$(git status --porcelain=v1 --untracked-files=all)"
-              grep -Eq '^[[:space:]]*"packageManager": "pnpm@11[.]1[.]1"$' package.json
+              grep -Eq "^[[:space:]]*\"packageManager\": \"pnpm@11[.]1[.]1\"$" package.json
               npm install --prefix /artifact/pnpm-bootstrap --no-save --package-lock=false \
                 --ignore-scripts --no-audit --no-fund pnpm@11.1.1
               pnpm=/artifact/pnpm-bootstrap/node_modules/.bin/pnpm
