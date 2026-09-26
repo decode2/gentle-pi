@@ -169,8 +169,8 @@ jobs:
               grep -Fx "# tests 62" /tmp/questionnaire-baseline.tap
               grep -Fx "# pass 57" /tmp/questionnaire-baseline.tap
               grep -Fx "# fail 5" /tmp/questionnaire-baseline.tap
-              test "$(grep -E '^ok [0-9]+ - ' /tmp/questionnaire-baseline.tap | grep -vc ' - UM-02:')" -eq 56
-              test "$(grep -Ec '^not ok [0-9]+ - UM-02:' /tmp/questionnaire-baseline.tap)" -eq 5
+              test "$(grep -E "^ok [0-9]+ - " /tmp/questionnaire-baseline.tap | grep -vc " - UM-02:")" -eq 56
+              test "$(grep -Ec "^not ok [0-9]+ - UM-02:" /tmp/questionnaire-baseline.tap)" -eq 5
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
                 /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
@@ -207,8 +207,8 @@ jobs:
               grep -Fx "# pass 1" /tmp/um02-red.tap
               grep -Fx "# fail 5" /tmp/um02-red.tap
               grep -Fx "# skipped 0" /tmp/um02-red.tap
-              test "$(grep -Ec '^not ok [0-9]+ - UM-02:' /tmp/um02-red.tap)" -eq 5
-              grep -F ' - UM-02: large bracketed paste expands to full text at least 1100 characters' /tmp/um02-red.tap | grep -q '^ok '
+              test "$(grep -Ec "^not ok [0-9]+ - UM-02:" /tmp/um02-red.tap)" -eq 5
+              grep -F " - UM-02: large bracketed paste expands to full text at least 1100 characters" /tmp/um02-red.tap | grep -q "^ok "
               for name in \
                 "typed Shift-Enter newline differs from custom commit and explicit Submit" \
                 "bracketed paste normalizes CRLF CR and tabs" \
