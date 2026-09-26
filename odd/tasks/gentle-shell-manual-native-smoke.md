@@ -82,10 +82,17 @@
 - Strict synthetic RED observed 12/15 stage tests pass and three new route tests fail before implementation. GREEN passed the three focused Node 24 suites 37/37, including wrong digest, wrong/extra manifest, CRC failure, Windows reader/write non-invocation, and Darwin's unchanged reader/staging route. Diagnostics remain fixed safe categories without paths, member names, raw errors, or archive data.
 - Historical official ZIP x64/arm64 pins and pure parser/extraction acceptance were verified independently; this integration does not add native CI evidence. Windows execution/Ready and the parser format on native CI remain unverified.
 
-## Next unit: verify installed package bytes before postinstall
+## Next unit: observational first-party installed-file identity
 
-- In a separate bounded unit, verify every executable and imported file in the installed package against an immutable verified archive buffer, with bounded reads and real non-symlink ancestor checks. Only then may a later authorized scope execute postinstall and verify native Gentle AI provenance.
-- Add independent RED/GREEN tests and stay below 400 diff lines. No package postinstall, Go, binary, setup, launcher, Pi RPC/TUI, or Ready evidence is part of this npm-smoke unit.
+- This plan follows native Windows run `36255410771`: #17's live pinned official ZIP memory validation and scripts-disabled npm install passed. Neither gate compared installed files, and Windows did not execute Pi. SRI proves the published source archive's identity, not installed-tree identity.
+- Using separately exact-SRI-verified Gentle-Pi and Pi archive buffers, compare every published regular first-party member with its corresponding installed-tree file. Use the same bounded buffers whose SRI was verified; enforce fixed archive/member/name/per-file/total-byte limits, safe unique relative names, real non-symlink directory ancestors, and regular non-symlink file leaves. Compare bytes, not just metadata. Emit only fixed allowlisted diagnostics; never disclose paths, member names, URLs, argv, raw errors, or bytes.
+- Treat Pi's nested `node_modules` as `UNVERIFIED`: exclude it from first-party matched/trusted counts and make no identity claim about its contents. The comparison is point-in-time; same-user TOCTOU remains, so it does not establish which bytes may later execute.
+- Separate Linux donor scratch observation: 549 Gentle-Pi and 1,056 Pi first-party files matched at comparison time; 1,367 nested extras were not attested. This is donor-only evidence, not native Windows or Darwin proof. Windows native first-party comparison is pending. Darwin #17 artifact preflight passed, but its member phase failed generically; it supplies no identity-comparison result.
+- This observational unit executes no bytes and performs no postinstall, Go build, setup, launcher, Pi RPC/TUI, or Ready check; it provides no authentication or authorization evidence. A later runtime unit remains separate.
+- [ ] Implement and review bounded archive-to-installed first-party comparison, including fixed-only diagnostics.
+- [ ] Obtain native Windows first-party comparison evidence.
+- [ ] Obtain native Darwin first-party comparison evidence.
+- Add focused RED/GREEN tests; keep the eventual implementation unit below 400 diff lines. No package postinstall, Go, binary, setup, launcher, Pi RPC/TUI, or Ready evidence is part of this unit.
 
 ## Runtime evidence reserved for a later unit
 
