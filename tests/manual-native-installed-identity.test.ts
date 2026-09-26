@@ -1,11 +1,14 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { gzipSync } from "node:zlib";
-import { posix } from "node:path";
+import { basename, dirname, join, parse, resolve } from "node:path";
 import { readFile } from "node:fs/promises";
 import test from "node:test";
 
 const moduleUrl = new URL("../scripts/manual-native-installed-identity.mjs", import.meta.url);
+const SCRATCH_ROOT = resolve(parse(process.cwd()).root, "scratch");
+const PREFIX = join(SCRATCH_ROOT, "prefix");
+const PREFLIGHT = join(SCRATCH_ROOT, "preflight");
 const api = () => import(moduleUrl.href);
 
 function archive(entries) {
@@ -29,23 +32,24 @@ function archive(entries) {
 const sri = (bytes) => `sha512-${createHash("sha512").update(bytes).digest("base64")}`;
 
 function virtualIO(root, files = {}, extra = {}) {
-	const directories = new Set(["/", "/scratch", "/scratch/prefix", posix.dirname(root), root, ...Object.keys(files).map((path) => posix.dirname(path))]);
+	const filesystemRoot = parse(SCRATCH_ROOT).root;
+	const directories = new Set([filesystemRoot, SCRATCH_ROOT, PREFIX, dirname(root), root, ...Object.keys(files).map(dirname)]);
 	for (const original of [...directories]) {
-		let path = original, parent = posix.dirname(path);
-		while (parent !== path) { directories.add(parent); path = parent; parent = posix.dirname(path); }
+		let path = original, parent = dirname(path);
+		while (parent !== path) { directories.add(parent); path = parent; parent = dirname(path); }
 	}
 	const links = new Set(extra.links ?? []), contents = new Map(Object.entries(files).map(([path, bytes]) => [path, Buffer.from(bytes)]));
 	return {
 		assertDirectoryChain: async (path) => {
-			let current = path;
-			while (current !== "/") {
+			let current = resolve(path);
+			while (current !== filesystemRoot) {
 				if (links.has(current) || !directories.has(current)) throw new Error("unsafe installed directory");
-				current = posix.dirname(current);
+				current = dirname(current);
 			}
 		},
 		readdir: async (directory) => {
 			const names = new Set();
-			for (const path of [...directories, ...contents.keys(), ...links]) if (posix.dirname(path) === directory) names.add(posix.basename(path));
+			for (const path of [...directories, ...contents.keys(), ...links]) if (dirname(path) === directory) names.add(basename(path));
 			return [...names];
 		},
 		lstat: async (path) => ({
@@ -56,6 +60,14 @@ function virtualIO(root, files = {}, extra = {}) {
 		readFile: async (_layout, path) => contents.get(path),
 	};
 }
+
+test("virtual installed paths use the current platform's canonical absolute root", () => {
+	const filesystemRoot = parse(process.cwd()).root;
+	assert.ok(filesystemRoot);
+	assert.equal(SCRATCH_ROOT, resolve(filesystemRoot, "scratch"));
+	assert.equal(PREFIX, join(SCRATCH_ROOT, "prefix"));
+	assert.equal(parse(SCRATCH_ROOT).root, filesystemRoot);
+});
 
 test("workflow runs installed-byte identity verification only after npm install smoke", async () => {
 	const workflow = await readFile(new URL("../.github/workflows/manual-native-smoke.yml", import.meta.url), "utf8");
@@ -93,10 +105,12 @@ test("archive limits bound decompression, entry count, entry length, and aggrega
 });
 
 test("installed tree rejects symlinked ancestors, first-party files, and nested dependency directories", async () => {
-	const { collectInstalledFiles } = await api(), root = "/scratch/prefix/node_modules/demo", file = `${root}/index.js`;
-	await assert.rejects(collectInstalledFiles({}, root, virtualIO(root, { [file]: Buffer.from("x") }, { links: ["/scratch/prefix/node_modules"] })));
-	await assert.rejects(collectInstalledFiles({}, root, virtualIO(root, {}, { links: [file] })));
-	await assert.rejects(collectInstalledFiles({}, root, virtualIO(root, { [file]: Buffer.from("x") }, { links: [`${root}/node_modules`] }), { allowNestedDependencies: true }));
+	const { collectInstalledFiles } = await api(), root = join(PREFIX, "node_modules", "demo"), file = join(root, "index.js");
+	const layout = { prefix: PREFIX };
+	assert.equal((await collectInstalledFiles(layout, root, virtualIO(root, { [file]: Buffer.from("x") }))).get("index.js").toString(), "x");
+	await assert.rejects(collectInstalledFiles(layout, root, virtualIO(root, { [file]: Buffer.from("x") }, { links: [join(PREFIX, "node_modules")] })));
+	await assert.rejects(collectInstalledFiles(layout, root, virtualIO(root, {}, { links: [file] })));
+	await assert.rejects(collectInstalledFiles(layout, root, virtualIO(root, { [file]: Buffer.from("x") }, { links: [join(root, "node_modules")] }), { allowNestedDependencies: true }));
 });
 
 test("comparison permits only the Pi nested subtree as extra and rejects other files or directories", async () => {
@@ -120,26 +134,26 @@ test("nested Pi dependency entry and byte caps are explicit", async () => {
 });
 
 test("published Pi files match while nested dependencies remain explicitly unverified", async () => {
-	const { verifyPublishedPackageFiles } = await api(), root = "/scratch/prefix/node_modules/@earendil-works/pi-coding-agent";
+	const { verifyPublishedPackageFiles } = await api(), root = join(PREFIX, "node_modules", "@earendil-works", "pi-coding-agent");
 	const bytes = archive([{ name: "package/index.js", content: "published" }]), spec = { name: "@earendil-works/pi-coding-agent", version: "0.85.1", archiveName: "pi.tgz", integrity: sri(bytes) };
 	const io = virtualIO(root, {
-		[`${root}/index.js`]: Buffer.from("published"),
-		[`${root}/node_modules/dependency/index.js`]: Buffer.from("unverified dependency"),
+		[join(root, "index.js")]: Buffer.from("published"),
+		[join(root, "node_modules", "dependency", "index.js")]: Buffer.from("unverified dependency"),
 	});
-	assert.equal(await verifyPublishedPackageFiles({ preflight: "/scratch/preflight", prefix: "/scratch/prefix" }, [spec], { io, readArchive: async () => bytes }), true);
+	assert.equal(await verifyPublishedPackageFiles({ preflight: PREFLIGHT, prefix: PREFIX }, [spec], { io, readArchive: async () => bytes }), true);
 });
 
 test("both package identities require SRI and an unchanged staged archive", async () => {
-	const { verifyPublishedPackageFiles } = await api(), root = "/scratch/prefix/node_modules/gentle-pi", scopedRoot = "/scratch/prefix/node_modules/@earendil-works/pi-coding-agent";
+	const { verifyPublishedPackageFiles } = await api(), root = join(PREFIX, "node_modules", "gentle-pi"), scopedRoot = join(PREFIX, "node_modules", "@earendil-works", "pi-coding-agent");
 	const bytes = archive([{ name: "package/index.js", content: "shell" }]), scopedBytes = archive([{ name: "package/index.js", content: "pi" }]);
 	const specs = [
 		{ name: "gentle-pi", version: "1", archiveName: "gentle-pi.tgz", integrity: sri(bytes) },
 		{ name: "@earendil-works/pi-coding-agent", version: "0.85.1", archiveName: "scope-pi.tgz", integrity: sri(scopedBytes) },
 	];
-	const layout = { preflight: "/scratch/preflight", prefix: "/scratch/prefix" };
+	const layout = { preflight: PREFLIGHT, prefix: PREFIX };
 	let reads = 0;
 	const options = {
-		io: virtualIO(root, { [`${root}/index.js`]: Buffer.from("shell"), [`${scopedRoot}/index.js`]: Buffer.from("pi") }),
+		io: virtualIO(root, { [join(root, "index.js")]: Buffer.from("shell"), [join(scopedRoot, "index.js")]: Buffer.from("pi") }),
 		readArchive: async (_layout, spec) => { reads++; return spec === specs[0] ? bytes : scopedBytes; },
 	};
 	assert.equal(await verifyPublishedPackageFiles(layout, specs, options), true);
