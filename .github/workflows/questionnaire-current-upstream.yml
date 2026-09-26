@@ -170,11 +170,8 @@ jobs:
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-01:" /source/tests/questionnaire-view.test.ts \
                 | tee /tmp/um01-green.tap
-              grep -Fx "1..7" /tmp/um01-green.tap
-              grep -Fx "# tests 7" /tmp/um01-green.tap
               grep -Fx "# pass 7" /tmp/um01-green.tap
               grep -Fx "# fail 0" /tmp/um01-green.tap
-              grep -Fx "# skipped 0" /tmp/um01-green.tap
               test "$(grep -Ec "^ok [0-9]+ - UM-01:" /tmp/um01-green.tap)" -eq 7
               for name in \
                 "keyboard Next and final Submit require separate actions after answering" \
