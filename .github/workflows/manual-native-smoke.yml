@@ -72,6 +72,10 @@ jobs:
       - name: Verify staged npm and official Engram release artifacts only
         run: node scripts/manual-native-preflight.mjs verify
 
+      - name: Probe Darwin native archive-reader path (read-only)
+        if: runner.os == 'macOS'
+        run: node scripts/manual-native-darwin-reader-probe.mjs
+
       - name: Validate official Engram member (Windows memory-only; Darwin scratch stage)
         run: node scripts/manual-native-engram-stage.mjs validate
 

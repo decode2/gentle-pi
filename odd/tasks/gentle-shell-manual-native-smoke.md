@@ -46,6 +46,13 @@
 - Public output remains a closed reason code only: no raw stdout/stderr, paths, arguments, URLs, metadata, or error text. Only whitelisted branded nested stage reasons survive wrapping; arbitrary unbranded nested throws remain `unknown`.
 - Preserved pinned digests/manifests, Windows archive-in-memory-only behavior (no executable staging or ACL changes), Darwin disposable scratch-only staging, and all existing gates. Native CI must pass before any success claim; neither current native failure proves an archive-format root cause.
 
+## Diagnostic follow-up: Darwin native reader executable preflight
+
+- PR#16 run `36254562838` passed live official artifact preflight on macOS, then failed member validation with `member-validation-native-reader-list-executable`. The cause is unknown; do not infer it before another native CI run.
+- Add a read-only, Darwin-only probe immediately after live artifact verification and before member validation. It inspects only `/usr/bin/tar` by `lstat` of `/`, `/usr`, `/usr/bin`, and the leaf, returning only a fixed allowlisted category. It must not invoke tar, read the staged archive, change validation authority, or fail the workflow; the existing validator remains responsible for its ordinary failure.
+- Windows skips the probe. Synthetic injected-`lstat` tests cover each category and hostile-error secrecy; only the CLI path uses OS shortcuts. Strict RED on a fail-closed placeholder failed 3/4 focused tests (no path-chain/category behavior); GREEN passed all 4 with Node `v24.18.0` under `env -i` and isolated HOME/PI/GENTLE/TMP selectors. The probe plus existing member-stage suite passed 16/16. Native CI is required to collect further evidence; the probe alone establishes no cause.
+- Review remediation: explicit root missing/symlink, hostile Proxy/non-Error failure and result, and CLI output/status/reporter/Windows-skip tests. RED observed 5/8 pass and 3 fail (truthy Proxy result accepted and CLI seam absent); GREEN passed 8/8. Combined probe and member-stage suites passed 20/20 under sanitized Node `v24.18.0`; no native tar or Windows runner was invoked.
+
 ## Next unit: verify installed package bytes before postinstall
 
 - In a separate bounded unit, verify every executable and imported file in the installed package against an immutable verified archive buffer, with bounded reads and real non-symlink ancestor checks. Only then may a later authorized scope execute postinstall and verify native Gentle AI provenance.
