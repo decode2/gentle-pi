@@ -1,4 +1,4 @@
-name: Current-upstream questionnaire UM-01 RED
+name: Current-upstream questionnaire UM-01 GREEN
 
 on:
   push:
@@ -27,7 +27,9 @@ jobs:
     env:
       BASE: 2b864a37e5b136cf9ddc6de599b9ffa8817a30e9
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM01_TEST_BLOB: ee33cb25a06afcf42feb64dc647a3e44f163ffd5
+      UM01_TEST_BLOB: ecc198bb9476a4471f06f030de16a0d739c4e540
+      UM01_ASK_TEST_BLOB: 7ed196be37ec582dd915778b9d570f5774053e19
+      UM01_VIEW_BLOB: 683dc02041e2deda9d1e7f82d57cc6d8d688a21a
     steps:
       - name: Checkout exact event revision without credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -36,7 +38,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove RED test identity and current-main parent sources
+      - name: Prove GREEN test/view identities and current-main parent sources
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -48,7 +50,7 @@ jobs:
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts) ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts) ;;
               *) echo "unexpected changed path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
@@ -56,9 +58,8 @@ jobs:
             package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json \
             scripts/check-types.mjs scripts/types-baseline.json \
             extensions/ask-user-question.ts extensions/gentle-ai.ts \
-            lib/questionnaire/questionnaire-view.ts lib/questionnaire/schema.ts \
-            lib/questionnaire/validate.ts lib/native-fullscreen-interaction.ts \
-            tests/ask-user-question.test.ts tests/questionnaire-schema.test.ts \
+            lib/questionnaire/schema.ts lib/questionnaire/validate.ts \
+            lib/native-fullscreen-interaction.ts tests/questionnaire-schema.test.ts \
             tests/gentle-ai.test.ts; do
             base_blob="$(git rev-parse "$BASE:$path")"
             test "$(git rev-parse "HEAD:$path")" = "$base_blob"
@@ -66,7 +67,13 @@ jobs:
           done
           test "$(git rev-parse HEAD:tests/questionnaire-view.test.ts)" = "$UM01_TEST_BLOB"
           test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM01_TEST_BLOB"
-          echo "UM-01 RED checkout=$EXPECTED_SHA base=$BASE test=$UM01_TEST_BLOB producer/view unchanged"
+          for entry in "tests/ask-user-question.test.ts:$UM01_ASK_TEST_BLOB" \
+            "lib/questionnaire/questionnaire-view.ts:$UM01_VIEW_BLOB"; do
+            path="${entry%%:*}"; blob="${entry#*:}"
+            test "$(git rev-parse "HEAD:$path")" = "$blob"
+            test "$(git hash-object -- "$path")" = "$blob"
+          done
+          echo "UM-01 GREEN checkout=$EXPECTED_SHA base=$BASE test=$UM01_TEST_BLOB ask=$UM01_ASK_TEST_BLOB view=$UM01_VIEW_BLOB"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -123,7 +130,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, unchanged baseline, Herdr and seven expected UM-01 failures offline
+      - name: Run strict types, full ask/view, Herdr and seven isolated UM-01 tests offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -149,34 +156,26 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
-                --test-skip-pattern="^UM-01:" \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/questionnaire-baseline.tap
-              grep -Fx "# tests 49" /tmp/questionnaire-baseline.tap
-              grep -Fx "# pass 49" /tmp/questionnaire-baseline.tap
-              grep -Fx "# fail 0" /tmp/questionnaire-baseline.tap
-              grep -Fx "# skipped 0" /tmp/questionnaire-baseline.tap
+                | tee /tmp/questionnaire-green.tap
+              grep -Fx "# tests 56" /tmp/questionnaire-green.tap
+              grep -Fx "# pass 56" /tmp/questionnaire-green.tap
+              grep -Fx "# fail 0" /tmp/questionnaire-green.tap
+              grep -Fx "# skipped 0" /tmp/questionnaire-green.tap
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
                 /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
               grep -Fx "# pass 3" /tmp/herdr.tap
               grep -Fx "# fail 0" /tmp/herdr.tap
-              if node --experimental-strip-types --test --test-reporter=tap \
+              node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-01:" /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/um01-red.tap; then
-                echo "UM-01 unexpectedly passed" >&2; exit 1
-              else
-                test "$?" -eq 1
-              fi
-              grep -Fx "TAP version 13" /tmp/um01-red.tap
-              grep -Fx "1..7" /tmp/um01-red.tap
-              grep -Fx "# tests 7" /tmp/um01-red.tap
-              grep -Fx "# pass 0" /tmp/um01-red.tap
-              grep -Fx "# fail 7" /tmp/um01-red.tap
-              grep -Fx "# cancelled 0" /tmp/um01-red.tap
-              grep -Fx "# skipped 0" /tmp/um01-red.tap
-              test "$(grep -Ec "^not ok [0-9]+ - UM-01:" /tmp/um01-red.tap)" -eq 7
-              test "$(grep -Ec "^not ok [0-9]+ - " /tmp/um01-red.tap)" -eq 7
+                | tee /tmp/um01-green.tap
+              grep -Fx "1..7" /tmp/um01-green.tap
+              grep -Fx "# tests 7" /tmp/um01-green.tap
+              grep -Fx "# pass 7" /tmp/um01-green.tap
+              grep -Fx "# fail 0" /tmp/um01-green.tap
+              grep -Fx "# skipped 0" /tmp/um01-green.tap
+              test "$(grep -Ec "^ok [0-9]+ - UM-01:" /tmp/um01-green.tap)" -eq 7
               for name in \
                 "keyboard Next and final Submit require separate actions after answering" \
                 "earlier answers remain editable until explicit Submit" \
@@ -185,9 +184,9 @@ jobs:
                 "pointer Submit accepts only the visible action hit span" \
                 "pointer Submit delivers latest MULTI selection after commit and custom edit" \
                 "visible Cancel remains distinct from Submit"; do
-                grep -F " - UM-01: $name" /tmp/um01-red.tap | grep -q "^not ok "
+                grep -F " - UM-01: $name" /tmp/um01-green.tap | grep -q "^ok "
               done
-              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um01-red.tap
+              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um01-green.tap
             '
 
       - name: Recheck exact checkout and cleanliness

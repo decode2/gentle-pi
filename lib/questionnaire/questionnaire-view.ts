@@ -56,12 +56,12 @@ interface QuestionState {
 	toggled: Set<number>;
 	answer: AnswerRow | undefined;
 	customDraft: string;
+	actionFocused: boolean;
 }
 
-interface LineOwner {
-	questionIndex: number;
-	rowIndex: number;
-}
+type LineOwner =
+	| { questionIndex: number; rowIndex: number }
+	| { action: "advance" | "cancel"; width: number };
 
 /** Small inline text editor for the free-text row; owns an {@link Input}. */
 class CustomTextEditor extends Container {
@@ -160,7 +160,12 @@ export class QuestionnaireView extends Container implements Focusable {
 			toggled: new Set<number>(),
 			answer: undefined,
 			customDraft: "",
+			actionFocused: false,
 		}));
+		// An optional MULTI can be submitted without choosing an option.
+		for (const [index, question] of options.questions.entries()) {
+			if (question.multiSelect) this.states[index]!.actionFocused = true;
+		}
 		this.editor = new CustomTextEditor(
 			options.keybindings,
 			(value) => this.submitCustom(value),
@@ -242,7 +247,8 @@ export class QuestionnaireView extends Container implements Focusable {
 		}
 
 		if (this.matches(data, "tui.select.confirm")) {
-			this.commit();
+			if (this.states[this.focusedQuestion]?.actionFocused) this.advance();
+			else this.commit();
 		}
 	}
 
@@ -251,7 +257,20 @@ export class QuestionnaireView extends Container implements Focusable {
 		if (this.editingQuestion !== undefined) return this.editor.handleMouse(event);
 
 		const owner = this.lineOwners[event.y];
-		if (!owner || owner.rowIndex < 0 || event.button !== "left") return undefined;
+		if (!owner || event.button !== "left") return undefined;
+		if ("action" in owner) {
+			if (event.x < 0 || event.x >= owner.width) return undefined;
+			if (event.type === "press") {
+				return { handled: true as const, focus: true, render: false, target: this.mouseTarget(event) };
+			}
+			if (event.type === "click") {
+				if (owner.action === "cancel") this.finish({ cancelled: true, answers: this.collectedAnswers() });
+				else this.advance();
+				return { handled: true as const, render: true, target: this.mouseTarget(event) };
+			}
+			return undefined;
+		}
+		if (owner.rowIndex < 0) return undefined;
 
 		if (event.type === "press") {
 			const changed = this.focusRow(owner.questionIndex, owner.rowIndex);
@@ -313,6 +332,20 @@ export class QuestionnaireView extends Container implements Focusable {
 		}
 
 		push("");
+		if (this.editingQuestion === undefined) {
+			const action = this.focusedQuestion === this.questions.length - 1 ? "Submit" : "Next";
+			for (const [label, kind] of [[action, "advance"], ["Cancel", "cancel"]] as const) {
+				const styled = kind === "advance" && this.states[this.focusedQuestion]?.actionFocused
+					? this.accent(label) : this.theme.fg("muted", label);
+				let remaining = visibleWidth(label);
+				for (const line of this.wrap(styled, viewport)) {
+					lines.push(line);
+					const hitWidth = Math.min(visibleWidth(line), remaining);
+					owners.push({ action: kind, width: hitWidth });
+					remaining -= hitWidth;
+				}
+			}
+		}
 		push(this.hint());
 
 		this.lineOwners = owners;
@@ -392,7 +425,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		const question = this.questions[this.focusedQuestion];
 		const parts = ["↑↓ move"];
 		if (question?.multiSelect) parts.push("space toggle");
-		parts.push("enter select", "tab switch", "esc cancel");
+		parts.push("enter select / action", "tab switch", "esc cancel");
 		return this.theme.fg("dim", parts.join(" · "));
 	}
 
@@ -427,6 +460,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		if (!question || !state) return;
 		const total = question.options.length + 1;
 		state.cursor = Math.max(0, Math.min(total - 1, state.cursor + delta));
+		state.actionFocused = false;
 		this.invalidate();
 	}
 
@@ -440,6 +474,14 @@ export class QuestionnaireView extends Container implements Focusable {
 		}
 		if (state.toggled.has(state.cursor)) state.toggled.delete(state.cursor);
 		else state.toggled.add(state.cursor);
+		if (state.answer) {
+			const selected = [...state.toggled].sort((a, b) => a - b)
+				.map((index) => question.options[index]!.label);
+			// MULTI always records an array; custom omits it when no options remain.
+			if (state.answer.kind === "custom" && selected.length === 0) delete state.answer.selected;
+			else state.answer.selected = selected;
+		}
+		state.actionFocused = false;
 		this.invalidate();
 	}
 
@@ -450,6 +492,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		const changed = this.focusedQuestion !== questionIndex || state.cursor !== rowIndex;
 		this.focusedQuestion = questionIndex;
 		state.cursor = Math.max(0, Math.min(question.options.length, rowIndex));
+		state.actionFocused = false;
 		this.invalidate();
 		return changed;
 	}
@@ -469,7 +512,6 @@ export class QuestionnaireView extends Container implements Focusable {
 			const toggled = [...state.toggled]
 				.filter((index) => index < customIndex)
 				.sort((a, b) => a - b);
-			if (toggled.length === 0) return;
 			state.answer = {
 				questionIndex: this.focusedQuestion,
 				question: question.question,
@@ -545,14 +587,32 @@ export class QuestionnaireView extends Container implements Focusable {
 	}
 
 	private afterCommit(questionIndex: number): void {
-		if (this.states.every((state) => state.answer !== undefined)) {
-			this.finish({ cancelled: false, answers: this.collectedAnswers() });
+		const state = this.states[questionIndex];
+		if (state) state.actionFocused = true;
+		this.invalidate();
+	}
+
+	private advance(): void {
+		const question = this.questions[this.focusedQuestion];
+		const state = this.states[this.focusedQuestion];
+		if (!question || !state) return;
+		if (!state.answer && question.multiSelect) {
+			state.answer = {
+				questionIndex: this.focusedQuestion,
+				question: question.question,
+				kind: "multi",
+				answer: null,
+				selected: [...state.toggled].sort((a, b) => a - b).map((index) => question.options[index]!.label),
+			};
+		}
+		if (!state.answer) return;
+		if (this.focusedQuestion === this.questions.length - 1) {
+			if (this.states.every((entry) => entry.answer !== undefined)) {
+				this.finish({ cancelled: false, answers: this.collectedAnswers() });
+			}
 			return;
 		}
-		// Advance to the first unanswered question so a commit is visible and the
-		// tab strip keeps moving; committed answers stay reachable with Tab.
-		const next = this.states.findIndex((state) => state.answer === undefined);
-		if (next !== -1 && next !== questionIndex) this.focusedQuestion = next;
+		this.focusedQuestion++;
 		this.invalidate();
 	}
 

@@ -303,7 +303,9 @@ test("real key sequences drive the cursor and commit in legacy and application-c
 		view.handleInput(down);
 		assert.match(render(view), /❯ Beta/, `down sequence ${JSON.stringify(down)} should move the cursor`);
 		view.handleInput(KEY.enter);
-		assert.equal(completed.length, 1, `enter after ${JSON.stringify(down)} should commit`);
+		assert.equal(completed.length, 0, `select after ${JSON.stringify(down)} is not Submit`);
+		view.handleInput(KEY.enter);
+		assert.equal(completed.length, 1, `explicit Submit after ${JSON.stringify(down)} should finish`);
 		assert.deepEqual(view.getResult().answers, [
 			{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Beta" },
 		]);
@@ -326,20 +328,27 @@ test("the injected KeybindingsManager drives the same navigation and commit", ()
 	view.handleInput(KEY.down[0]);
 	assert.match(render(view), /❯ Beta/);
 	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 0);
+	view.handleInput(KEY.enter);
 	assert.equal(completed.length, 1);
 	assert.equal(view.getResult().answers[0]?.answer, "Beta");
 });
 
-test("single-select commits on Enter and advances to the next unanswered question", () => {
+test("single-select records on Enter and advances only on explicit Next", () => {
 	const { view, completed } = viewWithResult(two());
 
 	view.handleInput(KEY.enter);
 	assert.equal(completed.length, 0, "the questionnaire is not done while a question is unanswered");
 	assert.equal(view.getResult().answers.length, 1);
-	assert.equal(view.activeQuestion, 1, "a commit advances to the next unanswered question");
+	assert.equal(view.activeQuestion, 0, "recording an answer does not activate Next");
+	assert.match(render(view), /\bNext\b/);
+	view.handleInput(KEY.enter);
+	assert.equal(view.activeQuestion, 1);
 	assert.match(render(view), /\[2\/2\]/);
 	assert.match(render(view), /❯ Gamma/);
 
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 0);
 	view.handleInput(KEY.enter);
 	assert.equal(completed.length, 1);
 	assert.deepEqual(view.getResult().answers, [
@@ -348,15 +357,13 @@ test("single-select commits on Enter and advances to the next unanswered questio
 	]);
 });
 
-test("multi-select toggles with space and requires a non-empty selection to commit", () => {
+test("multi-select toggles with space and commits the selected options before Submit", () => {
 	const { view, completed } = viewWithResult([
 		question("Pick?", [option("One"), option("Two")], { multiSelect: true }),
 	]);
 	assert.match(render(view), /\[ \] One/);
 
-	view.handleInput(KEY.enter);
-	assert.equal(completed.length, 0, "an empty multiSelect commit is a no-op");
-	assert.equal(view.getResult().answers.length, 0);
+	assert.match(render(view), /\bSubmit\b/, "an empty multiSelect can also be submitted");
 
 	view.handleInput(KEY.space);
 	assert.match(render(view), /\[x\] One/);
@@ -368,6 +375,8 @@ test("multi-select toggles with space and requires a non-empty selection to comm
 	view.handleInput(KEY.space);
 	assert.match(render(view), /\[ \] Two/);
 
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 0);
 	view.handleInput(KEY.enter);
 	assert.equal(completed.length, 1);
 	assert.deepEqual(view.getResult().answers, [
@@ -517,6 +526,10 @@ test("pointer press focuses a row and click commits it", () => {
 	const afterPress = view.render(100);
 	const betaRowAfterPress = afterPress.findIndex((line) => line.includes("Beta"));
 	assert.equal(view.handleMouse(mouseEvent(afterPress, betaRowAfterPress, "click"))?.handled, true);
+	assert.equal(completed.length, 0);
+	const afterChoice = view.render(100);
+	const submitRow = afterChoice.findIndex((line) => line.includes("Submit"));
+	assert.equal(view.handleMouse(mouseEvent(afterChoice, submitRow, "click"))?.handled, true);
 	assert.equal(completed.length, 1);
 	assert.equal(view.getResult().answers[0]?.answer, "Beta");
 });
@@ -545,6 +558,8 @@ test("pointer click toggles a multi-select option instead of committing", () => 
 	assert.match(render(view), /\[x\] One/);
 	assert.match(render(view), /\[x\] Two/);
 
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 0);
 	view.handleInput(KEY.enter);
 	assert.equal(completed.length, 1);
 	assert.deepEqual(view.getResult().answers, [
