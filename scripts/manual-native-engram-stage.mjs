@@ -173,7 +173,7 @@ async function readBoundedRegularFile(path, allowedRoot, maxBytes) {
 }
 
 function tarExecutable(platform, environment = process.env) {
-	if (platform === "darwin") return "/usr/bin/tar";
+	if (platform === "darwin") return "/usr/bin/bsdtar";
 	if (platform === "win32") {
 		const root = environment.SystemRoot ?? environment.WINDIR;
 		if (!root || !win32.isAbsolute(root)) fail("native archive reader unavailable");
@@ -182,10 +182,10 @@ function tarExecutable(platform, environment = process.env) {
 	fail("unsupported native platform");
 }
 
-async function checkReaderExecutable(platform, environment) {
+export async function checkReaderExecutable(platform, environment, dependencies = {}) {
 	const executable = tarExecutable(platform, environment);
-	await assertRealDirectoryChain(dirname(executable));
-	const reader = await lstat(executable);
+	await (dependencies.assertRealDirectoryChain ?? assertRealDirectoryChain)(dirname(executable));
+	const reader = await (dependencies.lstat ?? lstat)(executable);
 	if (!reader.isFile() || reader.isSymbolicLink()) fail("native archive reader unavailable");
 	return executable;
 }
