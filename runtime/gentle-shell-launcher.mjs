@@ -555,7 +555,7 @@ export function hasEnabledQuestionOwner(text                    )          {
 		return false;
 	}
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
-	const fields                            = value                           ;
+	const fields = value                           ;
 	return Object.keys(fields).length === 3 && fields.version === 1 && fields.owner === "gentle-pi" && fields.enabled === true;
 }
 
