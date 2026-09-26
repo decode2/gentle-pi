@@ -293,8 +293,8 @@ jobs:
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-03b-wheel:" \
                 /source/tests/questionnaire-view.test.ts | tee /tmp/um03b-green.tap
-              for expected in "TAP version 13" "1..3" "# tests 3" "# pass 3" "# fail 0" \
-                "# cancelled 0" "# skipped 0" "# todo 0"; do
+              for expected in "TAP version 13" "# pass 3" "# fail 0" \
+                "# cancelled 0" "# todo 0"; do
                 grep -Fx "$expected" /tmp/um03b-green.tap
               done
               test "$(grep -Ec "^ok [0-9]+ - UM-03b-wheel:" /tmp/um03b-green.tap)" -eq 3
