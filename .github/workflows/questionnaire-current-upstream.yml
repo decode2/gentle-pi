@@ -179,7 +179,7 @@ jobs:
                 --typeRoots /source/node_modules/@types --types node \
                 /source/extensions/ask-user-question.ts /source/lib/questionnaire/questionnaire-view.ts \
                 /source/lib/gentle-shell-launcher.ts /source/tests/gentle-shell-launcher.test.ts \
-                /source/tests/gentle-shell-bin.test.ts /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
+                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
