@@ -372,9 +372,9 @@ jobs:
             --cap-drop=ALL --security-opt=no-new-privileges --user 1000:1000 -w /artifact/consumer "$IMAGE" \
             env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             HOME=/artifact/home USERPROFILE=/artifact/home TMPDIR=/artifact/tmp \
-            CI=true PI_OFFLINE=1 RUNNER_TEMP=/artifact EXPECTED_SHA="$EXPECTED_SHA" \
+            CI=true PI_OFFLINE=1 RUNNER_TEMP=/artifact EXPECTED_SHA="$EXPECTED_SHA" UM06B_PHASE=probe \
             /bin/bash -euo pipefail -c '
-              node --test --test-reporter=tap /source/tests/hosted-questionnaire-packed-discovery.mjs probe \
+              node --test --test-reporter=tap /source/tests/hosted-questionnaire-packed-discovery.mjs \
                 | tee /artifact/um06b.tap
               grep -Fx "# tests 1" /artifact/um06b.tap
               grep -Fx "# pass 1" /artifact/um06b.tap

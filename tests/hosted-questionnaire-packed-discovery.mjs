@@ -34,7 +34,7 @@ if (process.argv[2] === "acquire") {
 	assert.equal(JSON.parse(readFileSync(join(installed, "package.json"))).version, JSON.parse(readFileSync(join(root, "package.json"))).version);
 	writeFileSync(receiptPath, JSON.stringify({ filename: packed[0].filename, integrity: packed[0].integrity, sha: process.env.EXPECTED_SHA }) + "\n");
 	console.log(`UM-06b acquired packed=${packed[0].filename} sha=${process.env.EXPECTED_SHA} scripts=false`);
-} else if (process.argv[2] === "probe") {
+} else if (process.env.UM06B_PHASE === "probe") {
 	test("UM-06b: installed tarball default package discovery gates questionnaire by disposable owner", () => {
 		const sdkRoot = realpathSync(join(root, "node_modules/@earendil-works/pi-coding-agent"));
 		const sdk = JSON.parse(readFileSync(join(sdkRoot, "package.json")));
@@ -87,5 +87,5 @@ if (process.argv[2] === "acquire") {
 		}
 	});
 } else {
-	throw new Error("expected acquire or probe phase");
+	throw new Error("expected acquire argument or probe environment");
 }
