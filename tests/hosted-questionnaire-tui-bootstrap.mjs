@@ -42,7 +42,7 @@ test("UM-06a: explicit-path real Pi CLI TUI session_start sees exactly owned que
 				NPM_CONFIG_GLOBALCONFIG: join(sandbox, "global-npmrc"),
 				TMPDIR: sandbox, TMP: sandbox, TEMP: sandbox, UM06A_TRACE: trace,
 			};
-			const child = spawnSync("python3", [join(fixture, "pty.py"), process.execPath, cli,
+			const child = spawnSync("python3", [join(fixture, "driver.py"), process.execPath, cli,
 				join(root, "extensions/ask-user-question.ts"), join(fixture, "trace.ts"), trace],
 				{ env, cwd: root, encoding: "utf8", timeout: 55_000, maxBuffer: 256 * 1024 });
 			assert.ifError(child.error);
