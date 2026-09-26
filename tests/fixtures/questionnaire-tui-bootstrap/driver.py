@@ -25,6 +25,7 @@ os.close(slave)
 output = bytearray()
 deadline = time.monotonic() + 15
 saw_start = False
+target = '"phase":"post_session_start"' if os.environ.get("UM06B_WAIT_PHASE") else '"phase":"session_start"'
 try:
     while time.monotonic() < deadline and child.poll() is None:
         readable, _, _ = select.select([master], [], [], 0.1)
@@ -36,7 +37,7 @@ try:
                 break
         if not saw_start and os.path.exists(trace):
             with open(trace) as receipt:
-                saw_start = '"phase":"session_start"' in receipt.read()
+                saw_start = target in receipt.read()
             if saw_start:
                 os.write(master, b"/exit\r")
     deadline_reached = child.poll() is None

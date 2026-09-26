@@ -68,6 +68,7 @@ if (process.argv[2] === "acquire") {
 					NPM_CONFIG_CACHE: join(sandbox, "npm-cache"), NPM_CONFIG_USERCONFIG: join(sandbox, "npmrc"),
 					NPM_CONFIG_GLOBALCONFIG: join(sandbox, "global-npmrc"),
 					TMPDIR: sandbox, TMP: sandbox, TEMP: sandbox, UM06A_TRACE: trace,
+					UM06B_WAIT_PHASE: "post_session_start",
 				};
 				const child = spawnSync("python3", [join(root, "tests/fixtures/questionnaire-tui-bootstrap/driver.py"),
 					process.execPath, cli, join(root, "tests/fixtures/questionnaire-tui-bootstrap/trace.ts"), trace],
@@ -77,10 +78,10 @@ if (process.argv[2] === "acquire") {
 				const report = JSON.parse(child.stdout);
 				assert.equal(report.started, true, JSON.stringify(report));
 				const records = report.trace.trim().split("\n").map(JSON.parse);
-				assert.deepEqual(records.map((item) => item.phase), ["factory", "session_start"], JSON.stringify(report));
+				assert.deepEqual(records.map((item) => item.phase), ["factory", "session_start", "post_session_start"], JSON.stringify(report));
 				assert.equal(records[1].mode, "tui", JSON.stringify(report));
-				assert.deepEqual(records[1].tools, owned ? ["ask_user_question"] : [], JSON.stringify(report));
-				console.log(`UM-06b packed-default owned=${owned} sdk=${sdk.version} mode=tui tools=${JSON.stringify(records[1].tools)} deadline=${report.deadline_reached} exit=${report.exit} modelStarts=0`);
+				assert.deepEqual(records[2].tools, owned ? ["ask_user_question"] : [], JSON.stringify(report));
+				console.log(`UM-06b packed-default owned=${owned} sdk=${sdk.version} mode=tui tools=${JSON.stringify(records[2].tools)} deadline=${report.deadline_reached} exit=${report.exit} modelStarts=0`);
 			}
 		} finally {
 			rmSync(temporary, { recursive: true, force: true });
