@@ -94,6 +94,12 @@
 - [ ] Obtain native Darwin first-party comparison evidence.
 - Add focused RED/GREEN tests; keep the eventual implementation unit below 400 diff lines. No package postinstall, Go, binary, setup, launcher, Pi RPC/TUI, or Ready evidence is part of this unit.
 
+## Follow-up: native first-party identity fixture portability
+
+- Native #20 run `36256312875` failed on Windows before artifact validation in `published Pi files match while nested dependencies remain explicitly unverified` and `both package identities require SRI and an unchanged staged archive`, reporting the fixed category `unsafe installed package`. Darwin passed those same synthetic tests, then failed later during anonymous official metadata preflight; it produced no identity-comparison result.
+- The synthetic virtual filesystem hardcoded POSIX `/scratch` paths and `posix.dirname`, while the unchanged verifier uses platform-native `path.resolve`, `relative`, and `sep`. On Windows those fixture keys did not match the verifier's native paths. The test-only correction uses a canonical absolute scratch root from the current filesystem root and native path helpers, plus a small portability assertion. Production verification, byte comparisons, symlink assertions, and all eight first-party donor tests remain unchanged.
+- No tests or scratch writes were run by this package-owned writer; the parent will run the isolated Linux synthetic suite. This correction is not native Windows identity evidence. Re-run native Windows CI before making any Windows comparison claim; Darwin's anonymous metadata-preflight failure remains separate.
+
 ## Runtime evidence reserved for a later unit
 
 - Use a native macOS runner and a native Windows runner with fresh disposable HOME/config/npm/cache/agent directories and an empty project cwd. No global npm install, user config, real account credentials, or published-package lifecycle script may execute before inspection.
