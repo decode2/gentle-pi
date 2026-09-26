@@ -156,12 +156,21 @@ jobs:
                 /source/extensions/ask-user-question.ts /source/lib/questionnaire/questionnaire-view.ts \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
-              node --experimental-strip-types --test --test-reporter=tap \
-                --test-name-pattern="^(?!UM-02:)" \
+              baseline_status=0
+              if node --experimental-strip-types --test --test-reporter=tap \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/questionnaire-baseline.tap
-              grep -Fx "# pass 56" /tmp/questionnaire-baseline.tap
-              grep -Fx "# fail 0" /tmp/questionnaire-baseline.tap
+                > /tmp/questionnaire-baseline.tap 2>&1; then
+                baseline_status=0
+              else
+                baseline_status=$?
+              fi
+              cat /tmp/questionnaire-baseline.tap
+              test "$baseline_status" -eq 1
+              grep -Fx "# tests 62" /tmp/questionnaire-baseline.tap
+              grep -Fx "# pass 57" /tmp/questionnaire-baseline.tap
+              grep -Fx "# fail 5" /tmp/questionnaire-baseline.tap
+              test "$(grep -E '^ok [0-9]+ - ' /tmp/questionnaire-baseline.tap | grep -vc ' - UM-02:')" -eq 56
+              test "$(grep -Ec '^not ok [0-9]+ - UM-02:' /tmp/questionnaire-baseline.tap)" -eq 5
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
                 /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
@@ -195,14 +204,14 @@ jobs:
               cat /tmp/um02-red.tap
               test "$um02_status" -eq 1
               grep -Fx "# tests 6" /tmp/um02-red.tap
-              grep -Fx "# pass 0" /tmp/um02-red.tap
-              grep -Fx "# fail 6" /tmp/um02-red.tap
+              grep -Fx "# pass 1" /tmp/um02-red.tap
+              grep -Fx "# fail 5" /tmp/um02-red.tap
               grep -Fx "# skipped 0" /tmp/um02-red.tap
-              test "$(grep -Ec "^not ok [0-9]+ - UM-02:" /tmp/um02-red.tap)" -eq 6
+              test "$(grep -Ec '^not ok [0-9]+ - UM-02:' /tmp/um02-red.tap)" -eq 5
+              grep -F ' - UM-02: large bracketed paste expands to full text at least 1100 characters' /tmp/um02-red.tap | grep -q '^ok '
               for name in \
                 "typed Shift-Enter newline differs from custom commit and explicit Submit" \
                 "bracketed paste normalizes CRLF CR and tabs" \
-                "large bracketed paste expands to full text at least 1100 characters" \
                 "drafts and caret remain separate across Tab Esc and reopen" \
                 "MULTI retains toggles with custom multiline text until explicit Submit" \
                 "editor pointer owns text target and restores caret position"; do
