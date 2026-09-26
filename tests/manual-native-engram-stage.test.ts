@@ -267,6 +267,53 @@ test("preserves only stage-approved nested diagnostics", async () => {
 	}
 });
 
+test("preserves safe Darwin list, verbose, and manifest failures through the outer extraction wrapper", async () => {
+	const archive = Buffer.from("verified tar archive");
+	const archiveName = "engram_2.1.0_darwin_arm64.tar.gz";
+	const list = Buffer.from("tools/cloud-sync-projects.ps1\ntools/cloud-sync-projects.sh\nengram\n");
+	const verbose = Buffer.from("-script\n-script\n-binary\n");
+	const throughOuter = (reader) => staging.withFailureReason("native-reader-extract", () =>
+		staging.stageVerifiedArchiveMember(archive, { name: archiveName }, "darwin", "arm64", "/synthetic", {
+			runNativeReader: reader,
+			stageDarwin: async () => {},
+		}));
+	const outputReader = (phase, output) => async (_bytes, _args, _cwd, _limit, { operation }) => {
+		if (operation === phase) return output;
+		return operation === "list" ? list : operation === "verbose" ? verbose : Buffer.from("binary");
+	};
+	for (const [phase, bytes, kind] of [
+		...["list", "verbose"].flatMap((name) => [
+			[name, Buffer.from([0xff]), "invalid-utf8"],
+			[name, Buffer.alloc(0), "empty-output"],
+			[name, Buffer.from("member"), "newline"],
+			[name, Buffer.from("member\n\n"), "empty-output"],
+			[name, Buffer.from("member\rbroken\n"), "malformed-output"],
+		]),
+	]) {
+		const error = await throughOuter(outputReader(phase, bytes)).catch((failure) => failure);
+		assertFailureCode(error, `member-validation-native-reader-${phase}-${kind}`);
+	}
+	for (const phase of ["list", "verbose"]) {
+		const error = await throughOuter((_bytes, args, cwd, limit, { operation }) => staging.runNativeReader(
+			archive, args, cwd, limit, readerDependencies({
+				operation,
+				spawnSync: () => {
+					if (operation === phase) throw new Error("HOSTILE_SENTINEL");
+					return { status: 0, stdout: operation === "list" ? list : verbose };
+				},
+			}),
+		)).catch((failure) => failure);
+		assertFailureCode(error, `member-validation-native-reader-${phase}-spawn`);
+	}
+	const manifestError = await throughOuter(outputReader("list", Buffer.from("wrong\n"))).catch((failure) => failure);
+	assertFailureCode(manifestError, "member-validation-native-reader-manifest");
+	const invocationError = await staging.withFailureReason("native-reader-extract", () =>
+		staging.withFailureReason("native-reader-invocation", async () => { throw new Error("HOSTILE_SENTINEL"); })).catch((failure) => failure);
+	assertFailureCode(invocationError, "member-validation-native-reader-invocation");
+	const hostileError = await throughOuter(async () => { throw new Error("HOSTILE_SENTINEL /private/path"); }).catch((failure) => failure);
+	assertFailureCode(hostileError, "member-validation-native-reader-extract");
+});
+
 test("refuses symlinked filesystem leaves and creates output exclusively without following links", () => {
 	assert.throws(() => assertRegularLeaf({ isFile: () => true, isSymbolicLink: () => true, size: 1 }, 10), /unsafe staged binary leaf/);
 	assert.throws(() => assertRegularLeaf({ isFile: () => true, isSymbolicLink: () => false, size: 11 }, 10), /oversized staged artifact/);
