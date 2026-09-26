@@ -8,13 +8,16 @@ import subprocess
 import sys
 import time
 
-node, cli, producer, observer, trace = sys.argv[1:]
+node, cli, *extensions, trace = sys.argv[1:]
+assert len(extensions) in (1, 2)
+# One explicit observer means package discovery is on; two paths preserve UM-06a.
+flags = ["--no-extensions"] if len(extensions) == 2 else []
 master, slave = pty.openpty()
 child = subprocess.Popen(
-    [node, cli, "--offline", "--no-approve",
-     "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-themes",
+    [node, cli, "--offline", "--no-approve", *flags,
+     "--no-skills", "--no-prompt-templates", "--no-themes",
      "--no-context-files", "--no-session", "--tui-mode", "regular",
-     "--extension", producer, "--extension", observer],
+     *(part for extension in extensions for part in ("--extension", extension))],
     stdin=slave, stdout=slave, stderr=slave, start_new_session=True,
     env=os.environ.copy(),
 )

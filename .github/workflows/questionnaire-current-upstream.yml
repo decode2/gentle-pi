@@ -1,9 +1,10 @@
-name: Current-upstream questionnaire UM-06a hosted TUI bootstrap
+name: Current-upstream questionnaire UM-06b hosted packed discovery
 
 on:
   push:
     branches:
       - test/questionnaire-hosted-tui-bootstrap-um06a
+      - test/questionnaire-packed-discovery-um06b
   pull_request:
     branches:
       - main
@@ -19,7 +20,8 @@ jobs:
        github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
       (github.event_name == 'push' ||
-       (github.head_ref == 'test/questionnaire-hosted-tui-bootstrap-um06a' &&
+       ((github.head_ref == 'test/questionnaire-hosted-tui-bootstrap-um06a' ||
+         github.head_ref == 'test/questionnaire-packed-discovery-um06b') &&
         (github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-shell' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-pi')))
@@ -41,7 +43,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove UM-06a infrastructure-only diff and frozen producer identity
+      - name: Prove UM-06b infrastructure-only diff and frozen producer identity
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -55,13 +57,13 @@ jobs:
           test "$(git merge-base "$RED_BASE" HEAD)" = "$RED_BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/hosted-questionnaire-tui-bootstrap.mjs|tests/fixtures/questionnaire-tui-bootstrap/*) ;;
-              *) echo "unexpected UM-06a change: $path" >&2; exit 1 ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/hosted-questionnaire-tui-bootstrap.mjs|tests/hosted-questionnaire-packed-discovery.mjs|tests/fixtures/questionnaire-tui-bootstrap/*) ;;
+              *) echo "unexpected UM-06b change: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$RED_BASE" HEAD)
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts|extensions/ask-user-question.ts|tests/hosted-questionnaire-tui-bootstrap.mjs|tests/fixtures/questionnaire-tui-bootstrap/*) ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts|extensions/ask-user-question.ts|tests/hosted-questionnaire-tui-bootstrap.mjs|tests/hosted-questionnaire-packed-discovery.mjs|tests/fixtures/questionnaire-tui-bootstrap/*) ;;
               *) echo "unexpected changed path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
@@ -310,6 +312,26 @@ jobs:
               grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um05a-green.tap
             '
 
+      - name: Pack and install exact checkout in disposable consumer without scripts
+        shell: bash
+        env:
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = "$IMAGE_ID"
+          source="$RUNNER_TEMP/questionnaire-baseline/source"
+          docker run --rm --network=bridge --read-only \
+            --mount "type=bind,source=$source,target=/source,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/questionnaire-baseline,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --cap-drop=ALL --security-opt=no-new-privileges --user 1000:1000 -w /source "$IMAGE" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/artifact/home TMPDIR=/artifact/tmp NPM_CONFIG_CACHE=/artifact/npm-cache \
+            NPM_CONFIG_USERCONFIG=/artifact/home/user.npmrc NPM_CONFIG_GLOBALCONFIG=/artifact/home/global.npmrc \
+            CI=true RUNNER_TEMP=/artifact EXPECTED_SHA="$EXPECTED_SHA" \
+            node /source/tests/hosted-questionnaire-packed-discovery.mjs acquire
+
       - name: Probe real CLI TUI session_start and explicit-path discovery offline
         shell: bash
         env:
@@ -332,6 +354,31 @@ jobs:
               grep -Fx "# tests 1" /tmp/um06a.tap
               grep -Fx "# pass 1" /tmp/um06a.tap
               grep -Fx "# fail 0" /tmp/um06a.tap
+            '
+
+      - name: Probe installed package default discovery and owner gate offline
+        shell: bash
+        env:
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+          EXPECTED_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = "$IMAGE_ID"
+          source="$RUNNER_TEMP/questionnaire-baseline/source"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$source,target=/source,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/questionnaire-baseline,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --cap-drop=ALL --security-opt=no-new-privileges --user 1000:1000 -w /artifact/consumer "$IMAGE" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/artifact/home USERPROFILE=/artifact/home TMPDIR=/artifact/tmp \
+            CI=true PI_OFFLINE=1 RUNNER_TEMP=/artifact EXPECTED_SHA="$EXPECTED_SHA" \
+            /bin/bash -euo pipefail -c '
+              node --test --test-reporter=tap /source/tests/hosted-questionnaire-packed-discovery.mjs probe \
+                | tee /artifact/um06b.tap
+              grep -Fx "# tests 1" /artifact/um06b.tap
+              grep -Fx "# pass 1" /artifact/um06b.tap
+              grep -Fx "# fail 0" /artifact/um06b.tap
             '
 
       - name: Recheck exact checkout and cleanliness
