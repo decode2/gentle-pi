@@ -1,9 +1,9 @@
-name: Current-upstream questionnaire UM-01 GREEN
+name: Current-upstream questionnaire UM-02 RED
 
 on:
   push:
     branches:
-      - fix/questionnaire-current-main-explicit-submit
+      - feat/questionnaire-current-main-multiline
   pull_request:
     branches:
       - main
@@ -17,19 +17,19 @@ jobs:
     if: >-
       (github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
-      (github.event_name == 'push' && github.ref == 'refs/heads/fix/questionnaire-current-main-explicit-submit' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/feat/questionnaire-current-main-multiline' ||
        (github.event_name == 'pull_request' &&
-        github.head_ref == 'fix/questionnaire-current-main-explicit-submit' &&
+        github.head_ref == 'feat/questionnaire-current-main-multiline' &&
         (github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-pi')))
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      BASE: 2b864a37e5b136cf9ddc6de599b9ffa8817a30e9
+      BASE: 363c57352e45d7dfb6cefb89dd9d6eced51ebd09
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM01_TEST_BLOB: ecc198bb9476a4471f06f030de16a0d739c4e540
-      UM01_ASK_TEST_BLOB: 7ed196be37ec582dd915778b9d570f5774053e19
-      UM01_VIEW_BLOB: 683dc02041e2deda9d1e7f82d57cc6d8d688a21a
+      UM02_TEST_BLOB: a977b7541f5e66fd5f7cb52424f50cf4a01a1dc5
+      UM02_ASK_TEST_BLOB: 7ed196be37ec582dd915778b9d570f5774053e19
+      UM02_VIEW_BLOB: 683dc02041e2deda9d1e7f82d57cc6d8d688a21a
     steps:
       - name: Checkout exact event revision without credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -38,7 +38,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove GREEN test/view identities and current-main parent sources
+      - name: Prove RED test and current-main parent source identities
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -65,15 +65,16 @@ jobs:
             test "$(git rev-parse "HEAD:$path")" = "$base_blob"
             test "$(git hash-object -- "$path")" = "$base_blob"
           done
-          test "$(git rev-parse HEAD:tests/questionnaire-view.test.ts)" = "$UM01_TEST_BLOB"
-          test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM01_TEST_BLOB"
-          for entry in "tests/ask-user-question.test.ts:$UM01_ASK_TEST_BLOB" \
-            "lib/questionnaire/questionnaire-view.ts:$UM01_VIEW_BLOB"; do
+          test "$(git rev-parse HEAD:tests/questionnaire-view.test.ts)" = "$UM02_TEST_BLOB"
+          test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM02_TEST_BLOB"
+          for entry in "tests/ask-user-question.test.ts:$UM02_ASK_TEST_BLOB" \
+            "lib/questionnaire/questionnaire-view.ts:$UM02_VIEW_BLOB"; do
             path="${entry%%:*}"; blob="${entry#*:}"
+            test "$(git rev-parse "$BASE:$path")" = "$blob"
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          echo "UM-01 GREEN checkout=$EXPECTED_SHA base=$BASE test=$UM01_TEST_BLOB ask=$UM01_ASK_TEST_BLOB view=$UM01_VIEW_BLOB"
+          echo "UM-02 RED checkout=$EXPECTED_SHA base=$BASE test=$UM02_TEST_BLOB ask=$UM02_ASK_TEST_BLOB view=$UM02_VIEW_BLOB"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -130,7 +131,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, full ask/view, Herdr and seven isolated UM-01 tests offline
+      - name: Run strict types, baseline ask/view, Herdr and isolated UM-01/UM-02 gates offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -156,12 +157,11 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="^(?!UM-02:)" \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/questionnaire-green.tap
-              grep -Fx "# tests 56" /tmp/questionnaire-green.tap
-              grep -Fx "# pass 56" /tmp/questionnaire-green.tap
-              grep -Fx "# fail 0" /tmp/questionnaire-green.tap
-              grep -Fx "# skipped 0" /tmp/questionnaire-green.tap
+                | tee /tmp/questionnaire-baseline.tap
+              grep -Fx "# pass 56" /tmp/questionnaire-baseline.tap
+              grep -Fx "# fail 0" /tmp/questionnaire-baseline.tap
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
                 /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
@@ -184,6 +184,30 @@ jobs:
                 grep -F " - UM-01: $name" /tmp/um01-green.tap | grep -q "^ok "
               done
               grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um01-green.tap
+              um02_status=0
+              if node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="^UM-02:" /source/tests/questionnaire-view.test.ts \
+                > /tmp/um02-red.tap 2>&1; then
+                um02_status=0
+              else
+                um02_status=$?
+              fi
+              cat /tmp/um02-red.tap
+              test "$um02_status" -eq 1
+              grep -Fx "# tests 6" /tmp/um02-red.tap
+              grep -Fx "# pass 0" /tmp/um02-red.tap
+              grep -Fx "# fail 6" /tmp/um02-red.tap
+              grep -Fx "# skipped 0" /tmp/um02-red.tap
+              test "$(grep -Ec "^not ok [0-9]+ - UM-02:" /tmp/um02-red.tap)" -eq 6
+              for name in \
+                "typed Shift-Enter newline differs from custom commit and explicit Submit" \
+                "bracketed paste normalizes CRLF CR and tabs" \
+                "large bracketed paste expands to full text at least 1100 characters" \
+                "drafts and caret remain separate across Tab Esc and reopen" \
+                "MULTI retains toggles with custom multiline text until explicit Submit" \
+                "editor pointer owns text target and restores caret position"; do
+                grep -F " - UM-02: $name" /tmp/um02-red.tap | grep -q "^not ok "
+              done
             '
 
       - name: Recheck exact checkout and cleanliness

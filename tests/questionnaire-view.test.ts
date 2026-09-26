@@ -251,6 +251,131 @@ test("UM-01: visible Cancel remains distinct from Submit", () => {
 	assert.equal(completed[0]?.answers[0]?.answer, "Alpha");
 });
 
+test("UM-02: typed Shift-Enter newline differs from custom commit and explicit Submit", () => {
+	const { view, completed } = viewWithResult(single());
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter); // Open custom editor.
+	view.handleInput("first");
+	view.handleInput("\x1b[13;2~"); // Shift-Enter inserts a newline instead of committing.
+	view.handleInput("second");
+	assert.equal(completed.length, 0, "UM-02: a typed newline must not submit the questionnaire");
+	view.handleInput(KEY.enter); // Commit custom text, not the questionnaire.
+	assert.deepEqual(view.getResult().answers, [
+		{ questionIndex: 0, question: "Proceed?", kind: "custom", answer: "first\nsecond" },
+	], "UM-02: custom Enter must commit the multiline draft");
+	assert.equal(completed.length, 0, "UM-02: custom commit is not explicit Submit");
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 1, "UM-02: a separate Enter explicitly submits");
+});
+
+test("UM-02: bracketed paste normalizes CRLF CR and tabs", () => {
+	const { view, completed } = viewWithResult(single());
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput("\x1b[200~one\r\ntwo\rthree\tend\x1b[201~");
+	view.handleInput(KEY.enter);
+	assert.deepEqual(view.getResult().answers, [
+		{ questionIndex: 0, question: "Proceed?", kind: "custom", answer: "one\ntwo\nthree    end" },
+	], "UM-02: bracketed paste normalizes line endings and expands tabs");
+	assert.equal(completed.length, 0, "UM-02: pasted text commit is not Submit");
+});
+
+test("UM-02: large bracketed paste expands to full text at least 1100 characters", () => {
+	const { view, completed } = viewWithResult(single());
+	const pasted = `prefix ${"x".repeat(1100)} suffix`;
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput(`\x1b[200~${pasted}\x1b[201~`);
+	view.handleInput(KEY.enter);
+	assert.ok(pasted.length >= 1100);
+	assert.equal(view.getResult().answers[0]?.answer, pasted,
+		"UM-02: the committed value must equal the expanded getExpandedText content");
+	assert.equal(completed.length, 0);
+});
+
+test("UM-02: drafts and caret remain separate across Tab Esc and reopen", () => {
+	const { view, completed } = viewWithResult(two());
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput("start");
+	view.handleInput("\x1b[13;2~");
+	view.handleInput("end");
+	view.handleInput("\x1b[D"); // Place the caret before the final d.
+	view.handleInput(KEY.tab); // Save the first draft while switching questions.
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput("other");
+	view.handleInput(KEY.escape); // Save the second draft without cancelling.
+	view.handleInput(KEY.shiftTab);
+	view.handleInput(KEY.enter); // Reopen the first custom row at its prior caret.
+	view.handleInput("!");
+	view.handleInput(KEY.enter);
+	assert.deepEqual(view.getResult().answers, [
+		{ questionIndex: 0, question: "First?", kind: "custom", answer: "start\nen!d" },
+	], "UM-02: reopening a question restores its distinct draft and caret");
+	view.handleInput(KEY.tab);
+	view.handleInput(KEY.enter); // Reopen the second custom row.
+	view.handleInput(KEY.enter); // Commit its unchanged draft.
+	assert.deepEqual(view.getResult().answers.map((answer) => answer.answer), ["start\nen!d", "other"]);
+	assert.equal(completed.length, 0, "UM-02: committing drafts does not submit the questionnaire");
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 1);
+});
+
+test("UM-02: MULTI retains toggles with custom multiline text until explicit Submit", () => {
+	const { view, completed } = viewWithResult([
+		question("Pick?", [option("One"), option("Two")], { multiSelect: true }),
+	]);
+	view.handleInput(KEY.space);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput("line one");
+	view.handleInput("\x1b[13;2~");
+	view.handleInput("line two");
+	view.handleInput(KEY.escape);
+	view.handleInput(KEY.enter); // Reopen the preserved MULTI custom draft.
+	view.handleInput(KEY.enter); // Commit, not Submit.
+	assert.deepEqual(view.getResult().answers, [
+		{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "line one\nline two", selected: ["One"] },
+	], "UM-02: multiline custom text retains toggled options");
+	assert.equal(completed.length, 0, "UM-02: MULTI custom commit still needs explicit Submit");
+	view.handleInput(KEY.enter);
+	assert.deepEqual(completed[0]?.answers, view.getResult().answers);
+	assert.equal(completed.length, 1);
+});
+
+test("UM-02: editor pointer owns text target and restores caret position", () => {
+	const { view, completed } = viewWithResult(single());
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter);
+	view.handleInput("abcd");
+	const lines = view.render(100);
+	const headerRow = lines.findIndex((line) => plain(line).includes("Custom response"));
+	const textRow = lines.findIndex((line) => plain(line).includes("abcd"));
+	assert.ok(headerRow >= 0 && textRow > headerRow,
+		"UM-02: the editable text row must be distinct from the custom header");
+	const clickX = plain(lines[textRow]!).indexOf("abcd") + 1;
+	const click = view.handleMouse({
+		...mouseEvent(lines, textRow, "click"),
+		x: clickX,
+		screenX: clickX,
+	});
+	assert.equal(click?.handled, true, "UM-02: clicking editor text is handled by its pointer owner");
+	assert.equal(click?.target.component, view, "UM-02: the questionnaire container owns the dispatch target");
+	view.handleInput("X");
+	view.handleInput(KEY.enter);
+	assert.equal(view.getResult().answers[0]?.answer, "aXbcd",
+		"UM-02: pointer click restores the caret within the editor text");
+	assert.equal(completed.length, 0, "UM-02: custom commit is not Submit");
+});
+
 test("renders exactly one active question plus a tab strip for all questions", () => {
 	const { view } = viewWithResult(two());
 	const rendered = render(view);
