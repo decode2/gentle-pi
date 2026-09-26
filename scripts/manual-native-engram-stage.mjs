@@ -27,7 +27,11 @@ const FAILURE_REASONS = new Set(["archive-read", "archive-digest", "zip-validati
 const NESTED_FAILURES = new Map([
 	["native-reader-list", ["native-reader-invocation", ...READER_OPERATIONS.get("list"), ...LIST_OUTPUT_FAILURES]],
 	["native-reader-verbose", ["native-reader-invocation", ...READER_OPERATIONS.get("verbose"), ...VERBOSE_OUTPUT_FAILURES]],
-	["native-reader-extract", ["native-reader-invocation", ...READER_OPERATIONS.get("extract"), "zip-validation", "zip-extraction", "darwin-private-root", "darwin-write", "darwin-readback"]]]);
+	["native-reader-extract", [
+		"native-reader-invocation", "native-reader-list", ...READER_OPERATIONS.get("list"), ...LIST_OUTPUT_FAILURES,
+		"native-reader-verbose", ...READER_OPERATIONS.get("verbose"), ...VERBOSE_OUTPUT_FAILURES, "native-reader-manifest",
+		...READER_OPERATIONS.get("extract"), "zip-validation", "zip-extraction", "darwin-private-root", "darwin-write", "darwin-readback",
+	]]]);
 const failureBrand = new WeakMap();
 function brandedFailure(reason) { const error = new Error("member validation failed"); if (FAILURE_REASONS.has(reason)) failureBrand.set(error, reason); return error; }
 function readerFailure(operation, condition) {
@@ -38,8 +42,8 @@ export async function withFailureReason(reason, operation) {
 	try { return await operation(); } catch (error) {
 		if (NESTED_FAILURES.has(reason)) {
 			const nested = failureBrand.get(error);
-			if (!nested) throw error;
-			if (NESTED_FAILURES.get(reason).includes(nested)) throw error;
+			if (!nested && reason !== "native-reader-extract") throw error;
+			if (nested && NESTED_FAILURES.get(reason).includes(nested)) throw error;
 		}
 		throw brandedFailure(reason);
 	}

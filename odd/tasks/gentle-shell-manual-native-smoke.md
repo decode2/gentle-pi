@@ -87,6 +87,12 @@
 - In a separate bounded unit, verify every executable and imported file in the installed package against an immutable verified archive buffer, with bounded reads and real non-symlink ancestor checks. Only then may a later authorized scope execute postinstall and verify native Gentle AI provenance.
 - Add independent RED/GREEN tests and stay below 400 diff lines. No package postinstall, Go, binary, setup, launcher, Pi RPC/TUI, or Ready evidence is part of this npm-smoke unit.
 
+## Diagnostic follow-up: outer native-reader-extract phase context
+
+- Native #17 run `36255410771` passed macOS official artifact preflight, then reported only `member-validation-native-reader-extract`. This outer wrapper covers list, verbose, manifest, extraction, and Darwin staging; the actual failing phase remains unknown. Do not infer a cause before a native CI rerun.
+- Preserve only private-branded fixed reader-invocation/list/verbose operation and output-parsing reasons plus manifest validation through the outer wrapper. Keep existing extraction and Darwin staging labels; collapse unbranded hostile throws to the fixed generic extraction code. No paths, output, metadata, or raw errors are exposed; Darwin execution and Windows memory-only behavior are unchanged.
+- Strict RED: the new synthetic regression test passed 15/16 tests and observed list invalid-UTF-8 collapse to the generic code. GREEN: the stage suite passed 16/16, and all six focused manual-native suites passed 58/58 under Node 24 with disposable scratch homes. No native tar, network, product binary, npm, or Go was invoked. Parent native CI is still required to identify the Mac phase; cause remains unproven.
+
 ## Runtime evidence reserved for a later unit
 
 - Use a native macOS runner and a native Windows runner with fresh disposable HOME/config/npm/cache/agent directories and an empty project cwd. No global npm install, user config, real account credentials, or published-package lifecycle script may execute before inspection.
