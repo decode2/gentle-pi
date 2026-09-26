@@ -1,9 +1,9 @@
-name: Current-upstream questionnaire UM-05a owner registration GREEN
+name: Current-upstream questionnaire UM-06a hosted TUI bootstrap
 
 on:
   push:
     branches:
-      - feat/questionnaire-profile-owner-um05a
+      - test/questionnaire-hosted-tui-bootstrap-um06a
   pull_request:
     branches:
       - main
@@ -19,7 +19,7 @@ jobs:
        github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
       (github.event_name == 'push' ||
-       (github.head_ref == 'feat/questionnaire-profile-owner-um05a' &&
+       (github.head_ref == 'test/questionnaire-hosted-tui-bootstrap-um06a' &&
         (github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-shell' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-pi')))
@@ -27,7 +27,7 @@ jobs:
     timeout-minutes: 35
     env:
       BASE: 7f78c36d4b50070008557a79b8734dd37222c569
-      RED_BASE: 4cd5f078cf6a192e450e164946ec18f426cfb503
+      RED_BASE: 042359072c8acd675fa147d64308a30ea0d9f0ef
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
       VIEW_TEST_BLOB: 449e88dc9ff33958887e19f62dab18ca247daf57
       UM05A_ASK_TEST_BLOB: c1e85aa268a24a9e7efe9d06d0e9047efedef41f
@@ -41,7 +41,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove UM-05a GREEN producer/test and frozen view identity
+      - name: Prove UM-06a infrastructure-only diff and frozen producer identity
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -55,13 +55,13 @@ jobs:
           test "$(git merge-base "$RED_BASE" HEAD)" = "$RED_BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/ask-user-question.test.ts|extensions/ask-user-question.ts) ;;
-              *) echo "unexpected UM-05a change: $path" >&2; exit 1 ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/hosted-questionnaire-tui-bootstrap.mjs|tests/fixtures/questionnaire-tui-bootstrap/*) ;;
+              *) echo "unexpected UM-06a change: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$RED_BASE" HEAD)
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts|extensions/ask-user-question.ts) ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts|extensions/ask-user-question.ts|tests/hosted-questionnaire-tui-bootstrap.mjs|tests/fixtures/questionnaire-tui-bootstrap/*) ;;
               *) echo "unexpected changed path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
@@ -308,6 +308,30 @@ jobs:
               done
               ! grep -Fq "Invalid questionnaire:" /tmp/um05a-green.tap
               grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um05a-green.tap
+            '
+
+      - name: Probe real CLI TUI session_start and explicit-path discovery offline
+        shell: bash
+        env:
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = "$IMAGE_ID"
+          source="$RUNNER_TEMP/questionnaire-baseline/source"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$source,target=/source,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --cap-drop=ALL --security-opt=no-new-privileges --user 1000:1000 -w /source "$IMAGE" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/tmp/outer USERPROFILE=/tmp/outer TMPDIR=/tmp \
+            CI=true PI_OFFLINE=1 /bin/bash -euo pipefail -c '
+              test -d /source/node_modules/@earendil-works/pi-coding-agent
+              python3 --version
+              node --test --test-reporter=tap /source/tests/hosted-questionnaire-tui-bootstrap.mjs \
+                | tee /tmp/um06a.tap
+              grep -Fx "# tests 1" /tmp/um06a.tap
+              grep -Fx "# pass 1" /tmp/um06a.tap
+              grep -Fx "# fail 0" /tmp/um06a.tap
             '
 
       - name: Recheck exact checkout and cleanliness
