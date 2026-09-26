@@ -1,4 +1,5 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import test from "node:test";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -18,6 +19,58 @@ import {
 
 const regular = (name, size = 1) => ({ name, type: "file", size });
 
+function crc32(bytes: Buffer) {
+	let crc = 0xffffffff;
+	for (const byte of bytes) {
+		crc ^= byte;
+		for (let bit = 0; bit < 8; bit++) crc = (crc >>> 1) ^ ((crc & 1) ? 0xedb88320 : 0);
+	}
+	return (crc ^ 0xffffffff) >>> 0;
+}
+
+function zip(entries: Array<{ name: string; data: Buffer }>) {
+	const locals: Buffer[] = [];
+	const central: Buffer[] = [];
+	let offset = 0;
+	for (const entry of entries) {
+		const name = Buffer.from(entry.name, "ascii");
+		const local = Buffer.alloc(30);
+		local.writeUInt32LE(0x04034b50, 0);
+		local.writeUInt32LE(crc32(entry.data), 14);
+		local.writeUInt32LE(entry.data.length, 18);
+		local.writeUInt32LE(entry.data.length, 22);
+		local.writeUInt16LE(name.length, 26);
+		locals.push(Buffer.concat([local, name, entry.data]));
+		const header = Buffer.alloc(46);
+		header.writeUInt32LE(0x02014b50, 0);
+		header.writeUInt16LE((3 << 8) | 20, 4);
+		header.writeUInt32LE(crc32(entry.data), 16);
+		header.writeUInt32LE(entry.data.length, 20);
+		header.writeUInt32LE(entry.data.length, 24);
+		header.writeUInt16LE(name.length, 28);
+		header.writeUInt32LE((0o100644 * 0x10000) >>> 0, 38);
+		header.writeUInt32LE(offset, 42);
+		central.push(Buffer.concat([header, name]));
+		offset += locals.at(-1)!.length;
+	}
+	const localBytes = Buffer.concat(locals);
+	const centralBytes = Buffer.concat(central);
+	const end = Buffer.alloc(22);
+	end.writeUInt32LE(0x06054b50, 0);
+	end.writeUInt16LE(entries.length, 8);
+	end.writeUInt16LE(entries.length, 10);
+	end.writeUInt32LE(centralBytes.length, 12);
+	end.writeUInt32LE(localBytes.length, 16);
+	return Buffer.concat([localBytes, centralBytes, end]);
+}
+
+const windowsMembers = ["tools/cloud-sync-projects.ps1", "tools/cloud-sync-projects.sh", "engram.exe"];
+const archiveDigest = (bytes: Buffer) => createHash("sha256").update(bytes).digest("hex");
+const windowsZip = (binary = Buffer.from("synthetic executable"), names = windowsMembers) => zip(names.map((name) => ({
+	name,
+	data: name === "engram.exe" ? binary : Buffer.from("script"),
+})));
+
 function readerDependencies(overrides = {}) {
 	return {
 		operation: "list",
@@ -34,13 +87,68 @@ function assertFailureCode(error, expected) {
 }
 
 // Pure guard tests: no archive extraction, executable invocation, or scratch writes.
-test("uses explicit stdin reader modes for the pinned gzip and ZIP formats", () => {
+test("keeps the Darwin tar reader modes and rejects ZIP reader arguments", () => {
 	assert.deepEqual(archiveReaderArgs("engram_2.1.0_darwin_arm64.tar.gz", "list"), ["-tzf", "-"]);
 	assert.deepEqual(archiveReaderArgs("engram_2.1.0_darwin_arm64.tar.gz", "verbose"), ["-tvzf", "-"]);
 	assert.deepEqual(archiveReaderArgs("engram_2.1.0_darwin_arm64.tar.gz", "extract", "engram"), ["-xOzf", "-", "engram"]);
-	assert.deepEqual(archiveReaderArgs("engram_2.1.0_windows_amd64.zip", "list"), ["-tf", "-"]);
-	assert.deepEqual(archiveReaderArgs("engram_2.1.0_windows_amd64.zip", "extract", "engram.exe"), ["-xOf", "-", "engram.exe"]);
+	assert.throws(() => archiveReaderArgs("engram_2.1.0_windows_amd64.zip", "list"), /unsupported archive format/);
 	assert.throws(() => archiveReaderArgs("archive.tgz", "list"), /unsupported archive format/);
+});
+
+test("routes Windows ZIP members through same-buffer validation and extraction only", async () => {
+	const bytes = windowsZip();
+	const asset = { name: "synthetic.zip", sha256: archiveDigest(bytes) };
+	let readerCalls = 0;
+	let writes = 0;
+	const disposition = await staging.stageVerifiedArchiveMember(bytes, asset, "win32", "x64", "/synthetic", {
+		runNativeReader: async () => { readerCalls++; throw new Error("HOSTILE_SENTINEL"); },
+		stageDarwin: async () => { writes++; },
+	});
+	assert.equal(disposition, "member-validation-memory-only");
+	assert.equal(readerCalls, 0);
+	assert.equal(writes, 0);
+});
+
+test("closes Windows digest, manifest, extra-member, and CRC failures safely", async () => {
+	const valid = windowsZip();
+	const asset = { name: "synthetic.zip", sha256: archiveDigest(valid) };
+	const run = async (bytes: Buffer, selectedAsset = { name: "synthetic.zip", sha256: archiveDigest(bytes) }) => {
+		try { await staging.stageVerifiedArchiveMember(bytes, selectedAsset, "win32", "x64", "/synthetic"); } catch (error) { return error; }
+		assert.fail("expected validation failure");
+	};
+	for (const [bytes, selectedAsset] of [
+		[valid, { name: "synthetic.zip", sha256: "0".repeat(64) }],
+		[windowsZip(Buffer.from("synthetic executable"), [...windowsMembers.slice(0, 2), "wrong.exe"]), undefined],
+		[windowsZip(Buffer.from("synthetic executable"), [...windowsMembers, "extra.txt"]), undefined],
+	] as const) {
+		const error = await run(bytes, selectedAsset ?? { name: "synthetic.zip", sha256: archiveDigest(bytes) });
+		assert.equal(staging.safeFailureCode(error), "member-validation-zip-validation");
+		assert.equal((error as Error).message.includes("HOSTILE_SENTINEL"), false);
+	}
+	const corrupt = Buffer.from(valid);
+	const nameOffset = corrupt.indexOf(Buffer.from("engram.exe"));
+	corrupt[nameOffset + Buffer.byteLength("engram.exe")] ^= 1;
+	const crcError = await run(corrupt);
+	assert.equal(staging.safeFailureCode(crcError), "member-validation-zip-extraction");
+});
+
+test("keeps Darwin on the injected native-reader and scratch-stage path", async () => {
+	const bytes = Buffer.from("verified tar archive");
+	const binary = Buffer.from("Darwin member");
+	const operations: string[] = [];
+	let staged: Buffer | undefined;
+	const disposition = await staging.stageVerifiedArchiveMember(bytes, { name: "darwin.tar.gz" }, "darwin", "arm64", "/synthetic", {
+		runNativeReader: async (_archive: Buffer, args: string[], _cwd: string, _limit: number, options: { operation: string }) => {
+			operations.push(options.operation);
+			if (options.operation === "list") return Buffer.from("tools/cloud-sync-projects.ps1\ntools/cloud-sync-projects.sh\nengram\n");
+			if (options.operation === "verbose") return Buffer.from("-script\n-script\n-binary\n");
+			return binary;
+		},
+		stageDarwin: async (member: Buffer) => { staged = member; },
+	});
+	assert.equal(disposition, "staged");
+	assert.deepEqual(operations, ["list", "verbose", "extract"]);
+	assert.deepEqual(staged, binary);
 });
 
 test("selects only the exact root-level native Engram member", () => {
@@ -66,7 +174,7 @@ test("rejects symlink members and symlinked archive directories", () => {
 
 test("whitelists injected diagnostics and preserves Windows memory-only behavior", async () => {
 	const writes = [];
-	assert.equal(await staging.deliverEngramMember("win32", Buffer.from("verified member"), async (bytes) => writes.push(bytes)), "memory-only");
+	assert.equal(await staging.deliverEngramMember("win32", Buffer.from("verified member"), async (bytes) => writes.push(bytes)), "member-validation-memory-only");
 	assert.deepEqual(writes, []);
 	const error = await staging.withFailureReason("archive-read", async () => { throw new Error("HOSTILE_SENTINEL /private/path"); }).catch((failure) => failure);
 	assert.equal(staging.safeFailureCode(error), "member-validation-archive-read");

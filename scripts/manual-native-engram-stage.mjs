@@ -5,6 +5,8 @@ import { spawnSync } from "node:child_process";
 import { dirname, isAbsolute, join, parse, relative, resolve, sep, win32 } from "node:path";
 import { pathToFileURL } from "node:url";
 import { ENGRAM_VERSION, resolveEngramReleaseAsset, resolveScratchDirectory } from "./manual-native-preflight.mjs";
+import { extractZipMember } from "./manual-native-zip-buffer.mjs";
+import { validateOfficialZipBuffer } from "./manual-native-zip-official-probe.mjs";
 
 export const MAX_ARCHIVE_BYTES = 32 * 1024 * 1024;
 export const MAX_BINARY_BYTES = 32 * 1024 * 1024;
@@ -21,11 +23,11 @@ const READER_OPERATIONS = new Map(["list", "verbose", "extract"].map((operation)
 const READER_FAILURES = [...READER_OPERATIONS.values()].flat();
 const LIST_OUTPUT_FAILURES = ["native-reader-list-invalid-utf8", "native-reader-list-empty-output", "native-reader-list-newline", "native-reader-list-malformed-output"];
 const VERBOSE_OUTPUT_FAILURES = ["native-reader-verbose-invalid-utf8", "native-reader-verbose-empty-output", "native-reader-verbose-newline", "native-reader-verbose-malformed-output"];
-const FAILURE_REASONS = new Set(["archive-read", "archive-digest", "native-reader-invocation", "native-reader-list", "native-reader-manifest", "native-reader-verbose", "native-reader-extract", ...READER_FAILURES, ...LIST_OUTPUT_FAILURES, ...VERBOSE_OUTPUT_FAILURES, "darwin-private-root", "darwin-write", "darwin-readback"]);
+const FAILURE_REASONS = new Set(["archive-read", "archive-digest", "zip-validation", "zip-extraction", "native-reader-invocation", "native-reader-list", "native-reader-manifest", "native-reader-verbose", "native-reader-extract", ...READER_FAILURES, ...LIST_OUTPUT_FAILURES, ...VERBOSE_OUTPUT_FAILURES, "darwin-private-root", "darwin-write", "darwin-readback"]);
 const NESTED_FAILURES = new Map([
 	["native-reader-list", ["native-reader-invocation", ...READER_OPERATIONS.get("list"), ...LIST_OUTPUT_FAILURES]],
 	["native-reader-verbose", ["native-reader-invocation", ...READER_OPERATIONS.get("verbose"), ...VERBOSE_OUTPUT_FAILURES]],
-	["native-reader-extract", ["native-reader-invocation", ...READER_OPERATIONS.get("extract"), "darwin-private-root", "darwin-write", "darwin-readback"]]]);
+	["native-reader-extract", ["native-reader-invocation", ...READER_OPERATIONS.get("extract"), "zip-validation", "zip-extraction", "darwin-private-root", "darwin-write", "darwin-readback"]]]);
 const failureBrand = new WeakMap();
 function brandedFailure(reason) { const error = new Error("member validation failed"); if (FAILURE_REASONS.has(reason)) failureBrand.set(error, reason); return error; }
 function readerFailure(operation, condition) {
@@ -52,13 +54,12 @@ export function assertSafeArchiveName(name) {
 }
 
 export function archiveReaderArgs(archiveName, operation, memberName) {
-	const gzip = archiveName.endsWith(".tar.gz"), zip = archiveName.endsWith(".zip");
-	if (!gzip && !zip) fail("unsupported archive format");
-	if (operation === "list") return [gzip ? "-tzf" : "-tf", "-"];
-	if (operation === "verbose") return [gzip ? "-tvzf" : "-tvf", "-"];
+	if (!archiveName.endsWith(".tar.gz")) fail("unsupported archive format");
+	if (operation === "list") return ["-tzf", "-"];
+	if (operation === "verbose") return ["-tvzf", "-"];
 	if (operation === "extract") {
 		assertSafeArchiveName(memberName);
-		return [gzip ? "-xOzf" : "-xOf", "-", memberName];
+		return ["-xOzf", "-", memberName];
 	}
 	fail("invalid archive reader operation");
 }
@@ -106,7 +107,7 @@ export function exclusiveBinaryWriteFlags() {
 
 export async function deliverEngramMember(platform, bytes, stageDarwin) {
 	if (!(bytes instanceof Uint8Array) || !bytes.length || bytes.length > MAX_BINARY_BYTES) fail("oversized binary");
-	if (platform === "win32") return "memory-only";
+	if (platform === "win32") return "member-validation-memory-only";
 	if (platform !== "darwin" || typeof stageDarwin !== "function") fail("unsupported staging platform");
 	await stageDarwin(bytes);
 	return "staged";
@@ -228,15 +229,29 @@ export function parseReaderOutput(bytes, phase) {
 	return lines;
 }
 
-async function selectVerifiedMember(archiveBytes, archiveName, memberName, platform, architecture, cwd) {
+async function selectVerifiedMember(archiveBytes, archiveName, memberName, platform, architecture, cwd, reader = runNativeReader) {
 	const expected = MANIFESTS[`${platform}/${architecture}`];
 	if (!expected || expected.at(-1) !== memberName) fail("unsupported archive manifest");
-	const names = parseReaderOutput(await runNativeReader(archiveBytes, archiveReaderArgs(archiveName, "list"), cwd, 64 * 1024, { operation: "list" }), "list");
+	const names = parseReaderOutput(await reader(archiveBytes, archiveReaderArgs(archiveName, "list"), cwd, 64 * 1024, { operation: "list" }), "list");
 	if (names.length !== expected.length || names.some((name, index) => name !== expected[index])) throw brandedFailure("native-reader-manifest");
-	const rows = parseReaderOutput(await runNativeReader(archiveBytes, archiveReaderArgs(archiveName, "verbose"), cwd, 64 * 1024, { operation: "verbose" }), "verbose");
+	const rows = parseReaderOutput(await reader(archiveBytes, archiveReaderArgs(archiveName, "verbose"), cwd, 64 * 1024, { operation: "verbose" }), "verbose");
 	if (rows.length !== names.length) throw brandedFailure("native-reader-verbose");
 	const entries = names.map((name, index) => ({ name, type: rows[index][0] === "-" ? "file" : "non-regular" }));
 	return withFailureReason("native-reader-manifest", () => selectEngramMember(entries, memberName));
+}
+
+export async function stageVerifiedArchiveMember(archiveBytes, asset, platform, architecture, cwd, dependencies = {}) {
+	if (platform === "win32") {
+		try { validateOfficialZipBuffer(archiveBytes, asset, platform, architecture); } catch { throw brandedFailure("zip-validation"); }
+		let extracted;
+		try { extracted = extractZipMember(archiveBytes, "engram.exe"); } catch { throw brandedFailure("zip-extraction"); }
+		return deliverEngramMember(platform, extracted, dependencies.stageDarwin);
+	}
+	const reader = dependencies.runNativeReader ?? runNativeReader;
+	const memberName = "engram";
+	await selectVerifiedMember(archiveBytes, asset.name, memberName, platform, architecture, cwd, reader);
+	const extracted = await reader(archiveBytes, archiveReaderArgs(asset.name, "extract", memberName), cwd, MAX_BINARY_BYTES, { operation: "extract" });
+	return deliverEngramMember(platform, extracted, dependencies.stageDarwin);
 }
 
 async function writeExclusiveBinary(path, bytes) {
@@ -254,27 +269,28 @@ async function stage() {
 	const archivePath = join(layout.preflight, asset.name);
 	const archiveBytes = await withFailureReason("archive-read", () => readBoundedRegularFile(archivePath, layout.preflight, MAX_ARCHIVE_BYTES));
 	if (sha256(archiveBytes) !== asset.sha256) throw brandedFailure("archive-digest");
-	const memberName = platform === "win32" ? "engram.exe" : "engram";
-	await selectVerifiedMember(archiveBytes, asset.name, memberName, platform, process.arch, layout.preflight);
-	const extracted = await runNativeReader(archiveBytes, archiveReaderArgs(asset.name, "extract", memberName), layout.preflight, MAX_BINARY_BYTES, { operation: "extract" });
-	const disposition = await withFailureReason("native-reader-extract", () => deliverEngramMember(platform, extracted, async (bytes) => {
-		const expectedDigest = sha256(bytes);
-		await withFailureReason("darwin-private-root", () => prepareBin(layout));
-		const destination = join(layout.bin, memberName);
-		await withFailureReason("darwin-write", () => writeExclusiveBinary(destination, bytes));
-		await withFailureReason("darwin-readback", async () => {
-			const staged = await readBoundedRegularFile(destination, layout.bin, MAX_BINARY_BYTES);
-			if (sha256(bytes) !== expectedDigest || sha256(staged) !== expectedDigest) fail("binary identity mismatch");
-			assertBinaryIdentity(bytes, staged);
-		});
-	}));
+	const disposition = await withFailureReason("native-reader-extract", () => stageVerifiedArchiveMember(
+		archiveBytes, asset, platform, process.arch, layout.preflight, {
+			stageDarwin: async (bytes) => {
+				const expectedDigest = sha256(bytes);
+				await withFailureReason("darwin-private-root", () => prepareBin(layout));
+				const destination = join(layout.bin, "engram");
+				await withFailureReason("darwin-write", () => writeExclusiveBinary(destination, bytes));
+				await withFailureReason("darwin-readback", async () => {
+					const staged = await readBoundedRegularFile(destination, layout.bin, MAX_BINARY_BYTES);
+					if (sha256(bytes) !== expectedDigest || sha256(staged) !== expectedDigest) fail("binary identity mismatch");
+					assertBinaryIdentity(bytes, staged);
+				});
+			},
+		},
+	));
 	return disposition;
 }
 
 async function runCli(args) {
 	if (args.length !== 1 || args[0] !== "validate") fail("invalid command");
 	const disposition = await stage();
-	if (disposition === "memory-only") console.log("member-validation-memory-only");
+	if (disposition === "member-validation-memory-only") console.log(disposition);
 	else console.log(`Official core Engram ${ENGRAM_VERSION} staged in disposable Darwin scratch; binary was not run.`);
 }
 
