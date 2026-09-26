@@ -742,16 +742,24 @@ test("gentle-shell setup proceeds when the reported pin is exactly 3.6.0", (t) =
 	assert.deepEqual(payload.args, ["install", "--agent", "pi", "--scope", "global"]);
 });
 
+function enableQuestionOwner(home: string) {
+	const dir = join(home, "gentle-ai");
+	mkdirSync(dir, { recursive: true });
+	const settingsPath = join(home, "settings.json");
+	if (!existsSync(settingsPath)) writeFileSync(settingsPath, JSON.stringify({ tuiMode: "fullscreen" }));
+	writeFileSync(join(dir, "question-owner.json"), JSON.stringify({ version: 1, owner: "gentle-pi", enabled: true }));
+}
+
 // --- setup subcommand conflict cleanup (gentle-ai #4820 / gentle-shell #1277) ---
 //
 // gentle-ai's managed Pi stack still installs npm:@juicesharp/rpiv-ask-user-question,
 // which conflicts with gentle-pi's own first-party ask_user_question tool
 // (Pi refuses two providers for the same tool name). Until the gentle-ai fix
-// lands, `gentle-shell setup` removes the conflicting package itself once it
-// finds gentle-ai declared it in the provisioned home's settings.json.
+// lands, setup removes it only for an exact enabled first-party owner.
 
 test("gentle-shell setup removes the conflicting ask-user-question package gentle-ai declared", (t) => {
 	const f = fixture(t);
+	enableQuestionOwner(f.gentleShellHome);
 	const gentleAiScript = join(f.root, "fake-gentle-ai.mjs");
 	writeGentleAiScriptDeclaringConflict(gentleAiScript);
 	const env = { ...f.env, GENTLE_SHELL_GENTLE_AI_BIN: gentleAiScript };
@@ -822,6 +830,7 @@ test("gentle-shell setup removes npm:gentle-pi that gentle-ai declared, naming t
 
 test("gentle-shell setup removes both the conflicting rpiv package and npm:gentle-pi, in declaration order", (t) => {
 	const f = fixture(t);
+	enableQuestionOwner(f.gentleShellHome);
 	const gentleAiScript = join(f.root, "fake-gentle-ai.mjs");
 	writeGentleAiScriptDeclaringGentlePi(gentleAiScript, ["npm:@juicesharp/rpiv-ask-user-question@1.2.3"]);
 	const env = { ...f.env, GENTLE_SHELL_GENTLE_AI_BIN: gentleAiScript };
@@ -840,11 +849,11 @@ test("gentle-shell setup removes both the conflicting rpiv package and npm:gentl
 // afterwards would only ever report whatever pre-existed the run (e.g. the
 // isolated-home bootstrap this fixture's fake-gentle-ai script never
 // touches), never what the skipped install would have declared. Setup must
-// therefore print the pending-removal message unconditionally, without
-// reading settings.json — proven here with a fresh home that never declares
-// the conflicting package at all.
-test("gentle-shell setup --dry-run prints the pending removal unconditionally, without reading settings.json", (t) => {
+// therefore report owner-permitted candidates without reading settings.json,
+// even for a fresh home that never declares the conflicting package.
+test("gentle-shell setup --dry-run reports permitted candidates without reading settings.json", (t) => {
 	const f = fixture(t);
+	enableQuestionOwner(f.gentleShellHome);
 	const gentleAiScript = join(f.root, "fake-gentle-ai.mjs");
 	writeGentleAiScript(gentleAiScript);
 	const env = { ...f.env, GENTLE_SHELL_GENTLE_AI_BIN: gentleAiScript };
@@ -893,6 +902,7 @@ test("a later normal launch injects the launcher's own package root once gentle-
 
 test("gentle-shell setup propagates a non-zero pi remove exit code with an actionable message", (t) => {
 	const f = fixture(t);
+	enableQuestionOwner(f.gentleShellHome);
 	const gentleAiScript = join(f.root, "fake-gentle-ai.mjs");
 	writeGentleAiScriptDeclaringConflict(gentleAiScript);
 	const failingPiScript = join(f.root, "fake-pi-remove-fails.mjs");
@@ -914,6 +924,7 @@ test("gentle-shell setup propagates a non-zero pi remove exit code with an actio
 test("gentle-shell setup --home <dir> includes --home <dir> in the failing-removal remediation command", (t) => {
 	const f = fixture(t);
 	const target = join(f.root, "custom-home");
+	enableQuestionOwner(target);
 	const gentleAiScript = join(f.root, "fake-gentle-ai.mjs");
 	writeGentleAiScriptDeclaringConflict(gentleAiScript);
 	const failingPiScript = join(f.root, "fake-pi-remove-fails.mjs");
@@ -938,6 +949,7 @@ test("gentle-shell setup --home <dir> includes --home <dir> in the failing-remov
 test("gentle-shell setup shell-quotes a --home path containing a space in the failing-removal remediation command", (t) => {
 	const f = fixture(t);
 	const target = join(f.root, "custom home");
+	enableQuestionOwner(target);
 	const gentleAiScript = join(f.root, "fake-gentle-ai.mjs");
 	writeGentleAiScriptDeclaringConflict(gentleAiScript);
 	const failingPiScript = join(f.root, "fake-pi-remove-fails.mjs");
@@ -984,6 +996,48 @@ test("UM-05b: disabled first-party owner preserves external question provider af
 
 test("UM-05b: exact enabled first-party owner removes external provider and npm:gentle-pi after setup", (t) => {
 	assert.deepEqual(setupForQuestionOwner(t, JSON.stringify({ version: 1, owner: "gentle-pi", enabled: true })), []);
+});
+
+test("setup preserves external provider for malformed, foreign and extra-key owner documents", (t) => {
+	for (const owner of ["{", "null", '{"version":2,"owner":"gentle-pi","enabled":true}',
+		'{"version":1,"owner":"other","enabled":true}',
+		'{"version":1,"owner":"gentle-pi","enabled":true,"extra":1}']) {
+		assert.deepEqual(setupForQuestionOwner(t, owner), ["npm:@juicesharp/rpiv-ask-user-question@1.2.3"], owner);
+	}
+});
+
+test("setup preserves external provider when owner path cannot be read as a document", (t) => {
+	const f = fixture(t);
+	const dir = join(f.gentleShellHome, "gentle-ai", "question-owner.json");
+	mkdirSync(dir, { recursive: true }); // A directory is unreadable as a JSON owner document.
+	writeFileSync(join(f.gentleShellHome, "settings.json"), JSON.stringify({ tuiMode: "fullscreen" }));
+	const gentleAiScript = join(f.root, "fake-gentle-ai.mjs");
+	writeGentleAiScriptDeclaringGentlePi(gentleAiScript, ["npm:@juicesharp/rpiv-ask-user-question@1.2.3"]);
+	writePiScriptEditingSettingsOnRemove(f.piScript);
+	const result = run({ ...f.env, GENTLE_SHELL_GENTLE_AI_BIN: gentleAiScript }, ["setup"]);
+	assert.equal(result.status, 0, result.stderr);
+	assert.deepEqual(JSON.parse(readFileSync(join(f.gentleShellHome, "settings.json"), "utf8")).packages,
+		["npm:@juicesharp/rpiv-ask-user-question@1.2.3"]);
+});
+
+test("setup dry-run only reports external removal for an enabled owner in the selected home", (t) => {
+	const f = fixture(t);
+	const gentleAiScript = join(f.root, "fake-gentle-ai.mjs");
+	writeGentleAiScript(gentleAiScript);
+	const env = { ...f.env, GENTLE_SHELL_GENTLE_AI_BIN: gentleAiScript };
+	const absent = run(env, ["setup", "--dry-run"]);
+	assert.equal(absent.status, 0, absent.stderr);
+	assert.doesNotMatch(absent.stderr, /would then remove npm:@juicesharp\/rpiv-ask-user-question/);
+	assert.match(absent.stderr, /would then remove npm:gentle-pi/);
+	const alternate = join(f.root, "other-home");
+	enableQuestionOwner(alternate);
+	const disabled = run(env, ["setup", "--dry-run"]);
+	assert.equal(disabled.status, 0, disabled.stderr);
+	assert.doesNotMatch(disabled.stderr, /would then remove npm:@juicesharp\/rpiv-ask-user-question/);
+	enableQuestionOwner(f.gentleShellHome);
+	const enabled = run(env, ["setup", "--dry-run"]);
+	assert.equal(enabled.status, 0, enabled.stderr);
+	assert.match(enabled.stderr, /would then remove npm:@juicesharp\/rpiv-ask-user-question/);
 });
 
 // --- persona snapshot/restore -----------------------------------------------
@@ -1738,6 +1792,7 @@ test("a hung child during automatic provisioning is killed after the timeout cei
 
 test("a hung 'pi remove' during post-install cleanup is killed after the timeout ceiling and reports it in seconds too", (t) => {
 	const f = fixture(t);
+	enableQuestionOwner(f.gentleShellHome);
 	const gentleAiScript = join(f.root, "fake-gentle-ai-declares-conflict.mjs");
 	writeGentleAiScriptDeclaringConflict(gentleAiScript);
 	const hangingPiScript = join(f.root, "fake-pi-hangs-on-remove.mjs");

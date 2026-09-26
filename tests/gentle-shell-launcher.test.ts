@@ -16,6 +16,7 @@ import {
 	findGentlePiDeclaration,
 	forceJsonFieldIfAbsentInOriginal,
 	helpText,
+	hasEnabledQuestionOwner,
 	homeSelectorFlags,
 	isSetupCapablePin,
 	launcherConfigPath,
@@ -744,8 +745,17 @@ test("settingsDeclareGentlePi is false for a path package entry, even one that r
 	assert.equal(settingsDeclareGentlePi('{"packages":["../../work/gentle-pi"]}'), false);
 });
 
-// --- postInstallRemovals -----------------------------------------------
-//
+// --- setup ownership and postInstallRemovals ----------------------------
+
+test("setup ownership accepts only an exact enabled version-1 first-party document", () => {
+	assert.equal(hasEnabledQuestionOwner('{"version":1,"owner":"gentle-pi","enabled":true}'), true);
+	for (const text of [undefined, "{", "null", "[]", '{"version":2,"owner":"gentle-pi","enabled":true}',
+		'{"version":1,"owner":"gentle-pi","enabled":false}', '{"version":1,"owner":"other","enabled":true}',
+		'{"version":1,"owner":"gentle-pi","enabled":true,"extra":1}']) {
+		assert.equal(hasEnabledQuestionOwner(text), false, String(text));
+	}
+});
+
 // gentle-ai's managed Pi stack (gentle-ai #4820, gentle-shell #1277) still
 // installs npm:@juicesharp/rpiv-ask-user-question, which conflicts with
 // gentle-pi's own first-party ask_user_question tool: Pi refuses two
@@ -757,46 +767,50 @@ test("settingsDeclareGentlePi is false for a path package entry, even one that r
 // remove after provisioning a home, for either reason.
 
 test("postInstallRemovals is empty when settings text is undefined", () => {
-	assert.deepEqual(postInstallRemovals(undefined), []);
+	assert.deepEqual(postInstallRemovals(undefined, true), []);
 });
 
 test("postInstallRemovals is empty for invalid JSON", () => {
-	assert.deepEqual(postInstallRemovals("not json"), []);
+	assert.deepEqual(postInstallRemovals("not json", true), []);
 });
 
 test("postInstallRemovals is empty when packages is absent", () => {
-	assert.deepEqual(postInstallRemovals("{}"), []);
+	assert.deepEqual(postInstallRemovals("{}", true), []);
 });
 
 test("postInstallRemovals detects a bare npm:@juicesharp/rpiv-ask-user-question string entry", () => {
-	assert.deepEqual(postInstallRemovals('{"packages":["npm:@juicesharp/rpiv-ask-user-question"]}'), ["npm:@juicesharp/rpiv-ask-user-question"]);
+	assert.deepEqual(postInstallRemovals('{"packages":["npm:@juicesharp/rpiv-ask-user-question"]}', true), ["npm:@juicesharp/rpiv-ask-user-question"]);
 });
 
 test("postInstallRemovals detects a versioned entry and returns the canonical unversioned source", () => {
-	assert.deepEqual(postInstallRemovals('{"packages":["npm:@juicesharp/rpiv-ask-user-question@1.2.3"]}'), [
+	assert.deepEqual(postInstallRemovals('{"packages":["npm:@juicesharp/rpiv-ask-user-question@1.2.3"]}', true), [
 		"npm:@juicesharp/rpiv-ask-user-question",
 	]);
 });
 
 test("postInstallRemovals detects a versioned object source entry", () => {
-	assert.deepEqual(postInstallRemovals('{"packages":[{"source":"npm:@juicesharp/rpiv-ask-user-question@1.2.3"}]}'), [
+	assert.deepEqual(postInstallRemovals('{"packages":[{"source":"npm:@juicesharp/rpiv-ask-user-question@1.2.3"}]}', true), [
 		"npm:@juicesharp/rpiv-ask-user-question",
 	]);
 });
 
 test("postInstallRemovals detects npm:gentle-pi at any version, alongside an unrelated package", () => {
-	assert.deepEqual(postInstallRemovals('{"packages":["npm:gentle-pi@3.5.1","npm:some-other-package"]}'), ["npm:gentle-pi"]);
+	assert.deepEqual(postInstallRemovals('{"packages":["npm:gentle-pi@3.5.1","npm:some-other-package"]}', true), ["npm:gentle-pi"]);
 });
 
 test("postInstallRemovals dedupes a duplicated declaration and preserves declaration order", () => {
 	const settingsText =
 		'{"packages":["npm:gentle-pi@1.0.0","npm:@juicesharp/rpiv-ask-user-question@1.0.0","npm:@juicesharp/rpiv-ask-user-question@2.0.0"]}';
-	assert.deepEqual(postInstallRemovals(settingsText), ["npm:gentle-pi", "npm:@juicesharp/rpiv-ask-user-question"]);
+	assert.deepEqual(postInstallRemovals(settingsText, true), ["npm:gentle-pi", "npm:@juicesharp/rpiv-ask-user-question"]);
 });
 
 test("postInstallRemovals ignores a path entry that happens to share the package name", () => {
-	assert.deepEqual(postInstallRemovals('{"packages":["./local-ask-user-question"]}'), []);
-	assert.deepEqual(postInstallRemovals('{"packages":["./local-gentle-pi"]}'), []);
+	assert.deepEqual(postInstallRemovals('{"packages":["./local-ask-user-question"]}', true), []);
+	assert.deepEqual(postInstallRemovals('{"packages":["./local-gentle-pi"]}', true), []);
+});
+
+test("postInstallRemovals retains external provider without owner, removing gentle-pi independently", () => {
+	assert.deepEqual(postInstallRemovals('{"packages":["npm:@juicesharp/rpiv-ask-user-question@1","npm:gentle-pi","npm:other"]}', false), ["npm:gentle-pi"]);
 });
 
 // --- findGentlePiDeclaration -------------------------------------------------

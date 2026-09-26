@@ -32,6 +32,7 @@ import {
 	discoverLooseExtensionEntries,
 	findGentlePiDeclaration,
 	forceJsonFieldIfAbsentInOriginal,
+	hasEnabledQuestionOwner,
 	helpText,
 	homeSelectorFlags,
 	isSetupCapablePin,
@@ -739,9 +740,7 @@ function postInstallRemovingMessage(source, home) {
 	return `gentle-shell: removing ${source} from ${home.dir}: gentle-pi ships ask_user_question and Pi refuses two providers (gentle-ai #4820)`;
 }
 
-// The --dry-run stderr line for `source`, printed unconditionally (see
-// runPostInstallCleanup below). Kept byte-identical to the pre-existing
-// rpiv wording; npm:gentle-pi gets its own analogous "would remove" line.
+// The --dry-run stderr line for a source permitted by the owner gate.
 function postInstallWouldRemoveMessage(source) {
 	if (source === "npm:gentle-pi") {
 		return `gentle-shell: setup would then remove ${source} if the install declares it: this launcher loads its own gentle-pi ${ownPackageVersion()}, so the home always matches it`;
@@ -749,28 +748,26 @@ function postInstallWouldRemoveMessage(source) {
 	return `gentle-shell: setup would then remove ${source} if the install declares it (gentle-ai #4820)`;
 }
 
-// Runs once the gentle-ai install spawned by runSetupFlow above has exited
-// 0. gentle-ai's managed Pi stack always declares two packages this launcher
-// must remove from the just-provisioned home itself, unless this is a
-// --dry-run: npm:@juicesharp/rpiv-ask-user-question, which conflicts with
-// gentle-pi's own first-party ask_user_question tool (Pi refuses two
-// providers for the same tool name; gentle-ai #4820, gentle-shell #1277,
-// fix pending upstream), and npm:gentle-pi itself, which must never survive
-// setup — this launcher always loads its own gentle-pi, never the one
-// gentle-ai's stack installs. A --dry-run gentle-ai install writes nothing,
-// so settings.json read afterwards would only report whatever pre-existed
-// the run (e.g. the isolated-home bootstrap), never what the skipped
-// install would have declared; report every known removal source
-// unconditionally instead of reading settings.json at all.
+// Only the selected home's exact enabled owner authorizes removing the
+// external provider. An unreadable document fails closed; gentle-pi cleanup
+// remains independent. Dry-run reports candidates, not future settings.
 async function runPostInstallCleanup(home, runtime, dryRun, stdio, timeoutMs) {
+	let ownerText;
+	try {
+		ownerText = readFileSync(join(home.dir, "gentle-ai", "question-owner.json"), "utf8");
+	} catch {
+		// Missing or unreadable ownership never displaces an external provider.
+	}
+	const enabledQuestionOwner = hasEnabledQuestionOwner(ownerText);
 	if (dryRun) {
 		for (const source of POST_INSTALL_REMOVAL_SOURCES) {
+			if (source === "npm:@juicesharp/rpiv-ask-user-question" && !enabledQuestionOwner) continue;
 			process.stderr.write(`${postInstallWouldRemoveMessage(source)}\n`);
 		}
 		return { ok: true, exitCode: 0 };
 	}
 	const settingsText = readJsonIfExists(join(home.dir, "settings.json"));
-	const removals = postInstallRemovals(settingsText);
+	const removals = postInstallRemovals(settingsText, enabledQuestionOwner);
 	if (removals.length === 0) return { ok: true, exitCode: 0 };
 	return removePostInstallSources(removals, 0, home, runtime, stdio, timeoutMs);
 }

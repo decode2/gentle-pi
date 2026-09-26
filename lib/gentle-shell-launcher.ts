@@ -529,14 +529,10 @@ export function settingsDeclareGentlePi(settingsText: string | undefined): boole
 	return packages.some(packageEntryDeclaresGentlePi);
 }
 
-// gentle-ai's own managed Pi stack still installs
-// npm:@juicesharp/rpiv-ask-user-question, which conflicts with gentle-pi's
-// first-party ask_user_question tool: Pi tool names are exclusive, so a
-// second provider for the same name fails the whole load (see
-// extensions/ask-user-question.ts). Tracked upstream as gentle-ai #4820 and
-// gentle-shell #1277; the gentle-ai fix lands separately, so `gentle-shell
-// setup` (bin/gentle-shell.mjs) must remove it from the provisioned home
-// itself.
+// Only an exact enabled first-party question owner in the selected Pi home
+// permits setup to remove the external question provider. Otherwise that
+// provider may be the only one available. Ordinary extension registration
+// has its own independent ownership check.
 //
 // gentle-ai's managed Pi stack also always declares npm:gentle-pi itself.
 // That declaration must never survive setup either, for an unrelated reason:
@@ -547,19 +543,29 @@ export function settingsDeclareGentlePi(settingsText: string | undefined): boole
 // checkout, onto the published npm package — instead of the running
 // launcher's own copy. See docs/readme-reference.md's "setup" section.
 //
-// Table of every package `setup` removes after gentle-ai finishes, so a
-// future addition only needs a new row here.
+// Validate the same version-1 document shape as the TUI registration gate.
+// Missing, malformed and extra-key documents cannot authorize removal.
+export function hasEnabledQuestionOwner(text: string | undefined): boolean {
+	if (text === undefined) return false;
+	let value: unknown;
+	try {
+		value = JSON.parse(text);
+	} catch {
+		return false;
+	}
+	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+	const fields = value as Record<string, unknown>;
+	return Object.keys(fields).length === 3 && fields.version === 1 && fields.owner === "gentle-pi" && fields.enabled === true;
+}
+
+// Table of candidate packages `setup` can remove after gentle-ai finishes.
 const POST_INSTALL_REMOVAL_PACKAGES: readonly { readonly name: string; readonly source: string }[] = [
 	{ name: "@juicesharp/rpiv-ask-user-question", source: "npm:@juicesharp/rpiv-ask-user-question" },
 	{ name: "gentle-pi", source: "npm:gentle-pi" },
 ];
 
-// The known removal sources, exposed so a `--dry-run` caller can report what
-// setup would remove *if* gentle-ai's install declares it, without reading
-// settings.json itself: a dry run writes nothing, so settings.json
-// afterwards would only reflect whatever pre-existed the run, not what the
-// (skipped) install would have declared. See runPostInstallCleanup in
-// bin/gentle-shell.mjs.
+// Candidate sources for dry-run: filter by the selected home's owner before
+// reporting conditional removals. A dry run cannot inspect future settings.
 export const POST_INSTALL_REMOVAL_SOURCES: readonly string[] = POST_INSTALL_REMOVAL_PACKAGES.map((entry) => entry.source);
 
 // Scans a settings.json `packages` list (same string/object-source parsing
@@ -569,7 +575,7 @@ export const POST_INSTALL_REMOVAL_SOURCES: readonly string[] = POST_INSTALL_REMO
 // in the order those packages first appear in `packages` — never the
 // declared (possibly versioned) source text, since the caller always removes
 // the bare package.
-export function postInstallRemovals(settingsText: string | undefined): string[] {
+export function postInstallRemovals(settingsText: string | undefined, enabledQuestionOwner: boolean): string[] {
 	const packages = parseSettingsPackages(settingsText);
 	if (packages === undefined) return [];
 
@@ -578,7 +584,8 @@ export function postInstallRemovals(settingsText: string | undefined): string[] 
 		const source = entrySource(entry);
 		if (source === undefined || packageSourceKind(source) !== "npm") continue;
 		const name = npmPackageName(source);
-		const match = POST_INSTALL_REMOVAL_PACKAGES.find((candidate) => candidate.name === name);
+		const match = POST_INSTALL_REMOVAL_PACKAGES.find((candidate) => candidate.name === name &&
+			(candidate.source !== "npm:@juicesharp/rpiv-ask-user-question" || enabledQuestionOwner));
 		if (match !== undefined && !found.includes(match.source)) found.push(match.source);
 	}
 	return found;
