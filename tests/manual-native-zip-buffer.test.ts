@@ -27,12 +27,18 @@ function zip(entries = [], { comment = Buffer.alloc(0), disk = 0 } = {}) {
 		local.writeUInt32LE(0x04034b50, 0);
 		local.writeUInt16LE(entry.localFlags ?? flags, 6);
 		local.writeUInt16LE(entry.localMethod ?? method, 8);
-		local.writeUInt32LE(entry.localCrc ?? crc, 14);
-		local.writeUInt32LE(entry.localCompressedSize ?? compressed, 18);
-		local.writeUInt32LE(entry.localUncompressedSize ?? uncompressed, 22);
+		local.writeUInt32LE(entry.localCrc ?? ((flags & 8) ? 0 : crc), 14);
+		local.writeUInt32LE(entry.localCompressedSize ?? ((flags & 8) ? 0 : compressed), 18);
+		local.writeUInt32LE(entry.localUncompressedSize ?? ((flags & 8) ? 0 : uncompressed), 22);
 		local.writeUInt16LE(entry.localNameBytes?.length ?? name.length, 26);
 		local.writeUInt16LE(localExtra.length, 28);
-		locals.push(Buffer.concat([local, entry.localNameBytes ?? name, localExtra, data]));
+		const descriptor = Buffer.alloc(16);
+		descriptor.writeUInt32LE(entry.descriptorSignature ?? 0x08074b50, 0);
+		descriptor.writeUInt32LE(entry.descriptorCrc ?? crc, 4);
+		descriptor.writeUInt32LE(entry.descriptorCompressedSize ?? compressed, 8);
+		descriptor.writeUInt32LE(entry.descriptorUncompressedSize ?? uncompressed, 12);
+		const descriptorBytes = entry.descriptorBytes ?? ((flags & 8) ? descriptor.subarray(0, entry.descriptorLength ?? 16) : Buffer.alloc(0));
+		locals.push(Buffer.concat([local, entry.localNameBytes ?? name, localExtra, data, descriptorBytes]));
 
 		const header = Buffer.alloc(46);
 		header.writeUInt32LE(0x02014b50, 0);
@@ -138,8 +144,8 @@ test("rejects multi-disk, ZIP64, out-of-range, and overlapping records", () => {
 	rejected(overlap.bytes);
 });
 
-test("rejects encryption, descriptors, unsupported flags, methods, and mismatched local headers", () => {
-	for (const entry of [{ flags: 1 }, { flags: 8 }, { flags: 0x40 }, { method: 12 }]) rejected(zip([entry]).bytes);
+test("rejects encryption, unsupported flags, methods, and mismatched local headers", () => {
+	for (const entry of [{ flags: 1 }, { flags: 0x40 }, { method: 12 }]) rejected(zip([entry]).bytes);
 	for (const entry of [{ localFlags: 1 }, { localMethod: 8 }, { localCrc: 9 }, { localNameBytes: Buffer.from("other") }]) rejected(zip([{ name: "file.txt", ...entry }]).bytes);
 	rejected(zip([{ name: "stored-size-mismatch", uncompressedSize: 1 }]).bytes);
 	rejected(zip([{ name: "outside-data", method: 8, compressedSize: 64, uncompressedSize: 0 }]).bytes);
@@ -200,6 +206,77 @@ test("rejects local-area gaps and unsupported extra metadata", () => {
 	rejected(zip([{ name: "x", extra: Buffer.from([0x55, 0x54, 0, 0]) }]).bytes);
 	rejected(zip([{ name: "x", localExtra: Buffer.from([0x55, 0x54, 0, 0]) }]).bytes);
 	rejected(zip([{ name: "x", localExtra: Buffer.alloc(ZIP_INVENTORY_LIMITS.maxExtraBytes + 1) }]).bytes);
+});
+
+function timestampExtra(time = 0x12345678) {
+	const extra = Buffer.alloc(9);
+	extra.writeUInt16LE(0x5455, 0);
+	extra.writeUInt16LE(5, 2);
+	extra[4] = 1;
+	extra.writeUInt32LE(time, 5);
+	return extra;
+}
+
+test("accepts matching mtime-only timestamp extras and signed data descriptors", () => {
+	const payload = Buffer.from("verified bytes");
+	const extra = timestampExtra();
+	const archive = zip([{
+		name: "engram.exe", data: payload, crc: crc32(payload), flags: 0x0808, extra, localExtra: Buffer.from(extra),
+	}]).bytes;
+	const inventory = inventoryZip(archive);
+	assert.equal(inventory[0].flags, 0x0808);
+	assert.deepEqual(zipModule.extractZipMember(archive, "engram.exe"), payload);
+
+	const timestampOnly = zip([{ name: "file", data: payload, crc: crc32(payload), extra, localExtra: Buffer.from(extra) }]).bytes;
+	assert.equal(inventoryZip(timestampOnly).length, 1);
+	const descriptorWithoutExtra = zip([{ name: "file", data: payload, crc: crc32(payload), flags: 8 }]).bytes;
+	assert.equal(inventoryZip(descriptorWithoutExtra).length, 1);
+});
+
+test("rejects malformed signed descriptors and nonzero local descriptor fields", () => {
+	const payload = Buffer.from("descriptor data");
+	const crc = crc32(payload);
+	for (const entry of [
+		{ descriptorSignature: 0x08074b51 },
+		{ descriptorCrc: crc ^ 1 },
+		{ descriptorCompressedSize: payload.length + 1 },
+		{ descriptorUncompressedSize: payload.length + 1 },
+		{ descriptorLength: 15 },
+		{ localCrc: 1 },
+		{ localCompressedSize: 1 },
+		{ localUncompressedSize: 1 },
+	]) rejected(zip([{ name: "file", data: payload, crc, flags: 8, ...entry }]).bytes);
+});
+
+test("rejects timestamp-extra mismatches, duplicates, malformed forms, and unknown fields", () => {
+	const extra = timestampExtra();
+	const changedTime = timestampExtra(0x12345679);
+	const unknown = Buffer.from([0x34, 0x12, 0, 0]);
+	const duplicate = Buffer.concat([extra, extra]);
+	const badLength = Buffer.from(extra);
+	badLength.writeUInt16LE(4, 2);
+	const badFlags = Buffer.from(extra);
+	badFlags[4] = 3;
+	for (const [centralExtra, localExtra] of [
+		[extra, changedTime], [extra, Buffer.alloc(0)], [duplicate, duplicate], [unknown, unknown], [badLength, badLength], [badFlags, badFlags],
+	]) rejected(zip([{ name: "file", extra: centralExtra, localExtra }]).bytes);
+});
+
+test("rejects descriptor gaps and overlapping local records", () => {
+	const data = Buffer.from("d");
+	const contiguous = zip([{ name: "a", data, crc: crc32(data), flags: 8 }]);
+	const directoryStart = contiguous.centralPositions[0];
+	const gap = Buffer.concat([contiguous.bytes.subarray(0, directoryStart), Buffer.from([0]), contiguous.bytes.subarray(directoryStart)]);
+	gap.writeUInt32LE(directoryStart + 1, gap.length - 6);
+	rejected(gap);
+
+	const nestedLocal = zip([{ name: "b", data: Buffer.alloc(0), crc: 0 }]);
+	const nested = nestedLocal.bytes.subarray(0, nestedLocal.centralPositions[0]);
+	const overlap = zip([
+		{ name: "a", data: nested, crc: crc32(nested), flags: 8 },
+		{ name: "b", data: Buffer.alloc(0), crc: 0, centralLocalOffset: 31 },
+	]);
+	rejected(overlap.bytes);
 });
 
 test("public failures never echo hostile names, bytes, or underlying metadata", () => {

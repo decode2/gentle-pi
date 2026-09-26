@@ -23,13 +23,15 @@ function range(bytes, start, length, end = bytes.length) {
 	if (!Number.isSafeInteger(start) || !Number.isSafeInteger(length) || start < 0 || length < 0 || start > end || length > end - start) reject();
 }
 
-function validateExtra(length) {
-	if (length > ZIP_INVENTORY_LIMITS.maxExtraBytes || length !== 0) reject();
+function validateExtra(extra) {
+	if (extra.length > ZIP_INVENTORY_LIMITS.maxExtraBytes) reject();
+	if (extra.length === 0) return;
+	if (extra.length !== 9 || extra.readUInt16LE(0) !== 0x5455 || extra.readUInt16LE(2) !== 5 || extra[4] !== 1) reject();
 }
 
 function validateFlags(method, flags) {
 	if (method !== 0 && method !== 8) reject();
-	const supported = method === 8 ? 0x0806 : 0x0800;
+	const supported = (method === 8 ? 0x0806 : 0x0800) | 0x0008;
 	if ((flags & ~supported) !== 0) reject();
 }
 
@@ -117,8 +119,9 @@ function parse(bytes) {
 		if (diskStart !== 0 || compressedSize === 0xffffffff || uncompressedSize === 0xffffffff || localHeaderOffset === 0xffffffff) reject();
 		validateFlags(method, flags);
 		if (method === 0 && compressedSize !== uncompressedSize) reject();
-		validateExtra(extraLength);
 		const rawName = bytes.subarray(cursor + 46, cursor + 46 + nameLength);
+		const centralExtra = bytes.subarray(cursor + 46 + nameLength, cursor + 46 + nameLength + extraLength);
+		validateExtra(centralExtra);
 		const name = decodeName(rawName);
 		const key = name.toLowerCase();
 		if (names.has(key)) reject();
@@ -126,7 +129,7 @@ function parse(bytes) {
 		const type = validateType(host, attributes);
 		totalUncompressed += uncompressedSize;
 		if (totalUncompressed > ZIP_INVENTORY_LIMITS.maxTotalUncompressedBytes) reject();
-		entries.push({ name, rawName, method, flags, crc32, compressedSize, uncompressedSize, localHeaderOffset, type });
+		entries.push({ name, rawName, rawExtra: centralExtra, method, flags, crc32, compressedSize, uncompressedSize, localHeaderOffset, type });
 		cursor += headerLength;
 	}
 	if (cursor !== endOffset) reject();
@@ -143,15 +146,25 @@ function parse(bytes) {
 		const uncompressedSize = bytes.readUInt32LE(offset + 22);
 		const nameLength = bytes.readUInt16LE(offset + 26);
 		const extraLength = bytes.readUInt16LE(offset + 28);
-		if (flags !== entry.flags || method !== entry.method || crc32 !== entry.crc32 || compressedSize !== entry.compressedSize || uncompressedSize !== entry.uncompressedSize) reject();
+		const hasDescriptor = (entry.flags & 8) !== 0;
+		if (flags !== entry.flags || method !== entry.method) reject();
+		if (hasDescriptor ? crc32 !== 0 || compressedSize !== 0 || uncompressedSize !== 0 : crc32 !== entry.crc32 || compressedSize !== entry.compressedSize || uncompressedSize !== entry.uncompressedSize) reject();
 		if (nameLength !== entry.rawName.length || extraLength > ZIP_INVENTORY_LIMITS.maxExtraBytes) reject();
 		const headerLength = 30 + nameLength + extraLength;
 		range(bytes, offset, headerLength, directoryOffset);
 		const localName = bytes.subarray(offset + 30, offset + 30 + nameLength);
+		const localExtra = bytes.subarray(offset + 30 + nameLength, offset + headerLength);
 		if (!localName.equals(entry.rawName)) reject();
-		validateExtra(extraLength);
-		const end = offset + headerLength + compressedSize;
-		if (end > directoryOffset) reject();
+		validateExtra(localExtra);
+		if (!localExtra.equals(entry.rawExtra)) reject();
+		const dataOffset = offset + headerLength;
+		range(bytes, dataOffset, entry.compressedSize, directoryOffset);
+		let end = dataOffset + entry.compressedSize;
+		if (hasDescriptor) {
+			range(bytes, end, 16, directoryOffset);
+			if (bytes.readUInt32LE(end) !== 0x08074b50 || bytes.readUInt32LE(end + 4) !== entry.crc32 || bytes.readUInt32LE(end + 8) !== entry.compressedSize || bytes.readUInt32LE(end + 12) !== entry.uncompressedSize) reject();
+			end += 16;
+		}
 		localRanges.push({ start: offset, end });
 	}
 	localRanges.sort((left, right) => left.start - right.start);
@@ -162,7 +175,7 @@ function parse(bytes) {
 	}
 	if (expectedOffset !== directoryOffset) reject();
 
-	return Object.freeze(entries.map(({ rawName, ...entry }) => Object.freeze(entry)));
+	return Object.freeze(entries.map(({ rawName, rawExtra, ...entry }) => Object.freeze(entry)));
 }
 
 export function inventoryZip(bytes) {
@@ -212,14 +225,16 @@ export function extractZipMember(bytes, expectedName) {
 		const nameLength = bytes.readUInt16LE(offset + 26);
 		const extraLength = bytes.readUInt16LE(offset + 28);
 		const nameBytes = Buffer.from(expectedName, "ascii");
-		if (flags !== entry.flags || method !== entry.method || crc !== entry.crc32 || compressedSize !== entry.compressedSize || uncompressedSize !== entry.uncompressedSize || nameLength !== nameBytes.length) rejectExtraction();
+		const hasDescriptor = (entry.flags & 8) !== 0;
+		if (flags !== entry.flags || method !== entry.method || nameLength !== nameBytes.length) rejectExtraction();
+		if (hasDescriptor ? crc !== 0 || compressedSize !== 0 || uncompressedSize !== 0 : crc !== entry.crc32 || compressedSize !== entry.compressedSize || uncompressedSize !== entry.uncompressedSize) rejectExtraction();
 		if (extraLength > ZIP_INVENTORY_LIMITS.maxExtraBytes) rejectExtraction();
 		const payloadOffset = offset + 30 + nameLength + extraLength;
 		range(bytes, offset + 30, nameLength + extraLength);
 		if (!bytes.subarray(offset + 30, offset + 30 + nameLength).equals(nameBytes)) rejectExtraction();
-		validateExtra(extraLength);
-		range(bytes, payloadOffset, compressedSize);
-		const compressed = bytes.subarray(payloadOffset, payloadOffset + compressedSize);
+		validateExtra(bytes.subarray(offset + 30 + nameLength, payloadOffset));
+		range(bytes, payloadOffset, entry.compressedSize);
+		const compressed = bytes.subarray(payloadOffset, payloadOffset + entry.compressedSize);
 		let output;
 		if (method === 0) {
 			if (compressedSize !== uncompressedSize) rejectExtraction();
