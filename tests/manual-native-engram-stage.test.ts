@@ -12,6 +12,7 @@ import {
 	assertBinaryIdentity,
 	assertRealDirectoryChain,
 	assertRegularLeaf,
+	checkReaderExecutable,
 	exclusiveBinaryWriteFlags,
 	selectEngramMember,
 } from "../scripts/manual-native-engram-stage.mjs";
@@ -101,6 +102,61 @@ test("classifies injected reader failures by each closed operation label", async
 		operation: "extract",
 		spawnSync: () => ({ status: 0, stdout: output }),
 	})), output);
+});
+
+test("uses only the fixed Darwin bsdtar reader and rejects unsafe targets safely", async () => {
+	const checked = [];
+	const inspectRegular = async (path) => {
+		checked.push(["lstat", path]);
+		return { isFile: () => true, isSymbolicLink: () => false };
+	};
+	assert.equal(await checkReaderExecutable("darwin", { PATH: "/hostile" }, {
+		assertRealDirectoryChain: async (path) => checked.push(["directory", path]),
+		lstat: inspectRegular,
+	}), "/usr/bin/bsdtar");
+	assert.deepEqual(checked, [["directory", "/usr/bin"], ["lstat", "/usr/bin/bsdtar"]]);
+
+	let invoked = false;
+	for (const details of [
+		{ isFile: () => true, isSymbolicLink: () => true },
+		{ isFile: () => false, isSymbolicLink: () => false },
+	]) {
+		const error = await staging.runNativeReader(Buffer.from("archive"), [], "/safe/cwd", 1024, {
+			operation: "list",
+			platform: "darwin",
+			environment: { PATH: "/hostile" },
+			checkExecutable: () => checkReaderExecutable("darwin", { PATH: "/hostile" }, {
+				assertRealDirectoryChain: async () => {}, lstat: async () => details,
+			}),
+			checkCwd: async () => {},
+			spawnSync: () => { invoked = true; return { status: 0, stdout: Buffer.from("member\\n") }; },
+		}).catch((failure) => failure);
+		assertFailureCode(error, "member-validation-native-reader-list-executable");
+	}
+	assert.equal(invoked, false);
+
+	let invocation;
+	await staging.runNativeReader(Buffer.from("archive"), [], "/safe/cwd", 1024, {
+		operation: "list",
+		platform: "darwin",
+		environment: { PATH: "/hostile", SECRET: "HOSTILE_SENTINEL" },
+		checkExecutable: () => checkReaderExecutable("darwin", { PATH: "/hostile" }, {
+			assertRealDirectoryChain: async () => {}, lstat: inspectRegular,
+		}),
+		checkCwd: async () => {},
+		spawnSync: (executable, args, options) => {
+			invocation = { executable, env: options.env };
+			return { status: 0, stdout: Buffer.from("member\\n") };
+		},
+	});
+	assert.deepEqual(invocation, { executable: "/usr/bin/bsdtar", env: { PATH: "/usr/bin:/bin", LC_ALL: "C" } });
+
+	const windowsLeaves = [];
+	assert.equal(await checkReaderExecutable("win32", { SystemRoot: "C:\\Windows", PATH: "/hostile" }, {
+		assertRealDirectoryChain: async () => {},
+		lstat: async (path) => { windowsLeaves.push(path); return { isFile: () => true, isSymbolicLink: () => false }; },
+	}), "C:\\Windows\\System32\\tar.exe");
+	assert.deepEqual(windowsLeaves, ["C:\\Windows\\System32\\tar.exe"]);
 });
 
 test("rejects hostile reader operation labels without deriving a public code", async () => {
