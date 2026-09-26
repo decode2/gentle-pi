@@ -181,6 +181,7 @@ jobs:
                 /source/lib/gentle-shell-launcher.ts /source/tests/gentle-shell-launcher.test.ts \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
+              node /source/scripts/build-runtime-modules.mjs --check
               node --experimental-strip-types --test --test-reporter=tap \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
                 | tee /tmp/questionnaire-full.tap
