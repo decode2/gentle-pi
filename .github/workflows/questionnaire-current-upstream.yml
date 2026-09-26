@@ -323,7 +323,7 @@ jobs:
           source="$RUNNER_TEMP/questionnaire-baseline/source"
           docker run --rm --network=none --read-only \
             --mount "type=bind,source=$source,target=/source,readonly" \
-            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --tmpfs /tmp:rw,exec,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
             --cap-drop=ALL --security-opt=no-new-privileges --user 1000:1000 -w /source "$IMAGE" \
             env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
             HOME=/tmp/home TMPDIR=/tmp NODE_OPTIONS=--max-old-space-size=1536 \
