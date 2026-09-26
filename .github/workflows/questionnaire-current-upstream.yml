@@ -3,7 +3,7 @@ name: Current-upstream questionnaire baseline
 on:
   push:
     branches:
-      - fix/questionnaire-explicit-submit
+      - ci/questionnaire-current-main-baseline
   pull_request:
     branches:
       - main
@@ -17,14 +17,15 @@ jobs:
     if: >-
       (github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
-      (github.event_name == 'push' ||
-       (github.head_ref == 'fix/questionnaire-explicit-submit' &&
+      (github.event_name == 'push' && github.ref == 'refs/heads/ci/questionnaire-current-main-baseline' ||
+       (github.event_name == 'pull_request' &&
+        github.head_ref == 'ci/questionnaire-current-main-baseline' &&
         (github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-pi')))
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      BASE: 7f78c36d4b50070008557a79b8734dd37222c569
+      BASE: 06c9915cdb247c99c25e5baa3d4148a97d362b6c
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
     steps:
       - name: Checkout exact event revision without credentials
@@ -54,8 +55,10 @@ jobs:
             package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json \
             scripts/check-types.mjs scripts/types-baseline.json \
             extensions/ask-user-question.ts extensions/gentle-ai.ts \
-            lib/questionnaire/questionnaire-view.ts lib/native-fullscreen-interaction.ts \
-            tests/ask-user-question.test.ts tests/questionnaire-view.test.ts tests/gentle-ai.test.ts; do
+            lib/questionnaire/questionnaire-view.ts lib/questionnaire/schema.ts \
+            lib/questionnaire/validate.ts lib/native-fullscreen-interaction.ts \
+            tests/ask-user-question.test.ts tests/questionnaire-schema.test.ts \
+            tests/questionnaire-view.test.ts tests/gentle-ai.test.ts; do
             base_blob="$(git rev-parse "$BASE:$path")"
             test "$(git rev-parse "HEAD:$path")" = "$base_blob"
             test "$(git hash-object -- "$path")" = "$base_blob"
@@ -106,6 +109,7 @@ jobs:
               git checkout --detach "$EXPECTED_SHA"
               test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
               test -z "$(git status --porcelain=v1 --untracked-files=all)"
+              grep -Eq '^[[:space:]]*"packageManager": "pnpm@11[.]1[.]1"$' package.json
               npm install --prefix /artifact/pnpm-bootstrap --no-save --package-lock=false \
                 --ignore-scripts --no-audit --no-fund pnpm@11.1.1
               pnpm=/artifact/pnpm-bootstrap/node_modules/.bin/pnpm
