@@ -1,4 +1,4 @@
-name: Current-upstream questionnaire UM-02 RED
+name: Current-upstream questionnaire UM-02 GREEN
 
 on:
   push:
@@ -27,9 +27,10 @@ jobs:
     env:
       BASE: 363c57352e45d7dfb6cefb89dd9d6eced51ebd09
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM02_TEST_BLOB: a977b7541f5e66fd5f7cb52424f50cf4a01a1dc5
+      UM02_TEST_BLOB: bb74f2016c0a76a8434dfc4df49297fa990a3b21
       UM02_ASK_TEST_BLOB: 7ed196be37ec582dd915778b9d570f5774053e19
-      UM02_VIEW_BLOB: 683dc02041e2deda9d1e7f82d57cc6d8d688a21a
+      UM02_ASK_BLOB: ad017afe99a43c3fad92cfa95e3653dd32a66bec
+      UM02_VIEW_BLOB: 7cb88afa452f7d5c33f0b93f3a194e8910292f3e
     steps:
       - name: Checkout exact event revision without credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -38,7 +39,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove RED test and current-main parent source identities
+      - name: Prove GREEN tests and producer/view source identities
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -50,14 +51,14 @@ jobs:
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts) ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts|extensions/ask-user-question.ts) ;;
               *) echo "unexpected changed path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
           for path in \
             package.json pnpm-lock.yaml pnpm-workspace.yaml tsconfig.json \
             scripts/check-types.mjs scripts/types-baseline.json \
-            extensions/ask-user-question.ts extensions/gentle-ai.ts \
+            extensions/gentle-ai.ts \
             lib/questionnaire/schema.ts lib/questionnaire/validate.ts \
             lib/native-fullscreen-interaction.ts tests/questionnaire-schema.test.ts \
             tests/gentle-ai.test.ts; do
@@ -68,13 +69,14 @@ jobs:
           test "$(git rev-parse HEAD:tests/questionnaire-view.test.ts)" = "$UM02_TEST_BLOB"
           test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM02_TEST_BLOB"
           for entry in "tests/ask-user-question.test.ts:$UM02_ASK_TEST_BLOB" \
+            "extensions/ask-user-question.ts:$UM02_ASK_BLOB" \
             "lib/questionnaire/questionnaire-view.ts:$UM02_VIEW_BLOB"; do
             path="${entry%%:*}"; blob="${entry#*:}"
-            test "$(git rev-parse "$BASE:$path")" = "$blob"
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          echo "UM-02 RED checkout=$EXPECTED_SHA base=$BASE test=$UM02_TEST_BLOB ask=$UM02_ASK_TEST_BLOB view=$UM02_VIEW_BLOB"
+          test "$(git rev-parse "$BASE:tests/ask-user-question.test.ts")" = "$UM02_ASK_TEST_BLOB"
+          echo "UM-02 GREEN checkout=$EXPECTED_SHA base=$BASE test=$UM02_TEST_BLOB ask-test=$UM02_ASK_TEST_BLOB ask=$UM02_ASK_BLOB view=$UM02_VIEW_BLOB"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -131,7 +133,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, baseline ask/view, Herdr and isolated UM-01/UM-02 gates offline
+      - name: Run strict types, full ask/view, Herdr and isolated UM-01/UM-02 gates offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -156,21 +158,13 @@ jobs:
                 /source/extensions/ask-user-question.ts /source/lib/questionnaire/questionnaire-view.ts \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
-              baseline_status=0
-              if node --experimental-strip-types --test --test-reporter=tap \
+              node --experimental-strip-types --test --test-reporter=tap \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
-                > /tmp/questionnaire-baseline.tap 2>&1; then
-                baseline_status=0
-              else
-                baseline_status=$?
-              fi
-              cat /tmp/questionnaire-baseline.tap
-              test "$baseline_status" -eq 1
-              grep -Fx "# tests 62" /tmp/questionnaire-baseline.tap
-              grep -Fx "# pass 57" /tmp/questionnaire-baseline.tap
-              grep -Fx "# fail 5" /tmp/questionnaire-baseline.tap
-              test "$(grep -E "^ok [0-9]+ - " /tmp/questionnaire-baseline.tap | grep -vc " - UM-02:")" -eq 56
-              test "$(grep -Ec "^not ok [0-9]+ - UM-02:" /tmp/questionnaire-baseline.tap)" -eq 5
+                | tee /tmp/questionnaire-green.tap
+              grep -Fx "# tests 62" /tmp/questionnaire-green.tap
+              grep -Fx "# pass 62" /tmp/questionnaire-green.tap
+              grep -Fx "# fail 0" /tmp/questionnaire-green.tap
+              grep -Fx "# skipped 0" /tmp/questionnaire-green.tap
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
                 /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
@@ -193,30 +187,13 @@ jobs:
                 grep -F " - UM-01: $name" /tmp/um01-green.tap | grep -q "^ok "
               done
               grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um01-green.tap
-              um02_status=0
-              if node --experimental-strip-types --test --test-reporter=tap \
+              node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-02:" /source/tests/questionnaire-view.test.ts \
-                > /tmp/um02-red.tap 2>&1; then
-                um02_status=0
-              else
-                um02_status=$?
-              fi
-              cat /tmp/um02-red.tap
-              test "$um02_status" -eq 1
-              grep -Fx "# tests 6" /tmp/um02-red.tap
-              grep -Fx "# pass 1" /tmp/um02-red.tap
-              grep -Fx "# fail 5" /tmp/um02-red.tap
-              grep -Fx "# skipped 0" /tmp/um02-red.tap
-              test "$(grep -Ec "^not ok [0-9]+ - UM-02:" /tmp/um02-red.tap)" -eq 5
-              grep -F " - UM-02: large bracketed paste expands to full text at least 1100 characters" /tmp/um02-red.tap | grep -q "^ok "
-              for name in \
-                "typed Shift-Enter newline differs from custom commit and explicit Submit" \
-                "bracketed paste normalizes CRLF CR and tabs" \
-                "drafts and caret remain separate across Tab Esc and reopen" \
-                "MULTI retains toggles with custom multiline text until explicit Submit" \
-                "editor pointer owns text target and restores caret position"; do
-                grep -F " - UM-02: $name" /tmp/um02-red.tap | grep -q "^not ok "
-              done
+                | tee /tmp/um02-green.tap
+              grep -Fx "# tests 6" /tmp/um02-green.tap
+              grep -Fx "# pass 6" /tmp/um02-green.tap
+              grep -Fx "# fail 0" /tmp/um02-green.tap
+              grep -Fx "# skipped 0" /tmp/um02-green.tap
             '
 
       - name: Recheck exact checkout and cleanliness

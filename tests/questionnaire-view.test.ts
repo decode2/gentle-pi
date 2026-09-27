@@ -1,10 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import {
 	CURSOR_MARKER,
 	KeybindingsManager,
 	TUI_KEYBINDINGS,
 	visibleWidth,
+	type EditorTheme,
+	type TUI,
 	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
 import {
@@ -18,6 +21,11 @@ import { CUSTOM_ROW_LABEL, type OptionData, type QuestionData } from "../lib/que
 const theme: QuestionnaireTheme = {
 	fg: (_color: string, text: string) => text,
 	bold: (text: string) => text,
+};
+const tui = { terminal: { rows: 24 }, requestRender() {} } as unknown as TUI;
+const editorTheme: EditorTheme = {
+	borderColor: (text) => text,
+	selectList: getSelectListTheme(),
 };
 
 const option = (label: string, description = `${label} description`, preview?: string): OptionData =>
@@ -50,6 +58,8 @@ function createView(
 	return new QuestionnaireView({
 		questions,
 		theme,
+		tui,
+		editorTheme,
 		onComplete: options.onComplete,
 		...(options.keybindings === undefined ? {} : { keybindings: options.keybindings }),
 	});

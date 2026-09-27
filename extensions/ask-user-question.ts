@@ -1,6 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { DynamicBorder } from "@earendil-works/pi-coding-agent";
-import { Text } from "@earendil-works/pi-tui";
+import { DynamicBorder, getSelectListTheme } from "@earendil-works/pi-coding-agent";
+import { Text, type EditorTheme } from "@earendil-works/pi-tui";
 import { createNativeFullscreenInteraction } from "../lib/native-fullscreen-interaction.ts";
 import { type QuestionData, type QuestionParams, QuestionParamsSchema } from "../lib/questionnaire/schema.ts";
 import {
@@ -282,6 +282,11 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 					const view = new QuestionnaireView({
 						questions: params.questions,
 						theme,
+						tui,
+						editorTheme: {
+							borderColor: (text) => theme.fg("borderMuted", text),
+							selectList: getSelectListTheme(),
+						} satisfies EditorTheme,
 						keybindings,
 						onComplete: (result) => done(result),
 					});
