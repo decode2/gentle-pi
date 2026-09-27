@@ -915,3 +915,16 @@ test("UM-03a-editor: long wrapped question keeps the real custom Editor draft an
 		"the real custom draft and caret survive closing and reopening");
 	assert.equal(completed.length, 0);
 });
+
+test("UM-03a-boundary: non-scrollable owned body returns boundary and zero wheel events to host", () => {
+	const view = createView([question("Pick?", [option("Only choice")])]);
+	const wheelOnOption = (wheelDelta: number): TuiMouseEvent => {
+		const lines = view.render(40), row = lines.findIndex((line) => plain(line).includes("Only choice"));
+		assert.ok(lines.length < tui.terminal.rows - 2 && row >= 0, "short body renders its owned option row");
+		return { ...mouseEvent(lines, row, "wheel"), button: "none", width: 40, wheelDelta };
+	};
+	const positive = view.handleMouse(wheelOnOption(1));
+	const zero = view.handleMouse(wheelOnOption(0));
+	assert.equal(positive, undefined, "positive wheel at the non-scrollable boundary must fall through");
+	assert.equal(zero, undefined, "zero-delta wheel on the owned row must fall through");
+});
