@@ -30,7 +30,7 @@ jobs:
       UM02_TEST_BLOB: bb74f2016c0a76a8434dfc4df49297fa990a3b21
       UM02_ASK_TEST_BLOB: 7ed196be37ec582dd915778b9d570f5774053e19
       UM02_ASK_BLOB: ad017afe99a43c3fad92cfa95e3653dd32a66bec
-      UM02_VIEW_BLOB: 7cb88afa452f7d5c33f0b93f3a194e8910292f3e
+      UM02_VIEW_BLOB: d67589b07520df91b59dd2e18d6419b40a6fc488
     steps:
       - name: Checkout exact event revision without credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4

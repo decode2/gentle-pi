@@ -221,7 +221,7 @@ export class QuestionnaireView extends Container implements Focusable {
 				width: this.editorMouseWidth,
 				height: this.editorMouseHeight,
 			});
-			return result ? { ...result, target: this.mouseTarget(event) } : undefined;
+			return result?.handled ? { ...result, handled: true as const, target: this.mouseTarget(event) } : undefined;
 		}
 
 		const owner = this.lineOwners[event.y];
