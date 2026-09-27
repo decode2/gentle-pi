@@ -736,3 +736,182 @@ test("every rendered line fits the width across 1-4 questions", () => {
 		assertFits(view, width);
 	}
 });
+
+test("UM-03a-preview: long split preview remains reachable at 80x20", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as unknown as TUI;
+	const previewTail = "PREVIEW-TAIL-REACHABLE";
+	const preview = `${"Long preview detail ".repeat(28)}\n${previewTail}`;
+	const view = new QuestionnaireView({
+		questions: [question("Choose?", [option("Alpha", "Short description", preview)])],
+		theme,
+		tui: compactTui,
+		editorTheme,
+	});
+	const before = view.render(80);
+	assert.ok(before.length <= compactTui.terminal.rows - 2, "split preview must fit the 18-row component area");
+	assert.ok(before.some((line) => plain(line).includes("Submit")) &&
+		before.some((line) => plain(line).includes("Cancel")), "actions remain reachable below the split preview");
+	assert.ok(!plain(before.join("\n")).includes(previewTail), "the long preview must overflow before scrolling");
+	const ownedRow = before.findIndex((line) => plain(line).includes("Alpha"));
+	assert.ok(ownedRow >= 0, "the left option supplies an owned wheel target");
+	const wheel = {
+		...mouseEvent(before, ownedRow, "wheel"),
+		button: "none" as const,
+		width: 80,
+		wheelDelta: 200,
+	};
+	assert.equal(view.handleMouse(wheel)?.handled, true, "owned wheel reveals the split preview tail");
+	const after = view.render(80);
+	assert.ok(plain(after.join("\n")).includes(previewTail), "the last preview content becomes visible after scrolling");
+	assert.ok(after.length <= compactTui.terminal.rows - 2 &&
+		after.some((line) => plain(line).includes("Submit")) &&
+		after.some((line) => plain(line).includes("Cancel")), "both actions stay visible after scrolling");
+});
+
+test("UM-03a: 40x20 wrapped body keeps Next, Submit, and Cancel reachable without answer-time delivery", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as unknown as TUI;
+	const completed: QuestionnaireResult[] = [];
+	const first = question(
+		"Choose a route with a deliberately long wrapped question?",
+		Array.from({ length: 12 }, (_, index) =>
+			option(`Route ${index}`, `Detail ${index}: ${"wrapped body text ".repeat(4)}`)),
+	);
+	const view = new QuestionnaireView({
+		questions: [first, question("Finish?", [option("Yes")])],
+		theme,
+		tui: compactTui,
+		editorTheme,
+		onComplete: (result) => completed.push(result),
+	});
+	view.handleInput(KEY.enter); // Record Route 0, not Next.
+	assert.equal(completed.length, 0, "answering must not deliver before an explicit action");
+	let lines = view.render(40);
+	assert.ok(lines.length <= compactTui.terminal.rows - 2, "wrapped body leaves room for both native borders");
+	assert.ok(lines.some((line) => plain(line).includes("Next")) &&
+		lines.some((line) => plain(line).includes("Cancel")), "Next and Cancel are visible on the first question");
+	const bodyRow = lines.findIndex((line) => plain(line).includes("Route 0"));
+	assert.ok(bodyRow >= 0);
+	const wheel = {
+		...mouseEvent(lines, bodyRow, "wheel"),
+		button: "none" as const,
+		width: 40,
+		wheelDelta: 12,
+	};
+	assert.equal(view.handleMouse(wheel)?.handled, true, "wheel scrolls the owned wrapped body");
+	lines = view.render(40);
+	const nextRow = lines.findIndex((line) => plain(line).includes("Next"));
+	assert.ok(nextRow >= 0);
+	const nextX = plain(lines[nextRow]!).indexOf("Next");
+	assert.equal(view.handleMouse({ ...mouseEvent(lines, nextRow, "click"), width: 40, x: nextX })?.handled, true);
+	assert.equal(view.activeQuestion, 1);
+	assert.equal(completed.length, 0, "Next advances without delivering answers");
+
+	view.handleInput(KEY.enter); // Record Yes, not Submit.
+	assert.equal(completed.length, 0, "the final answer also waits for explicit Submit");
+	lines = view.render(40);
+	const submitRow = lines.findIndex((line) => plain(line).includes("Submit"));
+	assert.ok(submitRow >= 0 && lines.some((line) => plain(line).includes("Cancel")));
+	const submitX = plain(lines[submitRow]!).indexOf("Submit");
+	assert.equal(view.handleMouse({ ...mouseEvent(lines, submitRow, "click"), width: 40, x: submitX })?.handled, true);
+	assert.deepEqual(completed[0]?.answers.map((answer) => answer.answer), ["Route 0", "Yes"]);
+
+	const cancelled: QuestionnaireResult[] = [];
+	const cancelView = new QuestionnaireView({
+		questions: [first], theme, tui: compactTui, editorTheme, onComplete: (result) => cancelled.push(result),
+	});
+	const cancelLines = cancelView.render(40);
+	assert.ok(cancelLines.length <= compactTui.terminal.rows - 2);
+	const cancelRow = cancelLines.findIndex((line) => plain(line).includes("Cancel"));
+	assert.ok(cancelRow >= 0, "Cancel remains reachable with the long wrapped body");
+	const cancelX = plain(cancelLines[cancelRow]!).indexOf("Cancel");
+	assert.equal(cancelView.handleMouse({ ...mouseEvent(cancelLines, cancelRow, "click"), width: 40, x: cancelX })?.handled, true);
+	assert.equal(cancelled[0]?.cancelled, true);
+	assert.equal(cancelled[0]?.answers.length, 0, "Cancel does not deliver an uncommitted answer");
+});
+
+test("UM-03a: scrolling and resize reject stale hits while fresh targets retain the real Editor draft", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as unknown as TUI;
+	const completed: QuestionnaireResult[] = [];
+	const pick = question("Pick a route?", Array.from({ length: 10 }, (_, index) =>
+		option(`Route ${index}`, `Description ${index} ${"wrapped ".repeat(12)}`)));
+	const view = new QuestionnaireView({
+		questions: [pick], theme, tui: compactTui, editorTheme, onComplete: (result) => completed.push(result),
+	});
+	for (let index = 0; index < pick.options.length; index++) view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter); // Open the real per-question Editor.
+	view.handleInput("preserved draft");
+	view.handleInput(KEY.escape); // Keep its uncommitted draft while returning to choices.
+	for (let index = 0; index < pick.options.length; index++) view.handleInput(KEY.up[0]);
+	view.handleInput(KEY.enter); // Record Route 0 without delivering.
+	assert.equal(completed.length, 0);
+
+	const before = view.render(40);
+	const oldOptionRow = before.findIndex((line) => plain(line).includes("Route 0"));
+	assert.ok(oldOptionRow >= 0);
+	const wheel = {
+		...mouseEvent(before, oldOptionRow, "wheel"),
+		button: "none" as const,
+		width: 40,
+		wheelDelta: 10,
+	};
+	assert.equal(view.handleMouse(wheel)?.handled, true, "body scrolling stays owned by the view");
+	assert.equal(view.handleMouse({ ...mouseEvent(before, oldOptionRow, "click"), width: 40 }), undefined,
+		"a pre-scroll row hit cannot commit an obsolete cell");
+	const scrolled = view.render(40);
+	assert.notEqual(plain(scrolled.join("\n")), plain(before.join("\n")));
+	const oldSubmitRow = scrolled.findIndex((line) => plain(line).includes("Submit"));
+	assert.ok(oldSubmitRow >= 0);
+	const oldSubmitX = plain(scrolled[oldSubmitRow]!).indexOf("Submit");
+	const resized = view.render(48);
+	assert.ok(resized.length <= compactTui.terminal.rows - 2, "the resized body remains bounded");
+	assert.equal(view.handleMouse({
+		...mouseEvent(scrolled, oldSubmitRow, "click"), width: 40, x: oldSubmitX,
+	}), undefined, "a pre-resize pointer geometry cannot hit a fresh layout");
+	assert.equal(completed.length, 0, "stale hits never deliver the questionnaire");
+
+	for (let index = 0; index < pick.options.length; index++) view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter); // Reopen the retained Editor draft.
+	assert.match(plain(render(view, 48)), /preserved draft/);
+	view.handleInput(KEY.enter); // Commit the draft, not Submit.
+	assert.equal(completed.length, 0);
+	assert.equal(view.getResult().answers[0]?.answer, "preserved draft");
+	const fresh = view.render(48);
+	const freshSubmitRow = fresh.findIndex((line) => plain(line).includes("Submit"));
+	assert.ok(freshSubmitRow >= 0);
+	const freshSubmitX = plain(fresh[freshSubmitRow]!).indexOf("Submit");
+	assert.equal(view.handleMouse({
+		...mouseEvent(fresh, freshSubmitRow, "click"), width: 48, x: freshSubmitX,
+	})?.handled, true, "a fresh action target remains owned after resize");
+	assert.equal(completed[0]?.answers[0]?.answer, "preserved draft");
+});
+
+test("UM-03a-editor: long wrapped question keeps the real custom Editor draft and caret on screen", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as unknown as TUI;
+	const completed: QuestionnaireResult[] = [];
+	const longQuestion = question(
+		"Choose a route with enough wrapped context to fill the native viewport. ".repeat(14),
+		Array.from({ length: 12 }, (_, index) => option(`Route ${index}`)),
+	);
+	const view = new QuestionnaireView({
+		questions: [longQuestion], theme, tui: compactTui, editorTheme, onComplete: (result) => completed.push(result),
+	});
+	for (let index = 0; index < longQuestion.options.length; index++) view.handleInput(KEY.down[0]);
+	view.handleInput(KEY.enter); // Open the real public Editor, not a simulated input.
+	view.focused = true;
+	const draft = "custom draft visible";
+	view.handleInput(draft);
+	view.handleInput("\x1b[D"); // Keep the caret inside the visible draft.
+	assert.equal(completed.length, 0, "editing the custom response does not deliver");
+	const lines = view.render(40);
+	assert.ok(lines.length <= compactTui.terminal.rows - 2, "Editor fits inside the 18-row native viewport");
+	const screen = lines.slice(0, compactTui.terminal.rows - 2);
+	assert.ok(screen.some((line) => plain(line).replaceAll(CURSOR_MARKER, "").includes(draft) && line.includes(CURSOR_MARKER)),
+		"the real Editor draft and caret remain visible on screen after long question wrapping");
+	view.handleInput(KEY.escape); // Preserve, rather than discard, the draft.
+	view.handleInput(KEY.enter); // Reopen it at the same per-question Editor.
+	const reopened = view.render(40);
+	assert.ok(reopened.slice(0, compactTui.terminal.rows - 2)
+		.some((line) => plain(line).replaceAll(CURSOR_MARKER, "").includes(draft) && line.includes(CURSOR_MARKER)),
+		"the real custom draft and caret survive closing and reopening");
+	assert.equal(completed.length, 0);
+});

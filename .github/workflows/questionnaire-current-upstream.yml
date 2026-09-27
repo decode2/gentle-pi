@@ -1,9 +1,9 @@
-name: Current-upstream questionnaire UM-02 GREEN
+name: Current-upstream questionnaire UM-03a RED
 
 on:
   push:
     branches:
-      - feat/questionnaire-current-main-multiline
+      - feat/questionnaire-current-main-body-reachability
   pull_request:
     branches:
       - main
@@ -17,17 +17,17 @@ jobs:
     if: >-
       (github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
-      (github.event_name == 'push' && github.ref == 'refs/heads/feat/questionnaire-current-main-multiline' ||
+      (github.event_name == 'push' && github.ref == 'refs/heads/feat/questionnaire-current-main-body-reachability' ||
        (github.event_name == 'pull_request' &&
-        github.head_ref == 'feat/questionnaire-current-main-multiline' &&
+        github.head_ref == 'feat/questionnaire-current-main-body-reachability' &&
         (github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' ||
          github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-pi')))
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      BASE: 363c57352e45d7dfb6cefb89dd9d6eced51ebd09
+      BASE: 8164b2fb18c9ea1e9c54c85096ada422e252c9f9
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM02_TEST_BLOB: bb74f2016c0a76a8434dfc4df49297fa990a3b21
+      UM03A_TEST_BLOB: 7afa2db1667d7d1bc4420a783089cdccfa295c70
       UM02_ASK_TEST_BLOB: 7ed196be37ec582dd915778b9d570f5774053e19
       UM02_ASK_BLOB: ad017afe99a43c3fad92cfa95e3653dd32a66bec
       UM02_VIEW_BLOB: d67589b07520df91b59dd2e18d6419b40a6fc488
@@ -39,7 +39,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove GREEN tests and producer/view source identities
+      - name: Prove RED test and unchanged producer/view identities
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -66,17 +66,18 @@ jobs:
             test "$(git rev-parse "HEAD:$path")" = "$base_blob"
             test "$(git hash-object -- "$path")" = "$base_blob"
           done
-          test "$(git rev-parse HEAD:tests/questionnaire-view.test.ts)" = "$UM02_TEST_BLOB"
-          test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM02_TEST_BLOB"
+          test "$(git rev-parse HEAD:tests/questionnaire-view.test.ts)" = "$UM03A_TEST_BLOB"
+          test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM03A_TEST_BLOB"
           for entry in "tests/ask-user-question.test.ts:$UM02_ASK_TEST_BLOB" \
             "extensions/ask-user-question.ts:$UM02_ASK_BLOB" \
             "lib/questionnaire/questionnaire-view.ts:$UM02_VIEW_BLOB"; do
             path="${entry%%:*}"; blob="${entry#*:}"
+            test "$(git rev-parse "$BASE:$path")" = "$blob"
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
           test "$(git rev-parse "$BASE:tests/ask-user-question.test.ts")" = "$UM02_ASK_TEST_BLOB"
-          echo "UM-02 GREEN checkout=$EXPECTED_SHA base=$BASE test=$UM02_TEST_BLOB ask-test=$UM02_ASK_TEST_BLOB ask=$UM02_ASK_BLOB view=$UM02_VIEW_BLOB"
+          echo "UM-03a RED checkout=$EXPECTED_SHA base=$BASE test=$UM03A_TEST_BLOB ask-test=$UM02_ASK_TEST_BLOB ask=$UM02_ASK_BLOB view=$UM02_VIEW_BLOB"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -133,7 +134,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, full ask/view, Herdr and isolated UM-01/UM-02 gates offline
+      - name: Run strict types, behavioral RED, Herdr and UM-01/UM-02 gates offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -158,13 +159,47 @@ jobs:
                 /source/extensions/ask-user-question.ts /source/lib/questionnaire/questionnaire-view.ts \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
-              node --experimental-strip-types --test --test-reporter=tap \
+              if node --experimental-strip-types --test --test-reporter=tap \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/questionnaire-green.tap
-              grep -Fx "# tests 62" /tmp/questionnaire-green.tap
-              grep -Fx "# pass 62" /tmp/questionnaire-green.tap
-              grep -Fx "# fail 0" /tmp/questionnaire-green.tap
-              grep -Fx "# skipped 0" /tmp/questionnaire-green.tap
+                | tee /tmp/questionnaire-red.tap; then
+                echo "expected four UM-03a behavioral failures" >&2
+                exit 1
+              else
+                red_status=$?
+              fi
+              test "$red_status" -ne 0
+              test "$(grep -Ec "^ok [0-9]+ - " /tmp/questionnaire-red.tap)" -eq 62
+              test "$(grep -Ec "^not ok [0-9]+ - " /tmp/questionnaire-red.tap)" -eq 4
+              test "$(grep -Ec "^not ok [0-9]+ - UM-03a" /tmp/questionnaire-red.tap)" -eq 4
+              grep -Fx "# tests 66" /tmp/questionnaire-red.tap
+              grep -Fx "# pass 62" /tmp/questionnaire-red.tap
+              grep -Fx "# fail 4" /tmp/questionnaire-red.tap
+              grep -Fx "# skipped 0" /tmp/questionnaire-red.tap
+              for name in \
+                "UM-03a-preview: long split preview remains reachable at 80x20" \
+                "UM-03a: 40x20 wrapped body keeps Next, Submit, and Cancel reachable without answer-time delivery" \
+                "UM-03a: scrolling and resize reject stale hits while fresh targets retain the real Editor draft" \
+                "UM-03a-editor: long wrapped question keeps the real custom Editor draft and caret on screen"; do
+                grep -F " - $name" /tmp/questionnaire-red.tap | grep -q "^not ok "
+              done
+              if node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="^UM-03a" /source/tests/questionnaire-view.test.ts \
+                | tee /tmp/um03a-red.tap; then
+                echo "expected all isolated UM-03a tests to fail before implementation" >&2
+                exit 1
+              else
+                isolated_red_status=$?
+              fi
+              test "$isolated_red_status" -ne 0
+              test "$(grep -Ec "^not ok [0-9]+ - UM-03a" /tmp/um03a-red.tap)" -eq 4
+              test "$(grep -Ec "^ok [0-9]+ - " /tmp/um03a-red.tap)" -eq 0
+              for name in \
+                "UM-03a-preview: long split preview remains reachable at 80x20" \
+                "UM-03a: 40x20 wrapped body keeps Next, Submit, and Cancel reachable without answer-time delivery" \
+                "UM-03a: scrolling and resize reject stale hits while fresh targets retain the real Editor draft" \
+                "UM-03a-editor: long wrapped question keeps the real custom Editor draft and caret on screen"; do
+                grep -F " - $name" /tmp/um03a-red.tap | grep -q "^not ok "
+              done
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
                 /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
@@ -186,7 +221,6 @@ jobs:
                 "visible Cancel remains distinct from Submit"; do
                 grep -F " - UM-01: $name" /tmp/um01-green.tap | grep -q "^ok "
               done
-              grep -E "^# (tests|pass|fail|cancelled|skipped|todo) [0-9]+$" /tmp/um01-green.tap
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-02:" /source/tests/questionnaire-view.test.ts \
                 | tee /tmp/um02-green.tap
