@@ -219,7 +219,7 @@ export class QuestionnaireView extends Container implements Focusable {
 
 	override handleMouse(event: TuiMouseEvent) {
 		if (this.completed || event.width !== this.renderedWidth ||
-			(this.tui.terminal.rows ?? 24) !== this.renderedTerminalRows) return undefined;
+			(this.tui.terminal?.rows ?? 24) !== this.renderedTerminalRows) return undefined;
 		if (event.type === "wheel") {
 			if (event.y < this.bodyStart || event.y >= this.bodyStart + this.bodyHeight || !this.lineOwners[event.y]) return undefined;
 			const maxScroll = Math.max(0, this.bodyLineCount - this.bodyHeight);
@@ -287,7 +287,7 @@ export class QuestionnaireView extends Container implements Focusable {
 
 	override render(width: number): string[] {
 		const viewport = Math.max(1, width);
-		const terminalRows = this.tui.terminal.rows ?? 24;
+		const terminalRows = this.tui.terminal?.rows ?? 24;
 		if (viewport !== this.renderedWidth || terminalRows !== this.renderedTerminalRows) this.keepFocusedVisible = true;
 		this.renderedWidth = viewport;
 		this.renderedTerminalRows = terminalRows;
