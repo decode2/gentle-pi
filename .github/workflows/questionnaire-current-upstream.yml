@@ -190,10 +190,9 @@ jobs:
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-02:" /source/tests/questionnaire-view.test.ts \
                 | tee /tmp/um02-green.tap
-              grep -Fx "# tests 6" /tmp/um02-green.tap
               grep -Fx "# pass 6" /tmp/um02-green.tap
               grep -Fx "# fail 0" /tmp/um02-green.tap
-              grep -Fx "# skipped 0" /tmp/um02-green.tap
+              test "$(grep -Ec "^ok [0-9]+ - UM-02:" /tmp/um02-green.tap)" -eq 6
             '
 
       - name: Recheck exact checkout and cleanliness
