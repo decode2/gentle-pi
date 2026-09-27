@@ -1,5 +1,6 @@
 import {
 	Container,
+	CURSOR_MARKER,
 	Editor,
 	isKeyRelease,
 	matchesKey,
@@ -73,17 +74,18 @@ type LineOwner =
  * The whole questionnaire is represented as a compact tab strip: exactly one
  * question body is rendered at a time, and Tab/Shift-Tab switches the active
  * question while each question keeps its own cursor, toggles, and custom-text
- * draft. This keeps the component's height bounded for one to four questions
- * so it fits the native dock area instead of overflowing the viewport.
+ * draft. The owned body viewport is bounded by the current terminal row
+ * budget, with navigation and resize keeping the active row visible.
  *
- * Native dock-swap component: it is a {@link Container}, never an overlay, so
- * the transcript stays scrollable while it is focused. Keyboard handling uses
+ * This is a {@link Container}, not an overlay. Host dock sizing and transcript
+ * routing remain outside this component's contract. Keyboard handling uses
  * the public Pi TUI input protocol (`matchesKey()` and the injected
- * `KeybindingsManager`), matching how the shipped agent views read input.
+ * `KeybindingsManager`).
  */
 export class QuestionnaireView extends Container implements Focusable {
 	private readonly questions: QuestionData[];
 	private readonly theme: QuestionnaireTheme;
+	private readonly tui: TUI;
 	private readonly keybindings: KeybindingsManager | undefined;
 	private readonly onComplete: ((result: QuestionnaireResult) => void) | undefined;
 	private readonly states: QuestionState[];
@@ -92,15 +94,25 @@ export class QuestionnaireView extends Container implements Focusable {
 	private completed = false;
 	private result: QuestionnaireResult | undefined;
 	private lineOwners: Array<LineOwner | undefined> = [];
+	private bodyStart = 0;
+	private bodyHeight = 0;
+	private bodyLineCount = 0;
+	private bodyScroll = 0;
+	private renderedWidth = 0;
+	private renderedTerminalRows = 0;
+	private keepFocusedVisible = true;
 	private editorMouseStart: number | undefined;
 	private editorMouseWidth = 0;
 	private editorMouseHeight = 0;
+	private editorMouseEditorHeight = 0;
+	private editorMouseOffset = 0;
 	private _focused = false;
 
 	constructor(options: QuestionnaireViewOptions) {
 		super();
 		this.questions = options.questions;
 		this.theme = options.theme;
+		this.tui = options.tui;
 		this.keybindings = options.keybindings;
 		this.onComplete = options.onComplete;
 		this.states = options.questions.map(() => ({
@@ -206,7 +218,18 @@ export class QuestionnaireView extends Container implements Focusable {
 	}
 
 	override handleMouse(event: TuiMouseEvent) {
-		if (this.completed) return undefined;
+		if (this.completed || event.width !== this.renderedWidth ||
+			(this.tui.terminal.rows ?? 24) !== this.renderedTerminalRows) return undefined;
+		if (event.type === "wheel") {
+			if (event.y < this.bodyStart || event.y >= this.bodyStart + this.bodyHeight || !this.lineOwners[event.y]) return undefined;
+			const maxScroll = Math.max(0, this.bodyLineCount - this.bodyHeight);
+			const delta = event.wheelDelta ?? 0;
+			const step = Math.max(1, Math.abs(delta));
+			this.bodyScroll = Math.max(0, Math.min(maxScroll, this.bodyScroll + Math.sign(delta || 1) * step));
+			this.invalidate();
+			this.keepFocusedVisible = false;
+			return { handled: true as const, focus: true, render: true, target: this.mouseTarget(event) };
+		}
 		if (this.editingQuestion !== undefined) {
 			const state = this.states[this.editingQuestion];
 			if (
@@ -217,9 +240,9 @@ export class QuestionnaireView extends Container implements Focusable {
 			) return undefined;
 			const result = state.editor.handleMouse({
 				...event,
-				y: event.y - this.editorMouseStart,
+				y: event.y - this.editorMouseStart + this.editorMouseOffset,
 				width: this.editorMouseWidth,
-				height: this.editorMouseHeight,
+				height: this.editorMouseEditorHeight,
 			});
 			return result?.handled ? { ...result, handled: true as const, target: this.mouseTarget(event) } : undefined;
 		}
@@ -264,16 +287,33 @@ export class QuestionnaireView extends Container implements Focusable {
 
 	override render(width: number): string[] {
 		const viewport = Math.max(1, width);
+		const terminalRows = this.tui.terminal.rows ?? 24;
+		if (viewport !== this.renderedWidth || terminalRows !== this.renderedTerminalRows) this.keepFocusedVisible = true;
+		this.renderedWidth = viewport;
+		this.renderedTerminalRows = terminalRows;
 		const lines: string[] = [];
 		const owners: Array<LineOwner | undefined> = [];
 		this.editorMouseStart = undefined;
 		this.editorMouseWidth = 0;
 		this.editorMouseHeight = 0;
+		this.editorMouseEditorHeight = 0;
+		this.editorMouseOffset = 0;
+		const rowBudget = Math.max(1, terminalRows - 2);
+		const fixedBudget = Math.max(0, rowBudget - 1);
+		const showTabs = fixedBudget >= 3;
+		const actionRows = fixedBudget >= 3 ? 2 : fixedBudget;
+		const showHint = fixedBudget >= 4;
+		const requiredFixedRows = (showTabs ? 1 : 0) + actionRows + (showHint ? 1 : 0);
+		const spacerRows = Math.min(2, Math.max(0, fixedBudget - requiredFixedRows));
 		const push = (text: string, owner?: LineOwner) => {
 			for (const line of this.wrap(text, viewport)) {
 				lines.push(line);
 				owners.push(owner);
 			}
+		};
+		const pushFixed = (line: string) => {
+			lines.push(line);
+			owners.push(undefined);
 		};
 
 		if (this.questions.length === 0) {
@@ -281,9 +321,10 @@ export class QuestionnaireView extends Container implements Focusable {
 			return [];
 		}
 
-		push(this.renderTabs());
-		push("");
+		if (showTabs) pushFixed(this.wrap(this.renderTabs(), viewport)[0] ?? "");
+		if (spacerRows > 0) pushFixed("");
 		const bodyStart = lines.length;
+		let bodyAnchor: number | undefined;
 
 		const preview = this.currentPreview();
 		if (preview !== undefined && viewport >= MIN_PREVIEW_WIDTH) {
@@ -294,46 +335,74 @@ export class QuestionnaireView extends Container implements Focusable {
 			const rows = Math.max(left.lines.length, right.length);
 			for (let index = 0; index < rows; index++) {
 				lines.push(`${padTo(left.lines[index] ?? "", leftWidth)}${PREVIEW_GAP}${right[index] ?? ""}`);
-				owners.push(left.owners[index]);
+				owners.push(left.owners[index] ?? { questionIndex: this.focusedQuestion, rowIndex: -1 });
 			}
 		}
 		else {
 			const body = this.renderBody(viewport, preview !== undefined);
 			lines.push(...body.lines);
 			owners.push(...body.owners);
+			bodyAnchor = body.editorAnchor;
 			if (body.editorOffset !== undefined) {
 				this.editorMouseStart = bodyStart + body.editorOffset;
 				this.editorMouseWidth = viewport;
 				this.editorMouseHeight = body.editorHeight ?? 0;
+				this.editorMouseEditorHeight = body.editorHeight ?? 0;
 			}
 		}
+		const bodyEnd = lines.length;
 
-		push("");
+		if (spacerRows > 1) pushFixed("");
 		if (this.editingQuestion === undefined) {
 			const action = this.focusedQuestion === this.questions.length - 1 ? "Submit" : "Next";
-			for (const [label, kind] of [[action, "advance"], ["Cancel", "cancel"]] as const) {
+			const actions = [[action, "advance"], ["Cancel", "cancel"]] as const;
+			for (const [label, kind] of actions.slice(0, actionRows)) {
 				const styled = kind === "advance" && this.states[this.focusedQuestion]?.actionFocused
 					? this.accent(label) : this.theme.fg("muted", label);
-				let remaining = visibleWidth(label);
-				for (const line of this.wrap(styled, viewport)) {
-					lines.push(line);
-					const hitWidth = Math.min(visibleWidth(line), remaining);
-					owners.push({ action: kind, width: hitWidth });
-					remaining -= hitWidth;
-				}
+				const line = this.wrap(styled, viewport)[0] ?? "";
+				lines.push(line);
+				owners.push({ action: kind, width: Math.min(visibleWidth(line), visibleWidth(label)) });
 			}
 		}
-		push(this.hint());
+		if (showHint) pushFixed(this.wrap(this.hint(), viewport)[0] ?? "");
 
+		const bodyCount = bodyEnd - bodyStart;
+		const fixedRows = lines.length - bodyCount;
+		this.bodyHeight = Math.min(bodyCount, Math.max(1, rowBudget - fixedRows));
+		this.bodyLineCount = bodyCount;
+		this.bodyStart = bodyStart;
+		const state = this.states[this.focusedQuestion];
+		const focusedLine = bodyAnchor ?? owners.slice(bodyStart, bodyEnd).findIndex((owner) =>
+			owner?.questionIndex === this.focusedQuestion && owner.rowIndex === state?.cursor);
+		const maxScroll = Math.max(0, bodyCount - this.bodyHeight);
+		if (this.keepFocusedVisible && focusedLine >= 0) {
+			if (focusedLine < this.bodyScroll) this.bodyScroll = focusedLine;
+			else if (focusedLine >= this.bodyScroll + this.bodyHeight) this.bodyScroll = focusedLine - this.bodyHeight + 1;
+		}
+		this.bodyScroll = Math.max(0, Math.min(maxScroll, this.bodyScroll));
+		lines.splice(bodyStart, bodyCount, ...lines.slice(bodyStart + this.bodyScroll, bodyStart + this.bodyScroll + this.bodyHeight));
+		owners.splice(bodyStart, bodyCount, ...owners.slice(bodyStart + this.bodyScroll, bodyStart + this.bodyScroll + this.bodyHeight));
+		if (this.editorMouseStart !== undefined) {
+			const editorEnd = this.editorMouseStart + this.editorMouseHeight;
+			const visibleStart = Math.max(this.editorMouseStart, bodyStart + this.bodyScroll);
+			const visibleEnd = Math.min(editorEnd, bodyStart + this.bodyScroll + this.bodyHeight);
+			this.editorMouseOffset = visibleStart - this.editorMouseStart;
+			this.editorMouseHeight = Math.max(0, visibleEnd - visibleStart);
+			this.editorMouseStart = visibleStart - this.bodyScroll;
+		}
+		this.keepFocusedVisible = false;
 		this.lineOwners = owners;
 		return lines;
 	}
 
 	override invalidate(): void {
+		this.keepFocusedVisible = true;
 		this.lineOwners = [];
 		this.editorMouseStart = undefined;
 		this.editorMouseWidth = 0;
 		this.editorMouseHeight = 0;
+		this.editorMouseEditorHeight = 0;
+		this.editorMouseOffset = 0;
 		for (const [index, state] of this.states.entries()) {
 			state.editor.focused = this.editingQuestion === index && this._focused;
 		}
@@ -360,6 +429,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		owners: Array<LineOwner | undefined>;
 		editorOffset?: number;
 		editorHeight?: number;
+		editorAnchor?: number;
 	} {
 		const lines: string[] = [];
 		const owners: Array<LineOwner | undefined> = [];
@@ -383,7 +453,14 @@ export class QuestionnaireView extends Container implements Focusable {
 			const editorLines = state.editor.render(width);
 			lines.push(...editorLines);
 			owners.push(...editorLines.map(() => headerOwner));
-			return { lines, owners, editorOffset, editorHeight: editorLines.length };
+			const caretLine = editorLines.findIndex((line) => line.includes(CURSOR_MARKER));
+			return {
+				lines,
+				owners,
+				editorOffset,
+				editorHeight: editorLines.length,
+				editorAnchor: editorOffset + Math.max(0, caretLine),
+			};
 		}
 
 		const customIndex = question.options.length;
