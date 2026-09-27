@@ -373,7 +373,8 @@ export class QuestionnaireView extends Container implements Focusable {
 		this.bodyStart = bodyStart;
 		const state = this.states[this.focusedQuestion];
 		const focusedLine = bodyAnchor ?? owners.slice(bodyStart, bodyEnd).findIndex((owner) =>
-			owner?.questionIndex === this.focusedQuestion && owner.rowIndex === state?.cursor);
+			owner !== undefined && "questionIndex" in owner &&
+			owner.questionIndex === this.focusedQuestion && owner.rowIndex === state?.cursor);
 		const maxScroll = Math.max(0, bodyCount - this.bodyHeight);
 		if (this.keepFocusedVisible && focusedLine >= 0) {
 			if (focusedLine < this.bodyScroll) this.bodyScroll = focusedLine;
