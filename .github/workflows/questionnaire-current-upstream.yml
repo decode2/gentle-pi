@@ -1,4 +1,4 @@
-name: Current-upstream questionnaire UM-03a RED
+name: Current-upstream questionnaire UM-03a GREEN
 
 on:
   push:
@@ -28,7 +28,7 @@ jobs:
       BASE: 8164b2fb18c9ea1e9c54c85096ada422e252c9f9
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
       UM03A_TEST_BLOB: a0d42fccfc7bf1a7ba38fcef3c197938dd539b6f
-      UM03A_VIEW_BLOB: b3495e5d5261ad99ea2e7a53cb69ab7c5014aadb
+      UM03A_VIEW_BLOB: cf9a7acac2bdc5e87f4d4e59026f07a572f1e478
       UM02_ASK_TEST_BLOB: 7ed196be37ec582dd915778b9d570f5774053e19
       UM02_ASK_BLOB: ad017afe99a43c3fad92cfa95e3653dd32a66bec
       UM02_VIEW_BLOB: d67589b07520df91b59dd2e18d6419b40a6fc488
@@ -40,7 +40,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove exact-SHA RED test, view and producer identities
+      - name: Prove exact-SHA GREEN test, view and producer identities
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -80,7 +80,7 @@ jobs:
           test "$(git rev-parse "$BASE:lib/questionnaire/questionnaire-view.ts")" = "$UM02_VIEW_BLOB"
           test "$(git rev-parse "HEAD:lib/questionnaire/questionnaire-view.ts")" = "$UM03A_VIEW_BLOB"
           test "$(git hash-object -- lib/questionnaire/questionnaire-view.ts)" = "$UM03A_VIEW_BLOB"
-          echo "UM-03a RED checkout=$EXPECTED_SHA base=$BASE test=$UM03A_TEST_BLOB ask-test=$UM02_ASK_TEST_BLOB ask=$UM02_ASK_BLOB view=$UM03A_VIEW_BLOB"
+          echo "UM-03a GREEN checkout=$EXPECTED_SHA base=$BASE test=$UM03A_TEST_BLOB ask-test=$UM02_ASK_TEST_BLOB ask=$UM02_ASK_BLOB view=$UM03A_VIEW_BLOB"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -137,7 +137,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, full ask/view, Herdr and isolated UM-01/UM-02 gates offline
+      - name: Run strict types, full ask/view GREEN, Herdr and isolated UM-03a/UM-01/UM-02 gates offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -162,28 +162,25 @@ jobs:
                 /source/extensions/ask-user-question.ts /source/lib/questionnaire/questionnaire-view.ts \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
-              set +e
               node --experimental-strip-types --test --test-reporter=tap \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/questionnaire-red.tap
-              tap_status=${PIPESTATUS[0]}
-              set -e
-              test "$tap_status" -eq 1
-              grep -Fx "# tests 67" /tmp/questionnaire-red.tap
-              grep -Fx "# pass 66" /tmp/questionnaire-red.tap
-              grep -Fx "# fail 1" /tmp/questionnaire-red.tap
-              grep -Fx "# skipped 0" /tmp/questionnaire-red.tap
-              grep -Eq "^not ok [0-9]+ - UM-03a-boundary: non-scrollable owned body returns boundary and zero wheel events to host$" /tmp/questionnaire-red.tap
+                | tee /tmp/questionnaire-green.tap
+              grep -Fx "# tests 67" /tmp/questionnaire-green.tap
+              grep -Fx "# pass 67" /tmp/questionnaire-green.tap
+              grep -Fx "# fail 0" /tmp/questionnaire-green.tap
+              grep -Fx "# skipped 0" /tmp/questionnaire-green.tap
               node --experimental-strip-types --test --test-reporter=tap \
-                --test-name-pattern="^(UM-03a-preview:|UM-03a:|UM-03a-editor:)" \
+                --test-name-pattern="^(UM-03a-preview:|UM-03a:|UM-03a-editor:|UM-03a-boundary:)" \
                 /source/tests/questionnaire-view.test.ts | tee /tmp/um03a-green.tap
+              grep -Fx "# pass 5" /tmp/um03a-green.tap
               grep -Fx "# fail 0" /tmp/um03a-green.tap
-              test "$(grep -Ec "^ok [0-9]+ - UM-03a" /tmp/um03a-green.tap)" -eq 4
+              test "$(grep -Ec "^ok [0-9]+ - UM-03a" /tmp/um03a-green.tap)" -eq 5
               for name in \
                 "UM-03a-preview: long split preview remains reachable at 80x20" \
                 "UM-03a: 40x20 wrapped body keeps Next, Submit, and Cancel reachable without answer-time delivery" \
                 "UM-03a: scrolling and resize reject stale hits while fresh targets retain the real Editor draft" \
-                "UM-03a-editor: long wrapped question keeps the real custom Editor draft and caret on screen"; do
+                "UM-03a-editor: long wrapped question keeps the real custom Editor draft and caret on screen" \
+                "UM-03a-boundary: non-scrollable owned body returns boundary and zero wheel events to host"; do
                 grep -F " - $name" /tmp/um03a-green.tap | grep -q "^ok "
               done
               node --experimental-strip-types --test --test-reporter=tap \

@@ -224,8 +224,11 @@ export class QuestionnaireView extends Container implements Focusable {
 			if (event.y < this.bodyStart || event.y >= this.bodyStart + this.bodyHeight || !this.lineOwners[event.y]) return undefined;
 			const maxScroll = Math.max(0, this.bodyLineCount - this.bodyHeight);
 			const delta = event.wheelDelta ?? 0;
+			if (delta === 0) return undefined;
 			const step = Math.max(1, Math.abs(delta));
-			this.bodyScroll = Math.max(0, Math.min(maxScroll, this.bodyScroll + Math.sign(delta || 1) * step));
+			const nextScroll = Math.max(0, Math.min(maxScroll, this.bodyScroll + Math.sign(delta) * step));
+			if (nextScroll === this.bodyScroll) return undefined;
+			this.bodyScroll = nextScroll;
 			this.invalidate();
 			this.keepFocusedVisible = false;
 			return { handled: true as const, focus: true, render: true, target: this.mouseTarget(event) };
