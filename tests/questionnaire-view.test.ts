@@ -1020,3 +1020,50 @@ test("UM03b-wheel: oversized inline preview text scrolls while adjacent blank ce
 		"UM03b-wheel: adjacent blank cell must fall through");
 	assert.deepEqual(view.render(60), afterTextScroll, "fallthrough leaves the inline-preview slice unchanged");
 });
+
+test("UM03b-wheel: split preview text scrolls while the gutter falls through", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as unknown as TUI;
+	const previewMarker = "SPLIT-PREVIEW-ROW-02";
+	const preview = Array.from({ length: 24 }, (_, index) =>
+		`SPLIT-PREVIEW-ROW-${String(index).padStart(2, "0")}: detail`).join("\n");
+	const view = new QuestionnaireView({
+		questions: [question("Choose?", [option("Alpha", "Short description", preview), option("Beta")])],
+		theme,
+		tui: compactTui,
+		editorTheme,
+	});
+	const before = view.render(80);
+	assert.ok(!plain(before.join("\n")).includes("SPLIT-PREVIEW-ROW-23"),
+		"oversized split preview content extends beyond the initial viewport");
+	const previewRow = before.findIndex((line) => plain(line).includes(previewMarker));
+	assert.ok(previewRow >= 0, "split preview text is rendered in the right pane at width 80");
+	const previewTextX = plain(before[previewRow]!).indexOf(previewMarker) + 2;
+	assert.ok(previewTextX > 37, "preview text appears to the right of the split gutter");
+	const ownedWheel = {
+		...mouseEvent(before, previewRow, "wheel"),
+		button: "none" as const,
+		width: 80,
+		x: previewTextX,
+		screenX: previewTextX,
+		wheelDelta: 1,
+	};
+	assert.equal(view.handleMouse(ownedWheel)?.handled, true, "wheel over split-preview text must scroll the body");
+	const afterTextScroll = view.render(80);
+	const movedPreviewRow = afterTextScroll.findIndex((line) => plain(line).includes(previewMarker));
+	assert.equal(movedPreviewRow, previewRow - 1, "split-preview text moves up one viewport row after scrolling");
+
+	const splitLine = plain(afterTextScroll[movedPreviewRow]!);
+	const gutterX = splitLine.indexOf(previewMarker) - 1;
+	assert.equal(splitLine[gutterX], " ", "the cell immediately before right-pane text is blank split gutter");
+	const gutterWheel = {
+		...mouseEvent(afterTextScroll, movedPreviewRow, "wheel"),
+		button: "none" as const,
+		width: 80,
+		x: gutterX,
+		screenX: gutterX,
+		wheelDelta: 1,
+	};
+	assert.equal(view.handleMouse(gutterWheel), undefined,
+		"UM03b-wheel: split-preview gutter must fall through");
+	assert.deepEqual(view.render(80), afterTextScroll, "gutter fallthrough leaves the split-preview body unchanged");
+});
