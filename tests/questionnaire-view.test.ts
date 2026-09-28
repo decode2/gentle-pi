@@ -928,3 +928,95 @@ test("UM-03a-boundary: non-scrollable owned body returns boundary and zero wheel
 	assert.equal(positive, undefined, "positive wheel at the non-scrollable boundary must fall through");
 	assert.equal(zero, undefined, "zero-delta wheel on the owned row must fall through");
 });
+
+test("UM03b-wheel: rendered option text scrolls while same-row blank cells fall through", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as unknown as TUI;
+	const options = Array.from({ length: 12 }, (_, index) =>
+		option(`Route ${index}`, index === 0 ? "Short" : `Detail ${index}: ${"wrapped option detail ".repeat(4)}`));
+	const view = new QuestionnaireView({
+		questions: [question("Choose?", options)],
+		theme,
+		tui: compactTui,
+		editorTheme,
+	});
+	const before = view.render(40);
+	const optionRow = before.findIndex((line) => plain(line).includes("Route 0"));
+	assert.ok(optionRow >= 0, "the first rendered option text is visible in the overflowing body");
+	const optionX = plain(before[optionRow]!).indexOf("Route 0") + 2;
+	const ownedWheel = {
+		...mouseEvent(before, optionRow, "wheel"),
+		button: "none" as const,
+		width: 40,
+		x: optionX,
+		screenX: optionX,
+		wheelDelta: 1,
+	};
+	assert.equal(view.handleMouse(ownedWheel)?.handled, true, "wheel over rendered option text must scroll the body");
+	const afterTextScroll = view.render(40);
+	const movedOptionRow = afterTextScroll.findIndex((line) => plain(line).includes("Route 0"));
+	assert.equal(movedOptionRow, optionRow - 1, "rendered option text moves up one viewport row after scrolling");
+
+	const blankRow = afterTextScroll.findIndex((line) => plain(line).includes("Route 1"));
+	assert.ok(blankRow >= 0, "a short option row remains visible after scrolling");
+	const blankX = 35;
+	assert.ok(visibleWidth(plain(afterTextScroll[blankRow]!).trimEnd()) < blankX,
+		"the selected x coordinate is blank on the rendered option row");
+	const blankWheel = {
+		...mouseEvent(afterTextScroll, blankRow, "wheel"),
+		button: "none" as const,
+		width: 40,
+		x: blankX,
+		screenX: blankX,
+		wheelDelta: 1,
+	};
+	assert.equal(view.handleMouse(blankWheel), undefined,
+		"UM03b-wheel: same-row blank cell must fall through");
+	assert.deepEqual(view.render(40), afterTextScroll, "fallthrough leaves the rendered option slice unchanged");
+});
+
+test("UM03b-wheel: oversized inline preview text scrolls while adjacent blank cells fall through", () => {
+	const compactTui = { terminal: { rows: 20 }, requestRender() {} } as unknown as TUI;
+	const previewMarker = "INLINE-PREVIEW-ROW-00";
+	const preview = Array.from({ length: 20 }, (_, index) =>
+		`INLINE-PREVIEW-ROW-${String(index).padStart(2, "0")}: ${"preview detail ".repeat(8)}`).join("\n");
+	const view = new QuestionnaireView({
+		questions: [question("Choose?", [option("Alpha", "Short description", preview), option("Beta")])],
+		theme,
+		tui: compactTui,
+		editorTheme,
+	});
+	const before = view.render(60);
+	assert.ok(!plain(before.join("\n")).includes("INLINE-PREVIEW-ROW-19"), "oversized preview content extends beyond the initial viewport");
+	const previewRow = before.findIndex((line) => plain(line).includes(previewMarker));
+	assert.ok(previewRow >= 0, "oversized preview text is rendered in the narrow inline layout");
+	const previewX = plain(before[previewRow]!).indexOf(previewMarker) + 2;
+	const ownedWheel = {
+		...mouseEvent(before, previewRow, "wheel"),
+		button: "none" as const,
+		width: 60,
+		x: previewX,
+		screenX: previewX,
+		wheelDelta: 1,
+	};
+	assert.equal(view.handleMouse(ownedWheel)?.handled, true, "wheel over inline preview text must scroll the body");
+	const afterTextScroll = view.render(60);
+	const movedPreviewRow = afterTextScroll.findIndex((line) => plain(line).includes(previewMarker));
+	assert.equal(movedPreviewRow, previewRow - 1, "inline preview text moves up one viewport row after scrolling");
+
+	const optionRow = afterTextScroll.findIndex((line) => plain(line).includes("Alpha"));
+	assert.ok(optionRow >= 0, "the short option label remains visible beside the inline preview");
+	const blankX = 20;
+	assert.ok(visibleWidth(plain(afterTextScroll[optionRow]!).trimEnd()) < blankX,
+		"the adjacent option-row cell is blank in the rendered inline layout");
+	const blankWheel = {
+		...mouseEvent(afterTextScroll, optionRow, "wheel"),
+		button: "none" as const,
+		width: 60,
+		x: blankX,
+		screenX: blankX,
+		wheelDelta: 1,
+	};
+	assert.equal(view.handleMouse(blankWheel), undefined,
+		"UM03b-wheel: adjacent blank cell must fall through");
+	assert.deepEqual(view.render(60), afterTextScroll, "fallthrough leaves the inline-preview slice unchanged");
+});

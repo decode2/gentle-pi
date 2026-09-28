@@ -1,37 +1,31 @@
-name: Current-upstream questionnaire UM-03a GREEN
+name: Current-upstream questionnaire UM-03b behavioral RED
 
 on:
   push:
     branches:
-      - feat/questionnaire-current-main-body-reachability
-  pull_request:
-    branches:
-      - main
+      - feat/questionnaire-current-main-wheel-ownership
 
 permissions:
   contents: read
 
 jobs:
-  baseline:
-    # Only the designated fork/upstream branch; no arbitrary PR head in the networked lane.
+  behavioral-red:
+    # A push event on this exact feature branch is the only source of RED evidence.
     if: >-
       (github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
-      (github.event_name == 'push' && github.ref == 'refs/heads/feat/questionnaire-current-main-body-reachability' ||
-       (github.event_name == 'pull_request' &&
-        github.head_ref == 'feat/questionnaire-current-main-body-reachability' &&
-        (github.event.pull_request.head.repo.full_name == 'decode2/gentle-pi' ||
-         github.event.pull_request.head.repo.full_name == 'Gentleman-Programming/gentle-pi')))
+      github.event_name == 'push' &&
+      github.ref == 'refs/heads/feat/questionnaire-current-main-wheel-ownership'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      BASE: 8164b2fb18c9ea1e9c54c85096ada422e252c9f9
+      BASE: 648bc5d03656e1eca81a24daedc993b5a9dd5008
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM03A_TEST_BLOB: a0d42fccfc7bf1a7ba38fcef3c197938dd539b6f
+      UM03B_TEST_BLOB: 6d583ee7ee9e0f2e7680c5f5074f1d73764cf6e4
+      UM03A_BASE_TEST_BLOB: a0d42fccfc7bf1a7ba38fcef3c197938dd539b6f
       UM03A_VIEW_BLOB: cf9a7acac2bdc5e87f4d4e59026f07a572f1e478
+      UM03A_PRODUCER_BLOB: ad017afe99a43c3fad92cfa95e3653dd32a66bec
       UM02_ASK_TEST_BLOB: 7ed196be37ec582dd915778b9d570f5774053e19
-      UM02_ASK_BLOB: ad017afe99a43c3fad92cfa95e3653dd32a66bec
-      UM02_VIEW_BLOB: d67589b07520df91b59dd2e18d6419b40a6fc488
     steps:
       - name: Checkout exact event revision without credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -40,20 +34,22 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove exact-SHA GREEN test, view and producer identities
+      - name: Prove exact-SHA UM-03b RED test and frozen parent identities
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
           test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$EXPECTED_SHA" != "$BASE"
           test -z "$(git status --porcelain=v1 --untracked-files=all)"
           git cat-file -e "$BASE^{commit}"
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts|tests/ask-user-question.test.ts|lib/questionnaire/questionnaire-view.ts|extensions/ask-user-question.ts) ;;
-              *) echo "unexpected changed path: $path" >&2; exit 1 ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts) ;;
+              *) echo "unexpected UM-03b RED path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
           for path in \
@@ -67,20 +63,18 @@ jobs:
             test "$(git rev-parse "HEAD:$path")" = "$base_blob"
             test "$(git hash-object -- "$path")" = "$base_blob"
           done
-          test "$(git rev-parse HEAD:tests/questionnaire-view.test.ts)" = "$UM03A_TEST_BLOB"
-          test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM03A_TEST_BLOB"
+          test "$(git rev-parse "$BASE:tests/questionnaire-view.test.ts")" = "$UM03A_BASE_TEST_BLOB"
+          test "$(git rev-parse HEAD:tests/questionnaire-view.test.ts)" = "$UM03B_TEST_BLOB"
+          test "$(git hash-object -- tests/questionnaire-view.test.ts)" = "$UM03B_TEST_BLOB"
           for entry in "tests/ask-user-question.test.ts:$UM02_ASK_TEST_BLOB" \
-            "extensions/ask-user-question.ts:$UM02_ASK_BLOB"; do
+            "extensions/ask-user-question.ts:$UM03A_PRODUCER_BLOB" \
+            "lib/questionnaire/questionnaire-view.ts:$UM03A_VIEW_BLOB"; do
             path="${entry%%:*}"; blob="${entry#*:}"
             test "$(git rev-parse "$BASE:$path")" = "$blob"
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          test "$(git rev-parse "$BASE:tests/ask-user-question.test.ts")" = "$UM02_ASK_TEST_BLOB"
-          test "$(git rev-parse "$BASE:lib/questionnaire/questionnaire-view.ts")" = "$UM02_VIEW_BLOB"
-          test "$(git rev-parse "HEAD:lib/questionnaire/questionnaire-view.ts")" = "$UM03A_VIEW_BLOB"
-          test "$(git hash-object -- lib/questionnaire/questionnaire-view.ts)" = "$UM03A_VIEW_BLOB"
-          echo "UM-03a GREEN checkout=$EXPECTED_SHA base=$BASE test=$UM03A_TEST_BLOB ask-test=$UM02_ASK_TEST_BLOB ask=$UM02_ASK_BLOB view=$UM03A_VIEW_BLOB"
+          echo "UM-03b RED checkout=$EXPECTED_SHA base=$BASE test=$UM03B_TEST_BLOB original-test=$UM03A_BASE_TEST_BLOB view=$UM03A_VIEW_BLOB producer=$UM03A_PRODUCER_BLOB ask-test=$UM02_ASK_TEST_BLOB"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -137,7 +131,7 @@ jobs:
               echo "acquired checkout=$EXPECTED_SHA pnpm=11.1.1 frozen-lockfile=true scripts=false"
             '
 
-      - name: Run strict types, full ask/view GREEN, Herdr and isolated UM-03a/UM-01/UM-02 gates offline
+      - name: Run strict types, ratchet, and all prior passing gates offline
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -163,18 +157,10 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts
               node /source/scripts/check-types.mjs
               node --experimental-strip-types --test --test-reporter=tap \
-                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/questionnaire-green.tap
-              grep -Fx "# tests 67" /tmp/questionnaire-green.tap
-              grep -Fx "# pass 67" /tmp/questionnaire-green.tap
-              grep -Fx "# fail 0" /tmp/questionnaire-green.tap
-              grep -Fx "# skipped 0" /tmp/questionnaire-green.tap
-              node --experimental-strip-types --test --test-reporter=tap \
-                --test-name-pattern="^(UM-03a-preview:|UM-03a:|UM-03a-editor:|UM-03a-boundary:)" \
+                --test-name-pattern="^(UM-03a-preview: long split preview remains reachable at 80x20|UM-03a: 40x20 wrapped body keeps Next, Submit, and Cancel reachable without answer-time delivery|UM-03a: scrolling and resize reject stale hits while fresh targets retain the real Editor draft|UM-03a-editor: long wrapped question keeps the real custom Editor draft and caret on screen|UM-03a-boundary: non-scrollable owned body returns boundary and zero wheel events to host)$" \
                 /source/tests/questionnaire-view.test.ts | tee /tmp/um03a-green.tap
               grep -Fx "# pass 5" /tmp/um03a-green.tap
               grep -Fx "# fail 0" /tmp/um03a-green.tap
-              test "$(grep -Ec "^ok [0-9]+ - UM-03a" /tmp/um03a-green.tap)" -eq 5
               for name in \
                 "UM-03a-preview: long split preview remains reachable at 80x20" \
                 "UM-03a: 40x20 wrapped body keeps Next, Submit, and Cancel reachable without answer-time delivery" \
@@ -184,17 +170,21 @@ jobs:
                 grep -F " - $name" /tmp/um03a-green.tap | grep -q "^ok "
               done
               node --experimental-strip-types --test --test-reporter=tap \
-                --test-name-pattern="RPIV questionnaire blockers|Herdr coordinates|closed choice blockers" \
+                --test-name-pattern="^(RPIV questionnaire blockers emit only a private, balanced Herdr projection|Herdr coordinates guarded confirmations and RPIV labels without inactive relabel pulses|closed choice blockers retain the visible choice label through guarded-confirmation overlap)$" \
                 /source/tests/gentle-ai.test.ts | tee /tmp/herdr.tap
               grep -Fx "# pass 3" /tmp/herdr.tap
               grep -Fx "# fail 0" /tmp/herdr.tap
-              test "$(grep -Ec "^ok [0-9]+ - (RPIV questionnaire blockers|Herdr coordinates|closed choice blockers)" /tmp/herdr.tap)" -eq 3
+              for name in \
+                "RPIV questionnaire blockers emit only a private, balanced Herdr projection" \
+                "Herdr coordinates guarded confirmations and RPIV labels without inactive relabel pulses" \
+                "closed choice blockers retain the visible choice label through guarded-confirmation overlap"; do
+                grep -F " - $name" /tmp/herdr.tap | grep -q "^ok "
+              done
               node --experimental-strip-types --test --test-reporter=tap \
-                --test-name-pattern="^UM-01:" /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/um01-green.tap
+                --test-name-pattern="^(UM-01: keyboard Next and final Submit require separate actions after answering|UM-01: earlier answers remain editable until explicit Submit|UM-01: an empty optional MULTI can be explicitly submitted|UM-01: custom draft and MULTI toggles survive editing before Submit|UM-01: pointer Submit accepts only the visible action hit span|UM-01: pointer Submit delivers latest MULTI selection after commit and custom edit|UM-01: visible Cancel remains distinct from Submit)$" \
+                /source/tests/questionnaire-view.test.ts | tee /tmp/um01-green.tap
               grep -Fx "# pass 7" /tmp/um01-green.tap
               grep -Fx "# fail 0" /tmp/um01-green.tap
-              test "$(grep -Ec "^ok [0-9]+ - UM-01:" /tmp/um01-green.tap)" -eq 7
               for name in \
                 "keyboard Next and final Submit require separate actions after answering" \
                 "earlier answers remain editable until explicit Submit" \
@@ -206,11 +196,56 @@ jobs:
                 grep -F " - UM-01: $name" /tmp/um01-green.tap | grep -q "^ok "
               done
               node --experimental-strip-types --test --test-reporter=tap \
-                --test-name-pattern="^UM-02:" /source/tests/questionnaire-view.test.ts \
-                | tee /tmp/um02-green.tap
+                --test-name-pattern="^(UM-02: typed Shift-Enter newline differs from custom commit and explicit Submit|UM-02: bracketed paste normalizes CRLF CR and tabs|UM-02: large bracketed paste expands to full text at least 1100 characters|UM-02: drafts and caret remain separate across Tab Esc and reopen|UM-02: MULTI retains toggles with custom multiline text until explicit Submit|UM-02: editor pointer owns text target and restores caret position)$" \
+                /source/tests/questionnaire-view.test.ts | tee /tmp/um02-green.tap
               grep -Fx "# pass 6" /tmp/um02-green.tap
               grep -Fx "# fail 0" /tmp/um02-green.tap
-              test "$(grep -Ec "^ok [0-9]+ - UM-02:" /tmp/um02-green.tap)" -eq 6
+              for name in \
+                "typed Shift-Enter newline differs from custom commit and explicit Submit" \
+                "bracketed paste normalizes CRLF CR and tabs" \
+                "large bracketed paste expands to full text at least 1100 characters" \
+                "drafts and caret remain separate across Tab Esc and reopen" \
+                "MULTI retains toggles with custom multiline text until explicit Submit" \
+                "editor pointer owns text target and restores caret position"; do
+                grep -F " - UM-02: $name" /tmp/um02-green.tap | grep -q "^ok "
+              done
+            '
+
+      - name: Require exactly two named UM-03b behavioral assertion failures
+        shell: bash
+        env:
+          IMAGE_ID: ${{ steps.image.outputs.id }}
+        run: |
+          set -euo pipefail
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = "$IMAGE_ID"
+          source="$RUNNER_TEMP/questionnaire-baseline/source"
+          docker run --rm --network=none --read-only \
+            --mount "type=bind,source=$source,target=/source,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --cap-drop=ALL --security-opt=no-new-privileges --user 1000:1000 -w /source "$IMAGE" \
+            env -i PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin \
+            HOME=/tmp/home TMPDIR=/tmp NODE_OPTIONS=--max-old-space-size=1536 \
+            GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
+            GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 /bin/bash -euo pipefail -c '
+              set +e
+              node --experimental-strip-types --test --test-reporter=tap \
+                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts \
+                2>&1 | tee /tmp/questionnaire-full.tap
+              red_status=${PIPESTATUS[0]}
+              set -e
+              test "$red_status" -ne 0
+              for expected in "# tests 69" "# pass 67" "# fail 2" \
+                "# cancelled 0" "# todo 0"; do
+                grep -Fx "$expected" /tmp/questionnaire-full.tap
+              done
+              test "$(grep -Ec "^ok [0-9]+ - " /tmp/questionnaire-full.tap)" -eq 67
+              test "$(grep -Ec "^not ok [0-9]+ - " /tmp/questionnaire-full.tap)" -eq 2
+              test "$(grep -Ec "^not ok [0-9]+ - UM03b-wheel: rendered option text scrolls while same-row blank cells fall through$" /tmp/questionnaire-full.tap)" -eq 1
+              test "$(grep -Ec "^not ok [0-9]+ - UM03b-wheel: oversized inline preview text scrolls while adjacent blank cells fall through$" /tmp/questionnaire-full.tap)" -eq 1
+              grep -F "UM03b-wheel: same-row blank cell must fall through" /tmp/questionnaire-full.tap
+              grep -F "UM03b-wheel: adjacent blank cell must fall through" /tmp/questionnaire-full.tap
+              test "$(grep -Fc "ERR_ASSERTION" /tmp/questionnaire-full.tap)" -eq 2
+              echo "Full ask/view TAP confirmed: 67 prior passes and only the two pinned blank-cell assertion failures"
             '
 
       - name: Recheck exact checkout and cleanliness
