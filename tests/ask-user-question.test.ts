@@ -86,7 +86,12 @@ function registerQuestionTool(slot?: ExtensionSlot): { tool: RegisteredTool; slo
 	return { tool, slot: target, emitted };
 }
 
-function tuiContext(inputs: readonly string[], rendered?: { value: string }, assertBeforeSubmit = false) {
+function tuiContext(
+	inputs: readonly string[],
+	rendered?: { value: string },
+	assertBeforeSubmit = false,
+	selection?: { value: unknown },
+) {
 	return {
 		mode: "tui",
 		ui: {
@@ -94,6 +99,7 @@ function tuiContext(inputs: readonly string[], rendered?: { value: string }, ass
 				let result: unknown;
 				const component = factory({ requestRender() {} }, theme, {}, (value) => {
 					result = value;
+					if (selection) selection.value = value;
 				});
 				if (rendered) rendered.value = component.render(100).join("\n");
 				for (const [index, input] of inputs.entries()) {
@@ -666,4 +672,103 @@ test("ask_user_question renderResult renders answered and cancelled rows", () =>
 		theme,
 	).render(200).join("\n");
 	assert.match(cancelled, /Cancelled/);
+});
+
+test("UM-04a: Escape retains a committed option preview from the real TUI", async () => {
+	const { tool } = registerQuestionTool();
+	const questions = [
+		{ question: "Proceed?", header: "Proceed", options: [option("Alpha", "First choice", "Preview A"), option("Beta")] },
+		{ question: "Continue?", header: "Continue", options: [option("Gamma"), option("Delta")] },
+	];
+
+	const selected = { value: undefined as unknown };
+	const result = await run(tool, { questions }, tuiContext(["\r", "\t", "\x1b"], undefined, false, selected));
+	const answers = [
+		{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha", preview: "Preview A" },
+	];
+
+	assert.deepEqual(selected.value, { cancelled: true, answers }, "the real view snapshots the committed answer before producer handling");
+	assert.equal(result.content[0]?.text, "User cancelled the questionnaire\nPartial answers:\n1. Proceed? — Alpha\n   selected preview: Preview A");
+	assert.deepEqual(result.details, { cancelled: true, answers });
+});
+
+test("UM-04a: Escape retains committed MULTI and custom rows in question order", async () => {
+	const { tool } = registerQuestionTool();
+	const questions = [
+		{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true },
+		{ question: "Skip?", header: "Skip", options: [option("Later"), option("Never")] },
+		{ question: "Explain?", header: "Explain", options: [option("Three"), option("Four")], multiSelect: true },
+	];
+	const inputs = [" ", "\r", "\t", "\t", " ", "\x1b[B", "\x1b[B", "\r", "Because", "\r", "\x1b"];
+
+	const selected = { value: undefined as unknown };
+	const result = await run(tool, { questions }, tuiContext(inputs, undefined, false, selected));
+	const answers = [
+		{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: ["One"] },
+		{ questionIndex: 2, question: "Explain?", kind: "custom", answer: "Because", selected: ["Three"] },
+	];
+
+	assert.deepEqual(selected.value, { cancelled: true, answers }, "the real view snapshots committed answers in original order");
+	assert.equal(result.content[0]?.text,
+		"User cancelled the questionnaire\nPartial answers:\n1. Pick? — selected: One\n3. Explain? — (custom) Because — selected: Three");
+	assert.deepEqual(result.details, { cancelled: true, answers });
+});
+
+test("UM-04a: Escape excludes uncommitted MULTI toggles and custom draft after a skipped question", async () => {
+	const { tool } = registerQuestionTool();
+	const questions = [
+		{ question: "Proceed?", header: "Proceed", options: [option("Alpha"), option("Beta")] },
+		{ question: "Skip?", header: "Skip", options: [option("Later"), option("Never")] },
+		{ question: "Pick?", header: "Pick", options: [option("One"), option("Two")], multiSelect: true },
+	];
+	const inputs = ["\r", "\t", "\t", " ", "\x1b[B", "\x1b[B", "\r", "draft not committed", "\x1b", "\x1b"];
+
+	const selected = { value: undefined as unknown };
+	const result = await run(tool, { questions }, tuiContext(inputs, undefined, false, selected));
+	const answers = [
+		{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha" },
+	];
+
+	assert.deepEqual(selected.value, { cancelled: true, answers }, "the real view snapshots only the committed prior row");
+	const transcript = result.content[0]?.text ?? "";
+	assert.equal(transcript, "User cancelled the questionnaire\nPartial answers:\n1. Proceed? — Alpha");
+	assert.doesNotMatch(transcript, /Skip\?|draft not committed|One/, "skipped question, editor draft, and MULTI toggle stay out of the partial transcript");
+	assert.deepEqual(result.details, { cancelled: true, answers });
+});
+
+test("UM-04a: partial cancellation renders numbered rows and keeps empty cancel shapes", async () => {
+	const { tool } = registerQuestionTool();
+
+	const answerless = await run(tool, { questions: single() }, tuiContext(["\x1b"]));
+	assert.equal(answerless.content[0]?.text, "User cancelled the questionnaire");
+	assert.deepEqual(answerless.details, { cancelled: true });
+	assert.equal(tool.renderResult(answerless, { expanded: false }, theme).render(200).join("\n"), "Cancelled");
+
+	const undefinedCustomResult = await run(tool, { questions: single() }, {
+		mode: "tui",
+		ui: { custom: async () => undefined },
+	});
+	assert.equal(undefinedCustomResult.content[0]?.text, "User cancelled the questionnaire");
+	assert.deepEqual(undefinedCustomResult.details, { cancelled: true });
+	assert.equal(tool.renderResult(undefinedCustomResult, { expanded: false }, theme).render(200).join("\n"), "Cancelled");
+
+	const questions = [
+		{ question: "Proceed?", header: "Proceed", options: [option("Alpha"), option("Beta")] },
+		{ question: "Skip?", header: "Skip", options: [option("Later"), option("Never")] },
+		{ question: "Finish?", header: "Finish", options: [option("Gamma"), option("Delta")] },
+	];
+	const selected = { value: undefined as unknown };
+	const partial = await run(tool, { questions }, tuiContext(["\r", "\t", "\t", "\r", "\x1b"], undefined, false, selected));
+	const answers = [
+		{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha" },
+		{ questionIndex: 2, question: "Finish?", kind: "option", answer: "Gamma" },
+	];
+	assert.deepEqual(selected.value, { cancelled: true, answers });
+
+	const rendered = tool.renderResult({ content: [], details: selected.value }, { expanded: false }, theme)
+		.render(200).join("\n");
+	assert.equal(rendered, "Cancelled\n1. Proceed? — Alpha\n3. Finish? — Gamma");
+	assert.equal(partial.content[0]?.text,
+		"User cancelled the questionnaire\nPartial answers:\n1. Proceed? — Alpha\n3. Finish? — Gamma");
+	assert.deepEqual(partial.details, { cancelled: true, answers });
 });
