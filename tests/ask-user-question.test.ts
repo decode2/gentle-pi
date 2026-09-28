@@ -742,7 +742,7 @@ test("UM-04a: partial cancellation renders numbered rows and keeps empty cancel 
 	const answerless = await run(tool, { questions: single() }, tuiContext(["\x1b"]));
 	assert.equal(answerless.content[0]?.text, "User cancelled the questionnaire");
 	assert.deepEqual(answerless.details, { cancelled: true });
-	assert.equal(tool.renderResult(answerless, { expanded: false }, theme).render(200).join("\n"), "Cancelled");
+	assert.equal(tool.renderResult(answerless, { expanded: false }, theme).render(200).map((line) => line.trimEnd()).join("\n"), "Cancelled");
 
 	const undefinedCustomResult = await run(tool, { questions: single() }, {
 		mode: "tui",
@@ -750,7 +750,7 @@ test("UM-04a: partial cancellation renders numbered rows and keeps empty cancel 
 	});
 	assert.equal(undefinedCustomResult.content[0]?.text, "User cancelled the questionnaire");
 	assert.deepEqual(undefinedCustomResult.details, { cancelled: true });
-	assert.equal(tool.renderResult(undefinedCustomResult, { expanded: false }, theme).render(200).join("\n"), "Cancelled");
+	assert.equal(tool.renderResult(undefinedCustomResult, { expanded: false }, theme).render(200).map((line) => line.trimEnd()).join("\n"), "Cancelled");
 
 	const questions = [
 		{ question: "Proceed?", header: "Proceed", options: [option("Alpha"), option("Beta")] },
@@ -766,8 +766,8 @@ test("UM-04a: partial cancellation renders numbered rows and keeps empty cancel 
 	assert.deepEqual(selected.value, { cancelled: true, answers });
 
 	const rendered = tool.renderResult({ content: [], details: selected.value }, { expanded: false }, theme)
-		.render(200).join("\n");
-	assert.equal(rendered, "Cancelled\n1. Proceed? — Alpha\n3. Finish? — Gamma");
+		.render(200).map((line) => line.trimEnd()).join("\n");
+	assert.equal(rendered, "Cancelled\n1. Proceed? — Alpha\n3. Finish? — Gamma", "partial cancellation renders numbered rows");
 	assert.equal(partial.content[0]?.text,
 		"User cancelled the questionnaire\nPartial answers:\n1. Proceed? — Alpha\n3. Finish? — Gamma");
 	assert.deepEqual(partial.details, { cancelled: true, answers });
