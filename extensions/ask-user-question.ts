@@ -53,10 +53,16 @@ function unavailableResult(): QuestionnaireToolResult {
 }
 
 /** Same cancellation shape the TUI questionnaire returns for its Escape key. */
-function cancelledResult(): QuestionnaireToolResult {
+function cancelledResult(answers: AnswerRow[] = []): QuestionnaireToolResult {
+	const hasPartialAnswers = answers.length > 0;
 	return {
-		content: [{ type: "text", text: "User cancelled the questionnaire" }],
-		details: { cancelled: true },
+		content: [{
+			type: "text",
+			text: hasPartialAnswers
+				? `User cancelled the questionnaire\nPartial answers:\n${answersText(answers)}`
+				: "User cancelled the questionnaire",
+		}],
+		details: { cancelled: true, ...(hasPartialAnswers ? { answers } : {}) },
 	};
 }
 
@@ -306,12 +312,8 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 				pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: false });
 			}
 
-			if (selection === undefined || selection.cancelled) {
-				return {
-					content: [{ type: "text", text: "User cancelled the questionnaire" }],
-					details: { cancelled: true },
-				};
-			}
+			if (selection === undefined) return cancelledResult();
+			if (selection.cancelled) return cancelledResult(selection.answers);
 			return {
 				content: [{ type: "text", text: answersText(selection.answers) }],
 				details: { answers: selection.answers },
@@ -329,8 +331,15 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 		},
 		renderResult(result, _options, theme) {
 			const details = result.details as QuestionnaireDetails | undefined;
-			if (details?.cancelled === true) return new Text(theme.fg("warning", "Cancelled"), 0, 0);
 			const answers = Array.isArray(details?.answers) ? details.answers : [];
+			if (details?.cancelled === true) {
+				if (answers.length === 0) return new Text(theme.fg("warning", "Cancelled"), 0, 0);
+				const lines = answers.flatMap((answer) => [
+					`${answer.questionIndex + 1}. ${answer.question} — ${answerBody(answer)}`,
+					...(answer.preview !== undefined ? [`   selected preview: ${answer.preview}`] : []),
+				]);
+				return new Text([theme.fg("warning", "Cancelled"), ...lines.map((line) => theme.fg("success", line))].join("\n"), 0, 0);
+			}
 			if (answers.length === 0) return new Text(theme.fg("warning", "No answers"), 0, 0);
 			const lines = answers.map((answer) => {
 				if (answer.kind === "multi") return theme.fg("success", `✓ ${answer.question} — ${(answer.selected ?? []).join(", ")}`);
