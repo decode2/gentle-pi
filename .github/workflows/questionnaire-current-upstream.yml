@@ -1,4 +1,4 @@
-name: Current-upstream questionnaire UM-03b behavioral RED
+name: Current-upstream questionnaire UM-03b behavioral GREEN
 
 on:
   push:
@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  behavioral-red:
-    # A push event on this exact feature branch is the only source of behavioral RED evidence.
+  behavioral-green:
+    # A push event on this exact feature branch is the only source of exact-SHA behavioral GREEN evidence.
     if: >-
       (github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
@@ -22,7 +22,7 @@ jobs:
       BASE: 648bc5d03656e1eca81a24daedc993b5a9dd5008
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
       UM03B_TEST_BLOB: 6ea13ae1857d9829c7f2ce0fb3b710f73c146386
-      UM03B_VIEW_BLOB: cf9a7acac2bdc5e87f4d4e59026f07a572f1e478
+      UM03B_VIEW_BLOB: 075b41f1e806559affe0dea4bc593e33a5b045e2
       UM03A_BASE_TEST_BLOB: a0d42fccfc7bf1a7ba38fcef3c197938dd539b6f
       UM03A_VIEW_BLOB: cf9a7acac2bdc5e87f4d4e59026f07a572f1e478
       UM03A_PRODUCER_BLOB: ad017afe99a43c3fad92cfa95e3653dd32a66bec
@@ -35,7 +35,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove exact-SHA UM-03b RED source and frozen input identities
+      - name: Prove exact-SHA UM-03b GREEN source and frozen input identities
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -49,8 +49,8 @@ jobs:
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/questionnaire-view.test.ts) ;;
-              *) echo "unexpected UM-03b RED path: $path" >&2; exit 1 ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|lib/questionnaire/questionnaire-view.ts|tests/questionnaire-view.test.ts) ;;
+              *) echo "unexpected UM-03b GREEN path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
           for path in \
@@ -77,7 +77,7 @@ jobs:
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          echo "UM-03b RED checkout=$EXPECTED_SHA base=$BASE test=$UM03B_TEST_BLOB original-test=$UM03A_BASE_TEST_BLOB view=$UM03B_VIEW_BLOB producer=$UM03A_PRODUCER_BLOB ask-test=$UM02_ASK_TEST_BLOB"
+          echo "UM-03b GREEN checkout=$EXPECTED_SHA base=$BASE test=$UM03B_TEST_BLOB original-test=$UM03A_BASE_TEST_BLOB view=$UM03B_VIEW_BLOB producer=$UM03A_PRODUCER_BLOB ask-test=$UM02_ASK_TEST_BLOB"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -214,7 +214,7 @@ jobs:
               done
             '
 
-      - name: Require 67 prior passes and exactly three named UM-03b RED failures
+      - name: Require full passing ask/view suite and all exact named UM-03b GREEN cases
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -230,32 +230,19 @@ jobs:
             HOME=/tmp/home TMPDIR=/tmp NODE_OPTIONS=--max-old-space-size=1536 \
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 /bin/bash -euo pipefail -c '
-              set +e
               node --experimental-strip-types --test --test-reporter=tap \
-                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts | tee /tmp/questionnaire-red.tap
-              tap_status=$?
-              set -e
-              if test "$tap_status" -eq 0; then
-                echo "UM-03b RED unexpectedly passed the full ask/view suite" >&2
-                exit 1
-              fi
-              for expected in "# tests 70" "# pass 67" "# fail 3"; do
-                grep -Fx "$expected" /tmp/questionnaire-red.tap
+                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts | tee /tmp/questionnaire-green.tap
+              for expected in "# tests 70" "# pass 70" "# fail 0"; do
+                grep -Fx "$expected" /tmp/questionnaire-green.tap
               done
               for name in \
                 "rendered option text scrolls while same-row blank cells fall through" \
                 "oversized inline preview text scrolls while adjacent blank cells fall through" \
                 "split preview text scrolls while the gutter falls through"; do
-                test "$(grep -Ec "^not ok [0-9]+ - UM03b-wheel: $name$" /tmp/questionnaire-red.tap)" -eq 1
+                test "$(grep -Ec "^ok [0-9]+ - UM03b-wheel: $name$" /tmp/questionnaire-green.tap)" -eq 1
               done
-              test "$(grep -Ec "^not ok [0-9]+ - UM03b-wheel:" /tmp/questionnaire-red.tap)" -eq 3
-              for message in \
-                "UM03b-wheel: same-row blank cell must fall through" \
-                "UM03b-wheel: adjacent blank cell must fall through" \
-                "UM03b-wheel: split-preview gutter must fall through"; do
-                grep -F "$message" /tmp/questionnaire-red.tap
-              done
-              echo "Full ask/view TAP recorded 67 prior passes and exactly three named UM03b blank/gutter failures"
+              test "$(grep -Ec "^ok [0-9]+ - UM03b-wheel:" /tmp/questionnaire-green.tap)" -eq 3
+              echo "Full ask/view TAP passed 70/70 with all three exact named UM-03b wheel-ownership cases"
             '
 
       - name: Recheck exact checkout and cleanliness

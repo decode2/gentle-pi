@@ -12,6 +12,7 @@ import {
 	type TUI,
 	type TuiMouseEvent,
 } from "@earendil-works/pi-tui";
+import { stripAnsi } from "../terminal-theme.ts";
 import { CUSTOM_ROW_LABEL, type QuestionData } from "./schema.ts";
 
 /** Minimum terminal width at which the preview pane splits beside the list. */
@@ -64,8 +65,12 @@ interface QuestionState {
 	actionFocused: boolean;
 }
 
+type QuestionLineOwner = { questionIndex: number; rowIndex: number };
+type WheelRange = { start: number; end: number };
+type BodyLineOwner = QuestionLineOwner & { wheelRanges: WheelRange[] };
+
 type LineOwner =
-	| { questionIndex: number; rowIndex: number }
+	| BodyLineOwner
 	| { action: "advance" | "cancel"; width: number };
 
 /**
@@ -221,7 +226,10 @@ export class QuestionnaireView extends Container implements Focusable {
 		if (this.completed || event.width !== this.renderedWidth ||
 			(this.tui.terminal?.rows ?? 24) !== this.renderedTerminalRows) return undefined;
 		if (event.type === "wheel") {
-			if (event.y < this.bodyStart || event.y >= this.bodyStart + this.bodyHeight || !this.lineOwners[event.y]) return undefined;
+			const owner = this.lineOwners[event.y];
+			if (event.y < this.bodyStart || event.y >= this.bodyStart + this.bodyHeight ||
+				!owner || !("questionIndex" in owner) ||
+				!owner.wheelRanges.some((range) => event.x >= range.start && event.x < range.end)) return undefined;
 			const maxScroll = Math.max(0, this.bodyLineCount - this.bodyHeight);
 			const delta = event.wheelDelta ?? 0;
 			if (delta === 0) return undefined;
@@ -337,8 +345,23 @@ export class QuestionnaireView extends Container implements Focusable {
 			const right = this.wrap(this.theme.fg("dim", preview), rightWidth);
 			const rows = Math.max(left.lines.length, right.length);
 			for (let index = 0; index < rows; index++) {
-				lines.push(`${padTo(left.lines[index] ?? "", leftWidth)}${PREVIEW_GAP}${right[index] ?? ""}`);
-				owners.push(left.owners[index] ?? { questionIndex: this.focusedQuestion, rowIndex: -1 });
+				const leftLine = left.lines[index] ?? "";
+				const rightLine = right[index] ?? "";
+				const leftOwner = left.owners[index] ?? {
+					questionIndex: this.focusedQuestion,
+					rowIndex: -1,
+					wheelRanges: [],
+				};
+				const rightStart = leftWidth + PREVIEW_GAP.length;
+				const rightTextWidth = renderedTextWidth(rightLine);
+				lines.push(`${padTo(leftLine, leftWidth)}${PREVIEW_GAP}${rightLine}`);
+				owners.push({
+					...leftOwner,
+					wheelRanges: [
+						...leftOwner.wheelRanges,
+						...(rightTextWidth > 0 ? [{ start: rightStart, end: rightStart + rightTextWidth }] : []),
+					],
+				});
 			}
 		}
 		else {
@@ -430,17 +453,17 @@ export class QuestionnaireView extends Container implements Focusable {
 	/** Body for the active question only. */
 	private renderBody(width: number, inlinePreview: boolean): {
 		lines: string[];
-		owners: Array<LineOwner | undefined>;
+		owners: Array<BodyLineOwner | undefined>;
 		editorOffset?: number;
 		editorHeight?: number;
 		editorAnchor?: number;
 	} {
 		const lines: string[] = [];
-		const owners: Array<LineOwner | undefined> = [];
-		const push = (text: string, owner?: LineOwner) => {
+		const owners: Array<BodyLineOwner | undefined> = [];
+		const push = (text: string, owner?: QuestionLineOwner) => {
 			for (const line of this.wrap(text, width)) {
 				lines.push(line);
-				owners.push(owner);
+				owners.push(owner ? { ...owner, wheelRanges: [{ start: 0, end: renderedTextWidth(line) }] } : undefined);
 			}
 		};
 
@@ -448,7 +471,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		const state = this.states[this.focusedQuestion];
 		if (!question || !state) return { lines, owners };
 
-		const headerOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: -1 };
+		const headerOwner: QuestionLineOwner = { questionIndex: this.focusedQuestion, rowIndex: -1 };
 		push(this.accent(question.question), headerOwner);
 
 		if (this.editingQuestion === this.focusedQuestion) {
@@ -456,7 +479,10 @@ export class QuestionnaireView extends Container implements Focusable {
 			const editorOffset = lines.length;
 			const editorLines = state.editor.render(width);
 			lines.push(...editorLines);
-			owners.push(...editorLines.map(() => headerOwner));
+			owners.push(...editorLines.map((line) => ({
+				...headerOwner,
+				wheelRanges: [{ start: 0, end: renderedTextWidth(line) }],
+			})));
 			const caretLine = editorLines.findIndex((line) => line.includes(CURSOR_MARKER));
 			return {
 				lines,
@@ -469,7 +495,7 @@ export class QuestionnaireView extends Container implements Focusable {
 
 		const customIndex = question.options.length;
 		for (const [optionIndex, option] of question.options.entries()) {
-			const owner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: optionIndex };
+			const owner: QuestionLineOwner = { questionIndex: this.focusedQuestion, rowIndex: optionIndex };
 			const cursor = state.cursor === optionIndex ? this.accent("❯ ") : "  ";
 			const marker = question.multiSelect ? `${state.toggled.has(optionIndex) ? "[x]" : "[ ]"} ` : "";
 			push(`${cursor}${marker}${option.label}`, owner);
@@ -481,7 +507,7 @@ export class QuestionnaireView extends Container implements Focusable {
 			}
 		}
 
-		const customOwner: LineOwner = { questionIndex: this.focusedQuestion, rowIndex: customIndex };
+		const customOwner: QuestionLineOwner = { questionIndex: this.focusedQuestion, rowIndex: customIndex };
 		const customCursor = state.cursor === customIndex ? this.accent("❯ ") : "  ";
 		const customDone = state.answer?.kind === "custom" ? "✓ " : "";
 		push(`${customCursor}${customDone}${CUSTOM_ROW_LABEL}`, customOwner);
@@ -722,6 +748,10 @@ export class QuestionnaireView extends Container implements Focusable {
 			height: event.height,
 		};
 	}
+}
+
+function renderedTextWidth(line: string): number {
+	return visibleWidth(stripAnsi(line).trimEnd());
 }
 
 function padTo(line: string, width: number): string {
