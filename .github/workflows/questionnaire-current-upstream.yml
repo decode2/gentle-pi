@@ -1,4 +1,4 @@
-name: Current-upstream questionnaire UM-04a behavioral RED
+name: Current-upstream questionnaire UM-04a behavioral GREEN
 
 on:
   push:
@@ -9,8 +9,8 @@ permissions:
   contents: read
 
 jobs:
-  behavioral-red:
-    # A push event on this exact feature branch is the only source of exact-SHA behavioral RED evidence.
+  behavioral-green:
+    # A push event on this exact feature branch is the only source of exact-SHA behavioral GREEN evidence.
     if: >-
       (github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
@@ -24,7 +24,7 @@ jobs:
       UM04A_TEST_BLOB: fe9f206dee92912f06f514b94e89a69e2422a06c
       UM03B_VIEW_BLOB: 075b41f1e806559affe0dea4bc593e33a5b045e2
       UM03B_VIEW_TEST_BLOB: 6ea13ae1857d9829c7f2ce0fb3b710f73c146386
-      UM03B_PRODUCER_BLOB: ad017afe99a43c3fad92cfa95e3653dd32a66bec
+      UM04A_PRODUCER_BLOB: 440346d2069f6f5f89afc32246bbc2fa70921ae8
       UM02_ASK_TEST_BLOB: 7ed196be37ec582dd915778b9d570f5774053e19
     steps:
       - name: Checkout exact event revision without credentials
@@ -34,7 +34,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove exact-SHA UM-04a RED source and frozen input identities
+      - name: Prove exact-SHA UM-04a GREEN source and frozen input identities
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -48,8 +48,8 @@ jobs:
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/ask-user-question.test.ts) ;;
-              *) echo "unexpected UM-04a RED path: $path" >&2; exit 1 ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/ask-user-question.test.ts|extensions/ask-user-question.ts) ;;
+              *) echo "unexpected UM-04a GREEN path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
           for path in \
@@ -64,17 +64,19 @@ jobs:
             test "$(git hash-object -- "$path")" = "$base_blob"
           done
           for entry in "tests/questionnaire-view.test.ts:$UM03B_VIEW_TEST_BLOB" \
-            "lib/questionnaire/questionnaire-view.ts:$UM03B_VIEW_BLOB" \
-            "extensions/ask-user-question.ts:$UM03B_PRODUCER_BLOB"; do
+            "lib/questionnaire/questionnaire-view.ts:$UM03B_VIEW_BLOB"; do
             path="${entry%%:*}"; blob="${entry#*:}"
             test "$(git rev-parse "$BASE:$path")" = "$blob"
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
+          test "$(git rev-parse "$BASE:extensions/ask-user-question.ts")" = ad017afe99a43c3fad92cfa95e3653dd32a66bec
+          test "$(git rev-parse HEAD:extensions/ask-user-question.ts)" = "$UM04A_PRODUCER_BLOB"
+          test "$(git hash-object -- extensions/ask-user-question.ts)" = "$UM04A_PRODUCER_BLOB"
           test "$(git rev-parse "$BASE:tests/ask-user-question.test.ts")" = "$UM02_ASK_TEST_BLOB"
           test "$(git rev-parse HEAD:tests/ask-user-question.test.ts)" = "$UM04A_TEST_BLOB"
           test "$(git hash-object -- tests/ask-user-question.test.ts)" = "$UM04A_TEST_BLOB"
-          echo "UM-04a RED checkout=$EXPECTED_SHA base=$BASE ask-test=$UM04A_TEST_BLOB prior-ask-test=$UM02_ASK_TEST_BLOB view-test=$UM03B_VIEW_TEST_BLOB view=$UM03B_VIEW_BLOB producer=$UM03B_PRODUCER_BLOB"
+          echo "UM-04a GREEN checkout=$EXPECTED_SHA base=$BASE ask-test=$UM04A_TEST_BLOB prior-ask-test=$UM02_ASK_TEST_BLOB view-test=$UM03B_VIEW_TEST_BLOB view=$UM03B_VIEW_BLOB producer=$UM04A_PRODUCER_BLOB"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -222,7 +224,7 @@ jobs:
               done
             '
 
-      - name: Require only four intended UM-04a failures in full unfiltered ask/view TAP
+      - name: Require full 74/74 ask/view GREEN and all four UM-04a cases
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -238,34 +240,20 @@ jobs:
             HOME=/tmp/home TMPDIR=/tmp NODE_OPTIONS=--max-old-space-size=1536 \
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 /bin/bash -euo pipefail -c '
-              if node --experimental-strip-types --test --test-reporter=tap \
-                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts | tee /tmp/questionnaire-red.tap; then
-                tap_status=0
-              else
-                tap_status=$?
-              fi
-              test "$tap_status" -eq 1
-              for expected in "# tests 74" "# pass 70" "# fail 4" "# cancelled 0" "# skipped 0"; do
-                grep -Fx "$expected" /tmp/questionnaire-red.tap
+              node --experimental-strip-types --test --test-reporter=tap \
+                /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts | tee /tmp/questionnaire-green.tap
+              for expected in "# tests 74" "# pass 74" "# fail 0"; do
+                grep -Fx "$expected" /tmp/questionnaire-green.tap
               done
-              test "$(grep -Ec "^not ok [0-9]+ - " /tmp/questionnaire-red.tap)" -eq 4
-              um04a_passes="$(grep -Ec "^ok [0-9]+ - UM-04a:" /tmp/questionnaire-red.tap || true)"
-              test "$um04a_passes" -eq 0
+              test "$(grep -Ec "^ok [0-9]+ - UM-04a:" /tmp/questionnaire-green.tap)" -eq 4
               for name in \
                 "UM-04a: Escape retains a committed option preview from the real TUI" \
                 "UM-04a: Escape retains committed MULTI and custom rows in question order" \
                 "UM-04a: Escape excludes uncommitted MULTI toggles and custom draft after a skipped question" \
                 "UM-04a: partial cancellation renders numbered rows and keeps empty cancel shapes"; do
-                test "$(grep -Ec "^not ok [0-9]+ - $name$" /tmp/questionnaire-red.tap)" -eq 1
+                test "$(grep -Ec "^ok [0-9]+ - $name$" /tmp/questionnaire-green.tap)" -eq 1
               done
-              for name in \
-                "rendered option text scrolls while same-row blank cells fall through" \
-                "oversized inline preview text scrolls while adjacent blank cells fall through" \
-                "split preview text scrolls while the gutter falls through"; do
-                test "$(grep -Ec "^ok [0-9]+ - UM03b-wheel: $name$" /tmp/questionnaire-red.tap)" -eq 1
-              done
-              test "$(grep -Ec "^ok [0-9]+ - UM03b-wheel:" /tmp/questionnaire-red.tap)" -eq 3
-              echo "Full unfiltered ask/view TAP: 70 prior passes, four exact intended UM-04a failures; UM03b 3/3"
+              echo "Full unfiltered ask/view TAP: 74/74 pass; all four UM-04a cases pass"
             '
 
       - name: Recheck exact checkout and cleanliness
