@@ -281,11 +281,23 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 				}
 			}
 
+			if (_signal?.aborted) return cancelledResult();
 			let selection: QuestionnaireResult | undefined;
+			let view: QuestionnaireView | undefined;
+			let aborted = false;
+			let blocked = false;
+			let settled = false;
+			const onAbort = () => {
+				aborted = true;
+				view?.cancel();
+			};
 			try {
+				_signal?.addEventListener("abort", onAbort, { once: true });
+				if (aborted || _signal?.aborted) return cancelledResult();
+				blocked = true;
 				pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: true });
 				selection = await ctx.ui.custom<QuestionnaireResult>((tui, theme, keybindings, done) => {
-					const view = new QuestionnaireView({
+					view = new QuestionnaireView({
 						questions: params.questions,
 						theme,
 						tui,
@@ -294,7 +306,12 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 							selectList: getSelectListTheme(),
 						} satisfies EditorTheme,
 						keybindings,
-						onComplete: (result) => done(result),
+						onComplete: (result) => {
+							if (settled) return;
+							settled = true;
+							_signal?.removeEventListener("abort", onAbort);
+							done(result);
+						},
 					});
 					// Native dock swap, never an overlay: the transcript stays scrollable
 					// while the questionnaire owns focus. No `overlay` option is passed.
@@ -305,11 +322,15 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 					container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
 					container.addChild(view);
 					container.addChild(new DynamicBorder((text: string) => theme.fg("accent", text)));
+					if (aborted || _signal?.aborted) view.cancel();
 					return container;
 				});
 			}
 			finally {
-				pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: false });
+				settled = true;
+				view?.cancel();
+				_signal?.removeEventListener("abort", onAbort);
+				if (blocked) pi.events.emit(ASK_USER_QUESTION_BLOCKED_EVENT, { active: false });
 			}
 
 			if (selection === undefined) return cancelledResult();

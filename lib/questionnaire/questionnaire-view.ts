@@ -148,6 +148,15 @@ export class QuestionnaireView extends Container implements Focusable {
 		return this.result ?? { cancelled: false, answers: this.collectedAnswers() };
 	}
 
+	/** Cancel directly even while the Editor owns Escape; retain only committed rows. */
+	cancel(): void {
+		const answers = this.collectedAnswers().map((answer) => ({
+			...answer,
+			...(answer.selected !== undefined ? { selected: [...answer.selected] } : {}),
+		}));
+		this.finish({ cancelled: true, answers });
+	}
+
 	/** Active question index; exposed for tests and for callers that drive the view. */
 	get activeQuestion(): number {
 		return this.focusedQuestion;
