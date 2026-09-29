@@ -21,7 +21,7 @@ interface Renderable {
 }
 
 type CustomFactory = (
-	tui: { requestRender(): void },
+	tui: { requestRender(): void; terminal?: { rows: number } },
 	theme: Theme,
 	keybindings: unknown,
 	done: (value: unknown) => void,
