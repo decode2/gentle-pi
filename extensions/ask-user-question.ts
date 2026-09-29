@@ -1,3 +1,6 @@
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
+import { resolveGentlePiAgentHome } from "../lib/agent-home.ts";
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { DynamicBorder, getSelectListTheme } from "@earendil-works/pi-coding-agent";
 import { Text, type EditorTheme } from "@earendil-works/pi-tui";
@@ -227,26 +230,24 @@ function truncate(text: string, limit: number): string {
 	return text.length <= limit ? text : `${text.slice(0, Math.max(0, limit - 1))}…`;
 }
 
-/**
- * Register the first-party questionnaire tool.
- *
- * Name-collision semantics (live-verified against the installed Pi runtime):
- * - Tool names are exclusive across extensions. Pi has no precedence, override,
- *   or silent shadowing: loading two extensions that register the same tool
- *   name fails the whole load with a hard error
- *   (`Tool "ask_user_question" conflicts with <other extension>`; the runtime
- *   exits non-zero). The name is either free or fatal, full stop.
- * - `registerTool` writes into the calling extension's own tool map keyed by
- *   name, so re-registering inside one extension overwrites that entry
- *   (`loader.js:240`). That same-name write is the only one Pi tolerates.
- * - This first-party tool ships as THE `ask_user_question` provider. A competing
- *   provider such as the third-party `@juicesharp/rpiv-ask-user-question`
- *   package fails the load by design and must be removed from the user's Pi
- *   settings; that deletion is the documented migration path, not a runtime
- *   precedence choice.
- */
+/** Ownership is opt-in and scoped to the currently selected Pi agent home. */
+function ownsQuestionTool(): boolean {
+	try {
+		const record: unknown = JSON.parse(readFileSync(
+			join(resolveGentlePiAgentHome(), "gentle-ai", "question-owner.json"), "utf8",
+		));
+		if (typeof record !== "object" || record === null) return false;
+		const owner = record as { version?: unknown; owner?: unknown; enabled?: unknown };
+		return owner.version === 1 && owner.owner === "gentle-pi" && owner.enabled === true;
+	} catch {
+		return false;
+	}
+}
+
+/** Defer opt-in registration; incumbent detection is not a reservation. */
 export default function askUserQuestion(pi: ExtensionAPI): void {
-	pi.registerTool({
+	let registered = false;
+	const register = () => pi.registerTool({
 		name: QUESTION_TOOL_NAME,
 		renderShell: "self",
 		label: "Ask User Question",
@@ -369,5 +370,18 @@ export default function askUserQuestion(pi: ExtensionAPI): void {
 			});
 			return new Text(lines.join("\n"), 0, 0);
 		},
+	});
+
+	pi.on("session_start", (_event, ctx) => {
+		if (registered || ctx.mode !== "tui" || !ownsQuestionTool()) return;
+		try {
+			// All configured tools count, even when inactive. Never remove a provider.
+			if (typeof pi.getAllTools !== "function") return;
+			if (pi.getAllTools().some((tool) => tool.name === QUESTION_TOOL_NAME)) return;
+		} catch {
+			return;
+		}
+		register();
+		registered = true;
 	});
 }
