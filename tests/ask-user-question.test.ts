@@ -702,7 +702,7 @@ function trackedAbort(onRegistration?: () => void) {
 	const remove = signal.removeEventListener.bind(signal);
 	const listeners = new Set<EventListenerOrEventListenerObject>();
 	let registrations = 0;
-	signal.addEventListener = (type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | AddEventListenerOptions) => {
+	signal.addEventListener = (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | AddEventListenerOptions) => {
 		add(type, listener, options);
 		if (type === "abort" && listener) {
 			registrations++;
@@ -710,7 +710,7 @@ function trackedAbort(onRegistration?: () => void) {
 			onRegistration?.();
 		}
 	};
-	signal.removeEventListener = (type: string, listener: EventListenerOrEventListenerObject | null, options?: boolean | EventListenerOptions) => {
+	signal.removeEventListener = (type: string, listener: EventListenerOrEventListenerObject, options?: boolean | EventListenerOptions) => {
 		remove(type, listener, options);
 		if (type === "abort" && listener) listeners.delete(listener);
 	};
