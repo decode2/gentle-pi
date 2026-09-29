@@ -1514,6 +1514,148 @@ test("a --home directory gentle-shell itself bootstrapped is retried after its f
 	assert.equal(readFileSync(counterPath, "utf8").trim().split("\n").length, 1, "the retry must actually run gentle-ai against the previously-failed home");
 });
 
+// --- UM-05b absent-only questionnaire owner delivery -----------------------
+// Only fake binaries and fixture homes participate. Cleanup failure below
+// models removal of gentle-pi itself, not third-party provider migration.
+function questionOwnerPath(home: string) {
+	return join(home, "gentle-ai", "question-owner.json");
+}
+
+function ownerAutoEnv(f: ReturnType<typeof fixture>, exitCode = 0) {
+	const binary = join(f.root, "fake-owner-install.mjs");
+	const counter = join(f.root, "owner-install-runs.log");
+	writeGentleAiScriptCountingRuns(binary, counter, exitCode);
+	return {
+		counter,
+		env: enableAutoProvision({ ...f.env, GENTLE_SHELL_GENTLE_AI_BIN: binary, GENTLE_SHELL_GENTLE_AI_PIN: "3.6.0" }),
+	};
+}
+
+function assertNoNewProvisioning(configPath: string, label: string) {
+	if (existsSync(configPath)) {
+		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).provisioned, undefined, `${label}: no new provisioning marker`);
+	}
+}
+
+const enabledQuestionOwner = { version: 1, owner: "gentle-pi", enabled: true };
+
+test("UM-05b: successful owned auto-setup delivers exact owner JSON", (t) => {
+	for (const mode of ["isolated", "path"] as const) {
+		const f = fixture(t);
+		const target = mode === "isolated" ? f.gentleShellHome : join(f.root, "owned-path");
+		const auto = ownerAutoEnv(f);
+		const result = run(auto.env, mode === "isolated" ? [] : ["--home", target]);
+		assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
+		assert.doesNotMatch(result.stderr, /automatic setup failed/, `${mode}: successful flow required`);
+		assert.equal(readFileSync(auto.counter, "utf8").trim().split("\n").length, 1, `${mode}: install ran once`);
+		assert.ok(existsSync(questionOwnerPath(target)), `UM-05b owner delivery: ${mode} resolved target missing question-owner.json`);
+		assert.deepEqual(JSON.parse(readFileSync(questionOwnerPath(target), "utf8")), enabledQuestionOwner, `${mode}: exact owner JSON`);
+		const config = JSON.parse(readFileSync(join(f.home, ".gentle-shell", "config.json"), "utf8"));
+		assert.equal(config.provisioned[realpathSync(target)].gentleAi, "3.6.0", `${mode}: success marker`);
+		assert.equal(existsSync(questionOwnerPath(join(f.home, ".pi", "agent"))), false, `${mode}: default home untouched`);
+	}
+});
+
+test("UM-05b: failed install or cleanup creates no new owner or success marker", (t) => {
+	for (const failure of ["install", "cleanup"] as const) {
+		for (const existing of [false, true]) {
+			const f = fixture(t);
+			const auto = ownerAutoEnv(f, failure === "install" ? 5 : 0);
+			const boot = run(f.env, []);
+			assert.equal(boot.status, 0, boot.stderr);
+			const ownerPath = questionOwnerPath(f.gentleShellHome);
+			const original = `${JSON.stringify(enabledQuestionOwner, null, 2)}\n`;
+			if (existing) {
+				mkdirSync(dirname(ownerPath), { recursive: true });
+				writeFileSync(ownerPath, original);
+			}
+			if (failure === "cleanup") {
+				writeGentleAiScriptDeclaringGentlePi(auto.env.GENTLE_SHELL_GENTLE_AI_BIN!);
+				writePiScript(f.piScript, "0.85.1", 7);
+			}
+			const label = `${failure}, existing=${existing}`;
+			const result = run(auto.env, []);
+			assert.equal(result.status, 0, `${label}: ${result.stderr}`);
+			assert.match(result.stderr, /automatic setup failed/, label);
+			if (existing) assert.equal(readFileSync(ownerPath, "utf8"), original, `${label}: existing owner preserved`);
+			else assert.equal(existsSync(ownerPath), false, `${label}: no new enabled owner`);
+			assertNoNewProvisioning(join(f.home, ".gentle-shell", "config.json"), label);
+		}
+	}
+});
+
+test("UM-05b: link foreign and default homes never auto-deliver ownership", (t) => {
+	for (const mode of ["link", "foreign", "default"] as const) {
+		const f = fixture(t);
+		const target = mode === "default" ? join(f.home, ".pi", "agent") : join(f.root, mode);
+		mkdirSync(target, { recursive: true });
+		if (mode === "foreign") writeFileSync(join(target, "settings.json"), "{}\n");
+		const auto = ownerAutoEnv(f);
+		const env = { ...auto.env, PI_CODING_AGENT_DIR: mode === "link" ? target : undefined };
+		const result = run(env, mode === "link" ? ["--link"] : ["--home", target]);
+		assert.equal(result.status, 0, `${mode}: ${result.stderr}`);
+		assert.equal(existsSync(auto.counter), false, `${mode}: no automatic install`);
+		assert.equal(existsSync(questionOwnerPath(target)), false, `${mode}: no new owner`);
+		assertNoNewProvisioning(join(f.home, ".gentle-shell", "config.json"), mode);
+	}
+});
+
+test("UM-05b: existing matching owners are preserved and conflicts are reported", (t) => {
+	const cases = [
+		{ label: "matching", bytes: `${JSON.stringify(enabledQuestionOwner, null, 2)}\n`, conflict: false },
+		{ label: "disabled", bytes: '{"version":1,"owner":"gentle-pi","enabled":false}\n', conflict: true },
+		{ label: "external", bytes: '{"version":1,"owner":"external","enabled":true}\n', conflict: true },
+		{ label: "malformed", bytes: "{broken\n", conflict: true },
+		{ label: "unreadable-directory", bytes: null, conflict: true },
+	];
+	for (const scenario of cases) {
+		const f = fixture(t);
+		const boot = run(f.env, []);
+		assert.equal(boot.status, 0, boot.stderr);
+		const ownerPath = questionOwnerPath(f.gentleShellHome);
+		mkdirSync(dirname(ownerPath), { recursive: true });
+		if (scenario.bytes === null) mkdirSync(ownerPath);
+		else writeFileSync(ownerPath, scenario.bytes);
+		const auto = ownerAutoEnv(f);
+		const result = run(auto.env, []);
+		assert.equal(result.status, 0, `${scenario.label}: ${result.stderr}`);
+		assert.equal(readFileSync(auto.counter, "utf8").trim().split("\n").length, 1, `${scenario.label}: eligible owned install ran`);
+		if (scenario.bytes === null) assert.ok(statSync(ownerPath).isDirectory(), `${scenario.label}: directory preserved`);
+		else assert.equal(readFileSync(ownerPath, "utf8"), scenario.bytes, `${scenario.label}: owner bytes preserved`);
+		if (scenario.conflict) {
+			assert.match(result.stderr, /question-owner\.json.*conflict|conflict.*question-owner\.json/i, `UM-05b owner conflict: ${scenario.label} must be reported`);
+		} else {
+			assert.doesNotMatch(result.stderr, /question-owner\.json.*conflict|conflict.*question-owner\.json/i, "matching owner is not an error");
+		}
+	}
+});
+
+test("UM-05b: divergent selectors deliver only to the resolved target home", (t) => {
+	for (const selector of ["cli", "config", "isolated"] as const) {
+		const f = fixture(t);
+		const selected = selector === "isolated" ? f.gentleShellHome : join(f.root, "selected");
+		const ambient = join(f.root, "ambient-agent");
+		const configHome = join(f.root, "config-selected");
+		const configPath = join(f.root, "config-storage", "config.json");
+		mkdirSync(dirname(configPath), { recursive: true });
+		writeFileSync(configPath, JSON.stringify({ home: selector === "config" ? selected : configHome }));
+		const auto = ownerAutoEnv(f);
+		const env = { ...auto.env, PI_CODING_AGENT_DIR: ambient, GENTLE_PI_AGENT_HOME: ambient, GENTLE_SHELL_CONFIG: configPath };
+		const args = selector === "cli" ? ["--home", selected] : selector === "isolated" ? ["--isolated"] : [];
+		const result = run(env, args);
+		assert.equal(result.status, 0, `${selector}: ${result.stderr}`);
+		assert.doesNotMatch(result.stderr, /automatic setup failed/, `${selector}: successful flow required`);
+		assert.equal(readFileSync(auto.counter, "utf8").trim().split("\n").length, 1, `${selector}: install ran once`);
+		assert.equal(JSON.parse(result.stdout).PI_CODING_AGENT_DIR, selected, `${selector}: actual launch target`);
+		assert.ok(existsSync(questionOwnerPath(selected)), `UM-05b owner placement: ${selector} resolved target missing question-owner.json`);
+		assert.deepEqual(JSON.parse(readFileSync(questionOwnerPath(selected), "utf8")), enabledQuestionOwner, `${selector}: exact owner`);
+		for (const other of [ambient, configHome, dirname(configPath), join(f.home, ".pi", "agent"), f.gentleShellHome]) {
+			if (other !== selected) assert.equal(existsSync(questionOwnerPath(other)), false, `${selector}: must not deliver to ${other}`);
+		}
+		assert.equal(JSON.parse(readFileSync(configPath, "utf8")).provisioned[realpathSync(selected)].gentleAi, "3.6.0", `${selector}: resolved success marker`);
+	}
+});
+
 // --- auto-provisioning interrupts, resilience, timeouts, atomic writes -----
 
 // Waits until `child`'s stderr has emitted a line matching `pattern`, so a
