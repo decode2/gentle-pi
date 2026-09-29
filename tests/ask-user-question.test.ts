@@ -685,7 +685,7 @@ function abortHost(beforeFactory?: () => void) {
 		ctx: { mode: "tui", ui: { custom: (factory: CustomFactory) => {
 			host.mounts++;
 			beforeFactory?.(); // Abort between custom entry and construction, before a view exists.
-			host.component = factory({ requestRender() {} }, theme, {}, (value) => {
+			host.component = factory({ requestRender() {}, terminal: { rows: 24 } }, theme, {}, (value) => {
 				host.done++;
 				resolve(value);
 			});
