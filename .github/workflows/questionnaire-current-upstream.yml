@@ -1,32 +1,31 @@
-name: Current-upstream questionnaire UM-04a behavioral GREEN
+name: Current-upstream questionnaire UM-04b behavioral RED
 
 on:
   push:
     branches:
-      - feat/questionnaire-current-main-partial-cancel
+      - feat/questionnaire-current-main-abort-lifecycle
 
 permissions:
   contents: read
 
 jobs:
-  behavioral-green:
-    # A push event on this exact feature branch is the only source of exact-SHA behavioral GREEN evidence.
+  behavioral-red:
+    # Hosted execution requires separate branch-specific push authorization.
     if: >-
       (github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
       github.event_name == 'push' &&
-      github.ref == 'refs/heads/feat/questionnaire-current-main-partial-cancel'
+      github.ref == 'refs/heads/feat/questionnaire-current-main-abort-lifecycle'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      BASE: 7c96f0bb3e9beae5ba7baa2a278c0cfe6ce28639
+      BASE: 18e7372719d58a5c4e66c4326ff4f58712402108
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
       UM04A_TEST_BLOB: 7a77748bcee5a37c5bb67ab189c509c618c8cdde
       UM03B_VIEW_BLOB: 075b41f1e806559affe0dea4bc593e33a5b045e2
       UM03B_VIEW_TEST_BLOB: 6ea13ae1857d9829c7f2ce0fb3b710f73c146386
-      UM04A_BASE_PRODUCER_BLOB: ad017afe99a43c3fad92cfa95e3653dd32a66bec
       UM04A_PRODUCER_BLOB: 440346d2069f6f5f89afc32246bbc2fa70921ae8
-      UM02_ASK_TEST_BLOB: 7ed196be37ec582dd915778b9d570f5774053e19
+      UM04B_RED_TEST_BLOB: 65e7888fdb19c066962c1d636d51142c0467983d
     steps:
       - name: Checkout exact event revision without credentials
         uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
@@ -35,7 +34,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove exact-SHA UM-04a GREEN source and frozen input identities
+      - name: Prove exact-SHA UM-04b RED tests and frozen prior sources
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -49,8 +48,8 @@ jobs:
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-upstream.md|tests/ask-user-question.test.ts|extensions/ask-user-question.ts) ;;
-              *) echo "unexpected UM-04a GREEN path: $path" >&2; exit 1 ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-main-abort-lifecycle.md|tests/ask-user-question.test.ts) ;;
+              *) echo "unexpected UM-04b RED path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
           for path in \
@@ -71,13 +70,15 @@ jobs:
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          test "$(git rev-parse "$BASE:extensions/ask-user-question.ts")" = "$UM04A_BASE_PRODUCER_BLOB"
+          test "$(git rev-parse "$BASE:extensions/ask-user-question.ts")" = "$UM04A_PRODUCER_BLOB"
           test "$(git rev-parse HEAD:extensions/ask-user-question.ts)" = "$UM04A_PRODUCER_BLOB"
           test "$(git hash-object -- extensions/ask-user-question.ts)" = "$UM04A_PRODUCER_BLOB"
-          test "$(git rev-parse "$BASE:tests/ask-user-question.test.ts")" = "$UM02_ASK_TEST_BLOB"
-          test "$(git rev-parse HEAD:tests/ask-user-question.test.ts)" = "$UM04A_TEST_BLOB"
-          test "$(git hash-object -- tests/ask-user-question.test.ts)" = "$UM04A_TEST_BLOB"
-          echo "UM-04a GREEN checkout=$EXPECTED_SHA base=$BASE ask-test=$UM04A_TEST_BLOB prior-ask-test=$UM02_ASK_TEST_BLOB view-test=$UM03B_VIEW_TEST_BLOB view=$UM03B_VIEW_BLOB producer=$UM04A_PRODUCER_BLOB"
+          test "$(git rev-parse "$BASE:tests/ask-user-question.test.ts")" = "$UM04A_TEST_BLOB"
+          test "$(git rev-parse HEAD:tests/ask-user-question.test.ts)" = "$UM04B_RED_TEST_BLOB"
+          test "$(git hash-object -- tests/ask-user-question.test.ts)" = "$UM04B_RED_TEST_BLOB"
+          changes=$(git diff --numstat "$BASE" HEAD | awk "{n+=\$1+\$2} END {print n+0}")
+          test "$changes" -le 400
+          echo "UM-04b RED checkout=$EXPECTED_SHA base=$BASE ask-test=$UM04B_RED_TEST_BLOB prior-ask-test=$UM04A_TEST_BLOB view-test=$UM03B_VIEW_TEST_BLOB view=$UM03B_VIEW_BLOB producer=$UM04A_PRODUCER_BLOB lines=$changes"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -152,6 +153,19 @@ jobs:
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 /bin/bash -euo pipefail -c '
               if touch /source/.read-only-probe 2>/dev/null; then exit 1; fi
+              node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="^UM-04a:" /source/tests/ask-user-question.test.ts | tee /tmp/um04a-green.tap
+              for expected in "# pass 4" "# fail 0" "# cancelled 0"; do
+                grep -Fx "$expected" /tmp/um04a-green.tap
+              done
+              test "$(grep -Ec "^ok [0-9]+ - UM-04a:" /tmp/um04a-green.tap)" -eq 4
+              for name in \
+                "UM-04a: Escape retains a committed option preview from the real TUI" \
+                "UM-04a: Escape retains committed MULTI and custom rows in question order" \
+                "UM-04a: Escape excludes uncommitted MULTI toggles and custom draft after a skipped question" \
+                "UM-04a: partial cancellation renders numbered rows and keeps empty cancel shapes"; do
+                test "$(grep -Ec "^ok [0-9]+ - $name$" /tmp/um04a-green.tap)" -eq 1
+              done
               node /source/node_modules/typescript/bin/tsc \
                 --noEmit --strict --skipLibCheck --target ESNext --module ESNext --moduleResolution bundler \
                 --allowImportingTsExtensions --lib ESNext,DOM \
@@ -225,7 +239,7 @@ jobs:
               done
             '
 
-      - name: Require all 74 ask/view tests and four exact UM-04a passes
+      - name: Require unfiltered 78 ask/view tests with only four named RED failures
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -241,10 +255,15 @@ jobs:
             HOME=/tmp/home TMPDIR=/tmp NODE_OPTIONS=--max-old-space-size=1536 \
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 /bin/bash -euo pipefail -c '
-              tap=/tmp/questionnaire-green.tap
+              tap=/tmp/questionnaire-red.tap
+              set +e
               node --experimental-strip-types --test --test-reporter=tap \
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts | tee "$tap"
-              for expected in "# tests 74" "# pass 74" "# fail 0" "# cancelled 0" "# skipped 0"; do
+              statuses=("${PIPESTATUS[@]}")
+              set -e
+              test "${statuses[0]}" -eq 1
+              test "${statuses[1]}" -eq 0
+              for expected in "# tests 78" "# pass 74" "# fail 4" "# cancelled 0" "# skipped 0"; do
                 grep -Fx "$expected" "$tap"
               done
               for name in \
@@ -254,7 +273,22 @@ jobs:
                 "UM-04a: partial cancellation renders numbered rows and keeps empty cancel shapes"; do
                 test "$(grep -Ec "^ok [0-9]+ - $name$" "$tap")" -eq 1
               done
-              echo "Full unfiltered ask/view TAP: 74/74 passed, exactly four named UM-04a passes, zero failures/cancellations/skips"
+              for name in \
+                "UM-04b: pre-aborted TUI signal never mounts or blocks" \
+                "UM-04b: registration and factory abort races settle once" \
+                "UM-04b: active abort retains preview and excludes editor draft and late input" \
+                "UM-04b: completion abort and host rejection clean listeners and balance lifecycle"; do
+                test "$(grep -Ec "^not ok [0-9]+ - $name$" "$tap")" -eq 1
+              done
+              test "$(grep -Ec "^not ok [0-9]+ - " "$tap")" -eq 4
+              for diagnostic in \
+                "pre-aborted execution must not mount" \
+                "registration: the injected abort was observed" \
+                "active abort settles through host done before any late input" \
+                "completion: a live TUI execution registers abort handling"; do
+                grep -F "$diagnostic" "$tap"
+              done
+              echo "Full unfiltered TAP: 74 prior passes, four named assertion failures, zero cancellations/skips"
             '
 
       - name: Recheck exact checkout and cleanliness

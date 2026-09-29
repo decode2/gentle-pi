@@ -674,6 +674,165 @@ test("ask_user_question renderResult renders answered and cancelled rows", () =>
 	assert.match(cancelled, /Cancelled/);
 });
 
+/** Releasable fake host: fallback release is not a view done callback or dock-disposal proof. */
+function abortHost(beforeFactory?: () => void) {
+	let resolve!: (value: unknown) => void;
+	let reject!: (error: Error) => void;
+	const promise = new Promise<unknown>((yes, no) => { resolve = yes; reject = no; });
+	const host = {
+		mounts: 0, done: 0, component: undefined as Renderable | undefined,
+		release: () => resolve(undefined), reject: (error: Error) => reject(error),
+		ctx: { mode: "tui", ui: { custom: (factory: CustomFactory) => {
+			host.mounts++;
+			beforeFactory?.(); // Abort between custom entry and construction, before a view exists.
+			host.component = factory({ requestRender() {} }, theme, {}, (value) => {
+				host.done++;
+				resolve(value);
+			});
+			return promise;
+		} } },
+	};
+	return host;
+}
+
+function trackedAbort(onRegistration?: () => void) {
+	const controller = new AbortController();
+	const signal = controller.signal;
+	const add = signal.addEventListener.bind(signal);
+	const remove = signal.removeEventListener.bind(signal);
+	const listeners = new Set<EventListenerOrEventListenerObject>();
+	let registrations = 0;
+	signal.addEventListener = (type, listener, options) => {
+		add(type, listener, options);
+		if (type === "abort" && listener) {
+			registrations++;
+			listeners.add(listener);
+			onRegistration?.();
+		}
+	};
+	signal.removeEventListener = (type, listener, options) => {
+		remove(type, listener, options);
+		if (type === "abort" && listener) listeners.delete(listener);
+	};
+	return { controller, signal, listeners, registrations: () => registrations };
+}
+
+function assertBalanced(emitted: LifecycleEvent[]) {
+	assert.deepEqual(emitted, [
+		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: true } },
+		{ channel: "gentle-pi:ask-user-question:blocked", data: { active: false } },
+	]);
+}
+
+const abortTick = async () => { await Promise.resolve(); await Promise.resolve(); };
+
+test("UM-04b: pre-aborted TUI signal never mounts or blocks", async () => {
+	const { tool, emitted } = registerQuestionTool();
+	const { controller, signal, listeners } = trackedAbort();
+	const host = abortHost();
+	controller.abort();
+	const pending = tool.execute("call", { questions: single() }, signal, undefined, host.ctx);
+	host.release(); // Old producer ignores the signal; never leave its host promise pending.
+	const result = await pending;
+	assert.equal(host.mounts, 0, "pre-aborted execution must not mount");
+	assert.deepEqual(emitted, [], "pre-aborted execution must not announce blocked state");
+	assert.equal(host.done, 0);
+	assert.equal(listeners.size, 0, "pre-aborted execution leaves no abort listener");
+	assert.deepEqual(result.details, { cancelled: true });
+});
+
+test("UM-04b: registration and factory abort races settle once", async () => {
+	const observations = [];
+	for (const race of ["registration", "factory"] as const) {
+		const { tool, emitted } = registerQuestionTool();
+		const abort = trackedAbort(() => { if (race === "registration") abort.controller.abort(); });
+		const host = abortHost(() => { if (race === "factory") abort.controller.abort(); });
+		const pending = tool.execute("call", { questions: single() }, abort.signal, undefined, host.ctx);
+		await abortTick();
+		const doneAtAbort = host.done;
+		host.release();
+		const result = await pending;
+		host.component?.handleInput?.("\x1b"); // A stale component must not call done again.
+		observations.push({ race, abort, host, emitted, result, doneAtAbort });
+	}
+	for (const { race, abort, host, emitted, result, doneAtAbort } of observations) {
+		assert.equal(abort.signal.aborted, true, `${race}: the injected abort was observed`);
+		assert.deepEqual(result.details, { cancelled: true });
+		if (race === "registration") {
+			assert.equal(host.mounts, 0, "registration abort must not mount");
+			assert.equal(doneAtAbort, 0, "registration abort has no host done callback");
+			assert.deepEqual(emitted, [], "registration abort must not block");
+		}
+		else {
+			assert.equal(host.mounts, 1, "factory-entry abort enters custom once");
+			assert.equal(doneAtAbort, 1, "factory-entry abort settles before fallback release");
+			assertBalanced(emitted);
+		}
+		assert.equal(host.done, doneAtAbort, `${race}: late Escape cannot settle again`);
+		assert.equal(abort.listeners.size, 0, `${race}: abort listener removed`);
+	}
+});
+
+test("UM-04b: active abort retains preview and excludes editor draft and late input", async () => {
+	const { tool, emitted } = registerQuestionTool();
+	const abort = trackedAbort();
+	const host = abortHost();
+	const questions = [
+		{ question: "Proceed?", header: "Proceed", options: [option("Alpha", "First choice", "Preview A"), option("Beta")] },
+		{ question: "Explain?", header: "Explain", options: [option("Gamma"), option("Delta")] },
+	];
+	const pending = tool.execute("call", { questions }, abort.signal, undefined, host.ctx);
+	for (const input of ["\r", "\t", "\x1b[B", "\x1b[B", "\r", "draft not committed"]) host.component?.handleInput?.(input);
+	const renderedDraft = host.component?.render(100).join("\n") ?? "";
+	abort.controller.abort();
+	await abortTick();
+	const doneAtAbort = host.done;
+	for (const input of [" late input", "\r", "\r", "\x1b"]) host.component?.handleInput?.(input);
+	host.release();
+	const result = await pending;
+	assert.equal(doneAtAbort, 1, "active abort settles through host done before any late input");
+	assert.match(renderedDraft, /draft not committed/, "the real Editor rendered the uncommitted draft before abort");
+	assert.equal(host.done, 1, "late input cannot deliver a second result");
+	assert.deepEqual(result.details, { cancelled: true, answers: [
+		{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Alpha", preview: "Preview A" },
+	] });
+	assert.equal(result.content[0]?.text, "User cancelled the questionnaire\nPartial answers:\n1. Proceed? — Alpha\n   selected preview: Preview A");
+	assert.doesNotMatch(JSON.stringify(result), /draft not committed|late input|Explain\?/);
+	assert.equal(abort.listeners.size, 0);
+	assertBalanced(emitted);
+});
+
+test("UM-04b: completion abort and host rejection clean listeners and balance lifecycle", async () => {
+	const observations = [];
+	for (const exit of ["completion", "abort", "rejection"] as const) {
+		const { tool, emitted } = registerQuestionTool();
+		const abort = trackedAbort();
+		const host = abortHost();
+		const failure = new Error("host rejected");
+		const pending = tool.execute("call", { questions: single() }, abort.signal, undefined, host.ctx);
+		const outcome = pending.then((result) => ({ result, error: undefined }), (error: unknown) => ({ result: undefined, error }));
+		if (exit === "completion") { host.component?.handleInput?.("\r"); host.component?.handleInput?.("\r"); }
+		else if (exit === "abort") abort.controller.abort();
+		else host.reject(failure);
+		await abortTick();
+		const doneAtExit = host.done;
+		host.release();
+		const settled = await outcome;
+		abort.controller.abort();
+		host.component?.handleInput?.("\x1b");
+		observations.push({ exit, abort, host, emitted, failure, settled, doneAtExit });
+	}
+	for (const { exit, abort, host, emitted, failure, settled, doneAtExit } of observations) {
+		assert.ok(abort.registrations() > 0, `${exit}: a live TUI execution registers abort handling`);
+		assert.equal(abort.listeners.size, 0, `${exit}: all registered abort listeners are removed`);
+		assert.equal(doneAtExit, exit === "rejection" ? 0 : 1, `${exit}: done balanced before fallback`);
+		assert.equal(host.done, doneAtExit, `${exit}: late abort/input must not call done`);
+		if (exit === "rejection") assert.equal(settled.error, failure);
+		else { assert.equal(settled.error, undefined); assert.equal(settled.result?.details.cancelled, exit === "abort" ? true : undefined); }
+		assertBalanced(emitted);
+	}
+});
+
 test("UM-04a: Escape retains a committed option preview from the real TUI", async () => {
 	const { tool } = registerQuestionTool();
 	const questions = [
