@@ -1,5 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import askUserQuestion, { askMultiSelect } from "../extensions/ask-user-question.ts";
 
 /** Plain theme fake: identity styling keeps rendered assertions readable. */
@@ -80,11 +83,121 @@ function registerQuestionTool(slot?: ExtensionSlot): { tool: RegisteredTool; slo
 			},
 		},
 	};
-	askUserQuestion(pi as never);
+	const profile = ownerProfile();
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	Object.assign(pi, {
+		on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler),
+		getAllTools: () => [],
+	});
+	try {
+		askUserQuestion(pi as never);
+		handlers.get("session_start")?.({}, { mode: "tui", hasUI: true });
+	} finally {
+		profile.close();
+	}
 	const tool = target.tools.get("ask_user_question");
 	if (!tool) throw new Error("ask_user_question must register");
 	return { tool, slot: target, emitted };
 }
+
+const enabledOwner = JSON.stringify({ version: 1, owner: "gentle-pi", enabled: true });
+
+/** Synchronous profile scope: never read or mutate the operator's actual home. */
+function ownerProfile(record: string | null = enabledOwner, wrongHome = false, unreadable = false) {
+	const root = mkdtempSync(join(tmpdir(), "question-owner-"));
+	const keys = ["GENTLE_PI_AGENT_HOME", "PI_CODING_AGENT_DIR"] as const;
+	const previous = keys.map((key) => process.env[key]);
+	process.env.GENTLE_PI_AGENT_HOME = join(root, "selected");
+	process.env.PI_CODING_AGENT_DIR = join(root, "other");
+	const directory = join(root, wrongHome ? "other" : "selected", "gentle-ai");
+	mkdirSync(directory, { recursive: true });
+	const path = join(directory, "question-owner.json");
+	if (unreadable) mkdirSync(path); // EISDIR even when the runner has elevated permissions.
+	else if (record !== null) writeFileSync(path, record);
+	return { close() {
+		keys.forEach((key, index) => {
+			if (previous[index] === undefined) delete process.env[key];
+			else process.env[key] = previous[index];
+		});
+		rmSync(root, { recursive: true, force: true });
+	} };
+}
+
+function ownerHarness(inventory: (() => Array<{ name: string }>) | null = () => []) {
+	const registrations: RegisteredTool[] = [];
+	const handlers = new Map<string, (event: unknown, ctx: unknown) => unknown>();
+	const pi = {
+		registerTool: (tool: RegisteredTool) => registrations.push(tool),
+		on: (name: string, handler: (event: unknown, ctx: unknown) => unknown) => handlers.set(name, handler),
+		events: { emit() {} },
+		...(inventory === null ? {} : { getAllTools: inventory }),
+	};
+	askUserQuestion(pi as never);
+	return {
+		registrations,
+		start(mode = "tui") { handlers.get("session_start")?.({}, { mode, hasUI: true }); },
+	};
+}
+
+// Aggregate failed behavioral assertions so every negative case is exercised on RED.
+function assertOwnerCases(cases: Array<{ label: string; record?: string | null; wrongHome?: boolean;
+	unreadable?: boolean; inventory?: (() => Array<{ name: string }>) | null }>) {
+	const violations: string[] = [];
+	for (const entry of cases) {
+		const profile = ownerProfile(entry.record, entry.wrongHome, entry.unreadable);
+		try {
+			const host = ownerHarness(entry.inventory);
+			host.start();
+			if (host.registrations.length !== 0) violations.push(entry.label);
+		} finally { profile.close(); }
+	}
+	assert.deepEqual(violations, [], "UM05a must not register: fail-closed owner/inventory cases");
+}
+
+test("UM-05a: exact enabled agent-profile owner registers only after TUI session_start", () => {
+	const profile = ownerProfile();
+	try {
+		const host = ownerHarness();
+		assert.equal(host.registrations.length, 0, "UM05a must not register eagerly before session_start");
+		host.start();
+		assert.deepEqual(host.registrations.map((tool) => tool.name), ["ask_user_question"]);
+		host.start();
+		assert.equal(host.registrations.length, 1, "repeated session_start must not duplicate registration");
+	} finally { profile.close(); }
+});
+
+test("UM-05a: missing malformed unreadable disabled and external ownership fail closed", () => {
+	assertOwnerCases([
+		{ label: "missing", record: null }, { label: "malformed", record: "{" },
+		{ label: "unreadable", unreadable: true },
+		{ label: "disabled", record: JSON.stringify({ version: 1, owner: "gentle-pi", enabled: false }) },
+		{ label: "external", record: JSON.stringify({ version: 1, owner: "external", enabled: true }) },
+		{ label: "wrong version", record: JSON.stringify({ version: 2, owner: "gentle-pi", enabled: true }) },
+		{ label: "nonboolean enabled", record: JSON.stringify({ version: 1, owner: "gentle-pi", enabled: "true" }) },
+		{ label: "null record", record: "null" }, { label: "wrong home", wrongHome: true },
+	]);
+});
+
+test("UM-05a: detectable inactive incumbent and pre-registered name are never displaced", () => {
+	const incumbent = { name: "ask_user_question", active: false };
+	assertOwnerCases([
+		{ label: "inactive external incumbent", inventory: () => [incumbent] },
+		{ label: "pre-registered name", inventory: () => [{ name: "ask_user_question" }] },
+		{ label: "inventory unavailable", inventory: null },
+		{ label: "inventory throws", inventory: () => { throw new Error("inventory unavailable"); } },
+	]);
+	assert.deepEqual(incumbent, { name: "ask_user_question", active: false });
+});
+
+test("UM-05a: enabled owner never registers rich RPC even on interactive host", (t) => {
+	withInteractiveHostEnv(t);
+	const profile = ownerProfile();
+	try {
+		const host = ownerHarness();
+		host.start("rpc");
+		assert.equal(host.registrations.length, 0, "UM05a must not register on rich RPC interactive host");
+	} finally { profile.close(); }
+});
 
 function tuiContext(
 	inputs: readonly string[],

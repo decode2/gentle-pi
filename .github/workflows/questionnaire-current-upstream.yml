@@ -1,30 +1,28 @@
-name: Current-upstream questionnaire UM-04b GREEN
+name: Pinned-parent questionnaire UM-05a behavioral RED
 
 on:
   push:
     branches:
-      - feat/questionnaire-current-main-abort-lifecycle
+      - feat/questionnaire-current-main-profile-owner
 
 permissions:
   contents: read
 
 jobs:
-  behavioral-green:
+  behavioral-red:
     # Hosted execution requires separate branch-specific push authorization.
     if: >-
       (github.repository == 'Gentleman-Programming/gentle-pi' ||
        github.repository == 'decode2/gentle-pi') &&
       github.event_name == 'push' &&
-      github.ref == 'refs/heads/feat/questionnaire-current-main-abort-lifecycle'
+      github.ref == 'refs/heads/feat/questionnaire-current-main-profile-owner'
     runs-on: ubuntu-latest
     timeout-minutes: 35
     env:
-      BASE: 18e7372719d58a5c4e66c4326ff4f58712402108
+      BASE: 9110cd609d4e884b8070374a8c1c38d752f8117b
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
-      UM04A_TEST_BLOB: 7a77748bcee5a37c5bb67ab189c509c618c8cdde
-      UM03B_VIEW_BLOB: 075b41f1e806559affe0dea4bc593e33a5b045e2
+      UM05A_RED_TEST_BLOB: 34ebf12930c0879ce1d39d43bcab3afa5f7cebdf
       UM03B_VIEW_TEST_BLOB: 6ea13ae1857d9829c7f2ce0fb3b710f73c146386
-      UM04A_PRODUCER_BLOB: 440346d2069f6f5f89afc32246bbc2fa70921ae8
       UM04B_RED_TEST_BLOB: 30689a2dcc866176aff4ac90e57d16693589cb57
       UM04B_PRODUCER_BLOB: f1ada1571261b49b4b1cca76ab4a6cc017ca358f
       UM04B_VIEW_BLOB: b66717894ff9ea3922222b86a02642197fe06a58
@@ -36,7 +34,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove exact-SHA GREEN sources and frozen RED tests
+      - name: Prove exact-SHA RED tests and frozen parent sources
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -50,8 +48,8 @@ jobs:
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-main-abort-lifecycle.md|tests/ask-user-question.test.ts|extensions/ask-user-question.ts|lib/questionnaire/questionnaire-view.ts) ;;
-              *) echo "unexpected UM-04b GREEN path: $path" >&2; exit 1 ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-main-profile-owner.md|tests/ask-user-question.test.ts) ;;
+              *) echo "unexpected UM-05a RED path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
           for path in \
@@ -71,20 +69,20 @@ jobs:
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          test "$(git rev-parse "$BASE:extensions/ask-user-question.ts")" = "$UM04A_PRODUCER_BLOB"
-          test "$(git rev-parse "$BASE:lib/questionnaire/questionnaire-view.ts")" = "$UM03B_VIEW_BLOB"
+          test "$(git rev-parse "$BASE:extensions/ask-user-question.ts")" = "$UM04B_PRODUCER_BLOB"
+          test "$(git rev-parse "$BASE:lib/questionnaire/questionnaire-view.ts")" = "$UM04B_VIEW_BLOB"
           for entry in "extensions/ask-user-question.ts:$UM04B_PRODUCER_BLOB" \
             "lib/questionnaire/questionnaire-view.ts:$UM04B_VIEW_BLOB"; do
             path="${entry%%:*}"; blob="${entry#*:}"
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          test "$(git rev-parse "$BASE:tests/ask-user-question.test.ts")" = "$UM04A_TEST_BLOB"
-          test "$(git rev-parse HEAD:tests/ask-user-question.test.ts)" = "$UM04B_RED_TEST_BLOB"
-          test "$(git hash-object -- tests/ask-user-question.test.ts)" = "$UM04B_RED_TEST_BLOB"
+          test "$(git rev-parse "$BASE:tests/ask-user-question.test.ts")" = "$UM04B_RED_TEST_BLOB"
+          test "$(git rev-parse HEAD:tests/ask-user-question.test.ts)" = "$UM05A_RED_TEST_BLOB"
+          test "$(git hash-object -- tests/ask-user-question.test.ts)" = "$UM05A_RED_TEST_BLOB"
           changes=$(git diff --numstat "$BASE" HEAD | awk "{n+=\$1+\$2} END {print n+0}")
           test "$changes" -le 400
-          echo "UM-04b GREEN checkout=$EXPECTED_SHA base=$BASE ask-test=$UM04B_RED_TEST_BLOB prior-ask-test=$UM04A_TEST_BLOB view-test=$UM03B_VIEW_TEST_BLOB view=$UM04B_VIEW_BLOB producer=$UM04B_PRODUCER_BLOB lines=$changes"
+          echo "UM-05a RED checkout=$EXPECTED_SHA base=$BASE ask-test=$UM05A_RED_TEST_BLOB prior-ask-test=$UM04B_RED_TEST_BLOB view-test=$UM03B_VIEW_TEST_BLOB view=$UM04B_VIEW_BLOB producer=$UM04B_PRODUCER_BLOB lines=$changes"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -159,6 +157,12 @@ jobs:
             GIT_CONFIG_GLOBAL=/dev/null GIT_CONFIG_NOSYSTEM=1 GIT_CONFIG_SYSTEM=/dev/null \
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 /bin/bash -euo pipefail -c '
               if touch /source/.read-only-probe 2>/dev/null; then exit 1; fi
+              node --experimental-strip-types --test --test-reporter=tap \
+                --test-name-pattern="^UM-04b:" /source/tests/ask-user-question.test.ts | tee /tmp/um04b-green.tap
+              for expected in "# pass 4" "# fail 0" "# cancelled 0"; do
+                grep -Fx "$expected" /tmp/um04b-green.tap
+              done
+              test "$(grep -Ec "^ok [0-9]+ - UM-04b:" /tmp/um04b-green.tap)" -eq 4
               node --experimental-strip-types --test --test-reporter=tap \
                 --test-name-pattern="^UM-04a:" /source/tests/ask-user-question.test.ts | tee /tmp/um04a-green.tap
               for expected in "# pass 4" "# fail 0" "# cancelled 0"; do
@@ -245,7 +249,7 @@ jobs:
               done
             '
 
-      - name: Require unfiltered 78 of 78 ask/view passes including four named UM04b cases
+      - name: Require unfiltered 78 prior passes and exactly four named behavioral failures
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -267,9 +271,9 @@ jobs:
                 /source/tests/ask-user-question.test.ts /source/tests/questionnaire-view.test.ts | tee "$tap"
               statuses=("${PIPESTATUS[@]}")
               set -e
-              test "${statuses[0]}" -eq 0
+              test "${statuses[0]}" -eq 1
               test "${statuses[1]}" -eq 0
-              for expected in "# tests 78" "# pass 78" "# fail 0" "# cancelled 0" "# skipped 0"; do
+              for expected in "# tests 82" "# pass 78" "# fail 4" "# cancelled 0" "# skipped 0"; do
                 grep -Fx "$expected" "$tap"
               done
               for name in \
@@ -286,7 +290,19 @@ jobs:
                 "UM-04b: completion abort and host rejection clean listeners and balance lifecycle"; do
                 test "$(grep -Ec "^ok [0-9]+ - $name$" "$tap")" -eq 1
               done
-              echo "Full unfiltered TAP: 78 passes including four named UM04b cases, zero failures/cancellations/skips"
+              for name in \
+                "UM-05a: exact enabled agent-profile owner registers only after TUI session_start" \
+                "UM-05a: missing malformed unreadable disabled and external ownership fail closed" \
+                "UM-05a: detectable inactive incumbent and pre-registered name are never displaced" \
+                "UM-05a: enabled owner never registers rich RPC even on interactive host"; do
+                test "$(grep -Ec "^not ok [0-9]+ - $name$" "$tap")" -eq 1
+              done
+              test "$(grep -Ec "^not ok [0-9]+ - " "$tap")" -eq 4
+              test "$(grep -c "code: .ERR_ASSERTION." "$tap")" -eq 4
+              grep -F "UM05a must not register eagerly before session_start" "$tap"
+              grep -F "UM05a must not register: fail-closed owner/inventory cases" "$tap"
+              grep -F "UM05a must not register on rich RPC interactive host" "$tap"
+              echo "Behavioral RED: 78 prior passes, four named assertion failures, zero cancellations/skips"
             '
 
       - name: Recheck exact checkout and cleanliness
