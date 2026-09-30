@@ -1,0 +1,218 @@
+name: UM06b2 packed public SDK discovery evidence
+on:
+  push:
+    branches: [feat/questionnaire-current-main-packed-sdk-evidence]
+permissions:
+  contents: read
+jobs:
+  packed-sdk:
+    if: >-
+      (github.repository == 'Gentleman-Programming/gentle-pi' || github.repository == 'decode2/gentle-pi') &&
+      github.event_name == 'push' && github.ref == 'refs/heads/feat/questionnaire-current-main-packed-sdk-evidence'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      BASE: a937094ed9db1ec3b5710cddbfe76d6ff906675e
+      IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Freeze exact event, two-file unit, complete parent graph and budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$GITHUB_REF" = refs/heads/feat/questionnaire-current-main-packed-sdk-evidence
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$EXPECTED_SHA" != "$BASE"
+          test "$(git merge-base "$BASE" HEAD)" = "$BASE"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          paths=$(git diff --name-only "$BASE" HEAD)
+          test "$(printf '%s\n' "$paths" | wc -l)" -eq 2
+          while IFS= read -r path; do
+            case "$path" in
+              .github/workflows/questionnaire-packed-discovery.yml|odd/tasks/questionnaire-current-main-packed-sdk-evidence.md) ;;
+              *) echo "unexpected path: $path" >&2; exit 1 ;;
+            esac
+          done <<< "$paths"
+          changes=$(git diff --numstat "$BASE" HEAD | awk '{n+=$1+$2} END {print n+0}')
+          test "$changes" -le 400
+          echo "AUTHORED SDK WORKFLOW checkout=$EXPECTED_SHA lines=$changes"
+          # Every parent file is immutable, including ALL producer modules and earlier records.
+          while IFS=$'\t' read -r metadata path; do
+            blob="${metadata##* }"
+            test "$(git rev-parse "HEAD:$path")" = "$blob"
+            test "$(git hash-object -- "$path")" = "$blob"
+          done < <(git ls-tree -r "$BASE")
+          for entry in \
+            tests/questionnaire-packed-discovery.test.ts:25e5e4c01cbeb41c7387a016822a962f165a1cbe \
+            tests/fixtures/questionnaire-packed-artifact.ts:666bbabe209cd79ad78309fd7fc1d53bd9c44b41 \
+            tests/questionnaire-packed-artifact.test.ts:fc4f6d38824ad6dfb48c9dac68449b845455ee7c \
+            .github/workflows/questionnaire-packed-artifact.yml:348d917c3eaa47f9e94df624d723c5765b5c7a12 \
+            tests/questionnaire-sdk-registration.test.ts:4c0d34d0f03be766e25925114b19fd974ba3167b \
+            .github/workflows/questionnaire-sdk-registration.yml:764c8082fc613c8a1429bde88928f40fe049c3f9 \
+            odd/tasks/questionnaire-current-main-packed-sdk-discovery.md:94f9cffed764dcc1967029b6e12ebf324e8f2691; do
+            test "$(git hash-object -- "${entry%%:*}")" = "${entry#*:}"
+          done
+          for path in .github/workflows/questionnaire-packed-discovery.yml odd/tasks/questionnaire-current-main-packed-sdk-evidence.md; do
+            test "$(git hash-object -- "$path")" = "$(git rev-parse "HEAD:$path")"
+            echo "CANDIDATE $path $(git rev-parse "HEAD:$path")"
+          done
+      - name: Acquire independent frozen dependencies and pack (not semantic evidence)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$IMAGE"
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = sha256:b795e77f6c253b171f482eff27b9b882dc4cdcb42d773372e298481c7318fbc2
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = linux/amd64
+          artifact="$RUNNER_TEMP/questionnaire-packed-sdk"
+          test ! -e "$artifact"
+          mkdir -m 0777 "$artifact"
+          docker run --rm --network=bridge --read-only --user 1000:1000 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$artifact,target=/artifact" \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --cap-drop=ALL --security-opt=no-new-privileges "$IMAGE" \
+            env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/artifact/home TMPDIR=/tmp \
+            XDG_CONFIG_HOME=/artifact/home XDG_CACHE_HOME=/artifact/cache XDG_DATA_HOME=/artifact/home \
+            NPM_CONFIG_CACHE=/artifact/cache NPM_CONFIG_USERCONFIG=/artifact/home/user.npmrc \
+            NPM_CONFIG_GLOBALCONFIG=/artifact/home/global.npmrc GIT_CONFIG_NOSYSTEM=1 \
+            EXPECTED_SHA="$EXPECTED_SHA" /bin/bash -euo pipefail -c '
+              mkdir /artifact/home /artifact/packed
+              git config --global --add safe.directory /workspace
+              git config --global --add safe.directory /workspace/.git
+              git clone --no-local --no-checkout /workspace /artifact/source
+              cd /artifact/source
+              git checkout --detach "$EXPECTED_SHA"
+              for root in /workspace /artifact/source; do
+                test "$(git -C "$root" rev-parse HEAD)" = "$EXPECTED_SHA"
+                test -z "$(git -C "$root" status --porcelain=v1 --untracked-files=all)"
+                while IFS=$'\''\t'\'' read -r metadata path; do
+                  test "$(git hash-object -- "$root/$path")" = "${metadata##* }"
+                done < <(git -C "$root" ls-tree -r HEAD)
+              done
+              npm install --prefix /artifact/bootstrap --no-save --package-lock=false --ignore-scripts --no-audit --no-fund pnpm@11.1.1
+              pnpm=/artifact/bootstrap/node_modules/.bin/pnpm
+              test "$("$pnpm" --version)" = 11.1.1
+              "$pnpm" install --frozen-lockfile --ignore-scripts --ignore-pnpmfile --reporter=append-only
+              test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+              test -z "$(git status --porcelain=v1 --untracked-files=all)"
+              npm pack --json --ignore-scripts --pack-destination /artifact/packed > /artifact/packed/pack.json
+              for root in /workspace /artifact/source; do
+                test "$(git -C "$root" rev-parse HEAD)" = "$EXPECTED_SHA"
+                test -z "$(git -C "$root" status --porcelain=v1 --untracked-files=all)"
+                while IFS=$'\''\t'\'' read -r metadata path; do
+                  test "$(git hash-object -- "$root/$path")" = "${metadata##* }"
+                done < <(git -C "$root" ls-tree -r HEAD)
+              done
+            '
+          (cd "$artifact/packed"; sha256sum pack.json *.tgz) > "$artifact/packed.sha256"
+      - name: Strict frozen types, unchanged ratchet and three SDK controls offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network=none --read-only --user 1000:1000 \
+            --mount "type=bind,source=$RUNNER_TEMP/questionnaire-packed-sdk/source,target=/source,readonly" \
+            --mount "type=bind,source=$RUNNER_TEMP/questionnaire-packed-sdk/packed,target=/packed,readonly" \
+            --tmpfs /tmp:rw,noexec,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --cap-drop=ALL --security-opt=no-new-privileges -w /source "$IMAGE" \
+            env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp/home TMPDIR=/tmp \
+            XDG_CONFIG_HOME=/tmp/home XDG_CACHE_HOME=/tmp/cache XDG_DATA_HOME=/tmp/data \
+            PACK_ARTIFACT_DIR=/packed NODE_OPTIONS=--max-old-space-size=1536 \
+            EXPECTED_SHA="$EXPECTED_SHA" GIT_CONFIG_NOSYSTEM=1 /bin/bash -euo pipefail -c '
+              mkdir /tmp/home /tmp/cache /tmp/data
+              git config --global --add safe.directory /source
+              test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+              test -z "$(git status --porcelain=v1 --untracked-files=all)"
+              for root in /source /packed; do
+                if touch "$root/.read-only-probe" 2>/dev/null; then exit 1; fi
+              done
+              # Resolve ESM exports without importing SDK/provider code before the clean environment.
+              node --input-type=module -e '\''
+                import fs from "node:fs";
+                import path from "node:path";
+                import assert from "node:assert/strict";
+                import { fileURLToPath } from "node:url";
+                import { createRequire } from "node:module";
+                const sdkEntry = import.meta.resolve("@earendil-works/pi-coding-agent");
+                const sdkRequire = createRequire(sdkEntry);
+                for (const [name, version] of [
+                  ["@earendil-works/pi-coding-agent", "0.87.1"],
+                  ["@earendil-works/pi-tui", "0.87.1"], ["typebox", "1.1.38"],
+                ]) {
+                  let directory = path.dirname(fileURLToPath(import.meta.resolve(name)));
+                  while (!fs.existsSync(path.join(directory, "package.json"))) {
+                    const parent = path.dirname(directory);
+                    assert.notEqual(parent, directory);
+                    directory = parent;
+                  }
+                  const metadata = JSON.parse(fs.readFileSync(path.join(directory, "package.json"), "utf8"));
+                  assert.equal(metadata.name, name);
+                  assert.equal(metadata.version, version);
+                }
+                // The SDK loader aliases its own TypeBox peer, not the root peer.
+                let peerDirectory = path.dirname(sdkRequire.resolve("typebox"));
+                while (!fs.existsSync(path.join(peerDirectory, "package.json"))) {
+                  const parent = path.dirname(peerDirectory);
+                  assert.notEqual(parent, peerDirectory);
+                  peerDirectory = parent;
+                }
+                const peer = JSON.parse(fs.readFileSync(path.join(peerDirectory, "package.json"), "utf8"));
+                assert.equal(peer.name, "typebox");
+                assert.equal(peer.version, "1.3.27");
+              '\''
+              node /source/node_modules/typescript/bin/tsc --noEmit --strict --skipLibCheck \
+                --target ESNext --module NodeNext --moduleResolution NodeNext --allowImportingTsExtensions \
+                --lib ESNext,DOM --typeRoots /source/node_modules/@types --types node \
+                /source/tests/fixtures/questionnaire-packed-artifact.ts /source/tests/questionnaire-packed-discovery.test.ts
+              node /source/scripts/check-types.mjs | tee /tmp/types.tap
+              grep -F "types: 188 recorded diagnostic(s), no regressions" /tmp/types.tap
+              # Pure helper only: no import of older test modules or mutation of negative fixtures.
+              node --experimental-strip-types --input-type=module -e '\''
+                import { mkdtempSync } from "node:fs";
+                import { loadArtifact, extractArtifact, verifyExtraction, frozenModules } from "./tests/fixtures/questionnaire-packed-artifact.ts";
+                const artifact = loadArtifact(process.env.PACK_ARTIFACT_DIR);
+                const root = mkdtempSync("/tmp/pristine-metadata-") + "/package";
+                extractArtifact(artifact, root);
+                verifyExtraction(root, artifact.report);
+                const { filename, size, integrity } = artifact.report;
+                console.log(JSON.stringify({ timestamp: new Date().toISOString(), filename, size, integrity,
+                  frozenModuleCount: Object.keys(frozenModules).length }));
+              '\''
+              PACK_ARTIFACT_DIR=/packed node --experimental-strip-types --test --test-reporter=tap tests/questionnaire-packed-discovery.test.ts | tee /tmp/sdk.tap
+              test "$(grep -Ec "^ok [0-9]+ - UM06b2 SDK:" /tmp/sdk.tap)" -eq 3
+              for name in \
+                "packed manifest discovery registers the owned questionnaire" \
+                "an empty extension filter prevents questionnaire discovery" \
+                "a missing packed relative module fails without source fallback"; do
+                test "$(grep -Ec "^ok [0-9]+ - UM06b2 SDK: $name$" /tmp/sdk.tap)" -eq 1
+              done
+              for expected in "# tests 3" "# pass 3" "# fail 0" "# cancelled 0" "# skipped 0" "# todo 0"; do
+                grep -Fx "$expected" /tmp/sdk.tap
+              done
+              test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+              test -z "$(git status --porcelain=v1 --untracked-files=all)"
+              while IFS=$'\''\t'\'' read -r metadata path; do
+                test "$(git hash-object -- "$path")" = "${metadata##* }"
+              done < <(git ls-tree -r HEAD)
+            '
+      - name: Final original, independent and archive identity recheck
+        if: always()
+        shell: bash
+        run: |
+          set -euo pipefail
+          source="$RUNNER_TEMP/questionnaire-packed-sdk/source"
+          test -d "$source/.git"
+          for root in "$GITHUB_WORKSPACE" "$source"; do
+            test "$(git -c safe.directory="$root" -C "$root" rev-parse HEAD)" = "$EXPECTED_SHA"
+            test -z "$(GIT_OPTIONAL_LOCKS=0 git -c safe.directory="$root" -C "$root" status --porcelain=v1 --untracked-files=all)"
+            while IFS=$'\t' read -r metadata path; do
+              test "$(git hash-object -- "$root/$path")" = "${metadata##* }"
+            done < <(git -c safe.directory="$root" -C "$root" ls-tree -r HEAD)
+          done
+          cd "$RUNNER_TEMP/questionnaire-packed-sdk/packed"
+          sha256sum --check ../packed.sha256
