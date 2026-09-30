@@ -99,7 +99,7 @@ jobs:
             NODE_OPTIONS=--max-old-space-size=1536 /bin/bash -euo pipefail -c '
               mkdir /tmp/home
               if touch /source/.read-only-probe 2>/dev/null; then exit 1; fi
-              node -e '\''const fs=require("node:fs"),path=require("node:path"),assert=require("node:assert/strict");let p=require.resolve("@earendil-works/pi-coding-agent");while(!fs.existsSync(path.join(p,"package.json")))p=path.dirname(p);assert.equal(JSON.parse(fs.readFileSync(path.join(p,"package.json"))).version,"0.87.1");'\''
+              node --input-type=module -e '\''import fs from "node:fs";import path from "node:path";import assert from "node:assert/strict";import { fileURLToPath } from "node:url";let p=fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));while(!fs.existsSync(path.join(p,"package.json")))p=path.dirname(p);assert.equal(JSON.parse(fs.readFileSync(path.join(p,"package.json"))).version,"0.87.1");'\''
               node /source/node_modules/typescript/bin/tsc --noEmit --strict --skipLibCheck \
                 --target ESNext --module ESNext --moduleResolution bundler --allowImportingTsExtensions \
                 --lib ESNext,DOM --typeRoots /source/node_modules/@types --types node \
