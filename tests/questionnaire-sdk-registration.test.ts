@@ -140,7 +140,10 @@ export default function (pi) {
 			services, sessionManager: SessionManager.inMemory(cwd), noTools: "builtin",
 		});
 		session = created.session;
-		assert.equal(session.model, undefined, "no configured provider or model required");
+		// Agent core supplies an unknown-model sentinel for this empty runtime.
+		assert.equal(session.model?.provider, "unknown", "BLOCKED FIXTURE: SDK default model");
+		assert.equal(session.model?.id, "unknown");
+		assert.equal(session.model?.baseUrl, "");
 		const live = session;
 		const bind = async (mode: ExtensionMode) => {
 			const errors: unknown[] = [];

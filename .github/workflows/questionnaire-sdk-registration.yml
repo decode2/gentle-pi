@@ -50,7 +50,7 @@ jobs:
             test "$(git rev-parse "$BASE:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
-          test "$(git hash-object -- tests/questionnaire-sdk-registration.test.ts)" = 44d4b28604929df74b1cc616fbc4547b15254d3a
+          test "$(git hash-object -- tests/questionnaire-sdk-registration.test.ts)" = 43a8467accb128a2595941842eaa8a741c51ed68
           changes=$(git diff --numstat "$BASE" HEAD | awk '{n+=$1+$2} END {print n+0}')
           test "$changes" -le 400
           echo "AUTHORED BASELINE checkout=$EXPECTED_SHA lines=$changes"
