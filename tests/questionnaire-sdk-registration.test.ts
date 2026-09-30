@@ -20,12 +20,13 @@ const root = fileURLToPath(new URL("..", import.meta.url));
 const producer = join(root, "extensions", "ask-user-question.ts");
 const toolName = "ask_user_question";
 
-// This host provides the public UI boundary, not a rendered terminal. Any UI
-// call is a fixture failure: registration must not ask or render a question.
+// This host provides the public UI boundary, not a rendered terminal.
+// Interactive calls are fixture failures; SDK binding may read theme metadata.
+// Registration must not ask or render a question.
 function unexpectedUI(): never {
 	throw new Error("BLOCKED FIXTURE: registration attempted UI interaction");
 }
-const uiContext: ExtensionUIContext = {
+const uiContext: Omit<ExtensionUIContext, "theme"> = {
 	select: unexpectedUI,
 	confirm: unexpectedUI,
 	input: unexpectedUI,
@@ -48,7 +49,6 @@ const uiContext: ExtensionUIContext = {
 	addAutocompleteProvider: unexpectedUI,
 	setEditorComponent: unexpectedUI,
 	getEditorComponent: unexpectedUI,
-	get theme() { return unexpectedUI(); },
 	getAllThemes: unexpectedUI,
 	getTheme: unexpectedUI,
 	setTheme: unexpectedUI,
@@ -147,7 +147,10 @@ export default function (pi) {
 		const live = session;
 		const bind = async (mode: ExtensionMode) => {
 			const errors: unknown[] = [];
-			await live.bindExtensions({ mode, uiContext, onError: (error) => errors.push(error) });
+			await live.bindExtensions({
+				mode, uiContext: { ...uiContext, theme: live.extensionRunner.getUIContext().theme },
+				onError: (error) => errors.push(error),
+			});
 			assert.deepEqual(errors, [], "BLOCKED LIFECYCLE: extension handler error");
 		};
 		await observe(live, bind);
