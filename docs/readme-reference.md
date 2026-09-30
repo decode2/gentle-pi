@@ -347,6 +347,12 @@ Set `GENTLE_SHELL_NO_AUTO_SETUP=1` to skip automatic provisioning entirely and k
 
 **Known limitation**: like `gentle-shell setup`, automatic provisioning never copies credentials into the home it provisions — a freshly auto-provisioned isolated or `--home` home still needs its own `/login` (or equivalent) inside pi.
 
+#### Questionnaire ownership after successful automatic setup
+
+Eligible owned automatic provisioning creates `<resolved home>/gentle-ai/question-owner.json` only after install and cleanup succeed, before recording provisioning success. Its JSON is `{ "version": 1, "owner": "gentle-pi", "enabled": true }`: the per-home opt-in for gentle-pi's interactive TUI questionnaire, not rich RPC. Manual setup, skipped auto-setup, `--link`, foreign homes and Pi's default home do not gain ownership through this boundary.
+
+Creation is exclusive: existing matching records stay byte-identical; disabled, external, malformed or unreadable records are preserved with a `question-owner.json conflict` warning. Resolve any conflict deliberately rather than expecting setup to overwrite it. Owner I/O failures warn through the existing automatic-setup fallback without a new success marker. A later marker-write failure can leave the new owner in place; no rollback or crash-transaction guarantee is claimed. Existing third-party cleanup policy is unchanged and remains a separate migration/delivery concern.
+
 ### Windows shims
 
 On win32, when the resolved pi command ends in `.cmd` or `.bat` — the shape an npm-installed `pi` or a `GENTLE_SHELL_PI` override commonly takes — `gentle-shell` runs it through `cmd.exe` as one quoted command line instead of spawning it directly, because current Node releases refuse to spawn a batch file without `shell: true`. This applies to both the version probe and the real launch.

@@ -1,4 +1,4 @@
-name: Pinned-parent questionnaire UM-05b behavioral RED
+name: Pinned-parent questionnaire UM-05b GREEN
 
 on:
   push:
@@ -9,7 +9,7 @@ permissions:
   contents: read
 
 jobs:
-  behavioral-red:
+  behavioral-green:
     # Hosted execution requires separate branch-specific push authorization.
     if: >-
       (github.repository == 'Gentleman-Programming/gentle-pi' ||
@@ -21,6 +21,7 @@ jobs:
     env:
       BASE: 710ceb37b44d18f4bed8f34e0111cf8df026ef23
       UM05B_RED_TEST_BLOB: 1395979d24220f5902377f91dc7ae42eb0090054
+      UM05B_GREEN_BIN_BLOB: 875574e37053a2f3644e9319238b26909439f5e7
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
       UM05A_RED_TEST_BLOB: 34ebf12930c0879ce1d39d43bcab3afa5f7cebdf
       UM05A_PRODUCER_BLOB: 73e493598f2e4ed568d54facbb4b624feae48155
@@ -36,7 +37,7 @@ jobs:
           fetch-depth: 0
           persist-credentials: false
 
-      - name: Prove exact-SHA RED tests and frozen production
+      - name: Prove exact-SHA GREEN bin and frozen RED tests
         shell: bash
         env:
           EXPECTED_SHA: ${{ github.sha }}
@@ -50,8 +51,8 @@ jobs:
           test "$(git merge-base "$BASE" HEAD)" = "$BASE"
           while IFS= read -r path; do
             case "$path" in
-              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-main-owner-delivery.md|tests/gentle-shell-bin.test.ts) ;;
-              *) echo "unexpected UM-05b RED path: $path" >&2; exit 1 ;;
+              .github/workflows/questionnaire-current-upstream.yml|odd/tasks/questionnaire-current-main-owner-delivery.md|tests/gentle-shell-bin.test.ts|bin/gentle-shell.mjs|docs/readme-reference.md) ;;
+              *) echo "unexpected UM-05b GREEN path: $path" >&2; exit 1 ;;
             esac
           done < <(git diff --name-only "$BASE" HEAD)
           for path in \
@@ -83,7 +84,6 @@ jobs:
           test "$(git rev-parse HEAD:tests/ask-user-question.test.ts)" = "$UM05A_RED_TEST_BLOB"
           test "$(git hash-object -- tests/ask-user-question.test.ts)" = "$UM05A_RED_TEST_BLOB"
           for entry in \
-            "bin/gentle-shell.mjs:7eed24840f0ede83498bc542eba221badbf4276b" \
             "lib/gentle-shell-launcher.ts:36e04eb87ebe21d39315d8be140a107e2e9b846e" \
             "runtime/gentle-shell-launcher.mjs:3658bec966239c4a6918fc3426ab058a8bb81a61"; do
             path="${entry%%:*}"; blob="${entry#*:}"
@@ -91,12 +91,15 @@ jobs:
             test "$(git rev-parse "HEAD:$path")" = "$blob"
             test "$(git hash-object -- "$path")" = "$blob"
           done
+          test "$(git rev-parse "$BASE:bin/gentle-shell.mjs")" = 7eed24840f0ede83498bc542eba221badbf4276b
+          test "$(git rev-parse HEAD:bin/gentle-shell.mjs)" = "$UM05B_GREEN_BIN_BLOB"
+          test "$(git hash-object -- bin/gentle-shell.mjs)" = "$UM05B_GREEN_BIN_BLOB"
           test "$(git rev-parse "$BASE:tests/gentle-shell-bin.test.ts")" = cd6f992f50531e761bcaceb931343bd8ea5d7850
           test "$(git rev-parse HEAD:tests/gentle-shell-bin.test.ts)" = "$UM05B_RED_TEST_BLOB"
           test "$(git hash-object -- tests/gentle-shell-bin.test.ts)" = "$UM05B_RED_TEST_BLOB"
           changes=$(git diff --numstat "$BASE" HEAD | awk "{n+=\$1+\$2} END {print n+0}")
-          test "$changes" -le 300 # reserve 100 cumulative lines for planned GREEN bin/docs
-          echo "UM-05b RED checkout=$EXPECTED_SHA base=$BASE bin-test=$UM05B_RED_TEST_BLOB frozen-producer=$UM05A_PRODUCER_BLOB lines=$changes"
+          test "$changes" -le 400
+          echo "UM-05b GREEN checkout=$EXPECTED_SHA base=$BASE bin=$UM05B_GREEN_BIN_BLOB bin-test=$UM05B_RED_TEST_BLOB frozen-producer=$UM05A_PRODUCER_BLOB lines=$changes"
 
       - name: Acquire pinned Node image and verify image identity
         id: image
@@ -321,7 +324,7 @@ jobs:
               echo "GREEN: 82 passes including four named owner cases, zero failures/cancellations/skips"
             '
 
-      - name: Require only the three forecast owner assertion failures in unfiltered bin TAP
+      - name: Require unfiltered 103 bin passes including all five owner cases
         shell: bash
         env:
           IMAGE_ID: ${{ steps.image.outputs.id }}
@@ -340,31 +343,22 @@ jobs:
             GIT_OPTIONAL_LOCKS=0 GIT_TERMINAL_PROMPT=0 /bin/bash -euo pipefail -c '
               set +e
               node --experimental-strip-types --test --test-reporter=tap \
-                /source/tests/gentle-shell-bin.test.ts | tee /tmp/bin-red.tap
+                /source/tests/gentle-shell-bin.test.ts | tee /tmp/bin-green.tap
               statuses=("${PIPESTATUS[@]}")
               set -e
-              test "${statuses[0]}" -eq 1
+              test "${statuses[0]}" -eq 0
               test "${statuses[1]}" -eq 0
               node --input-type=module <<NODE
               import assert from "node:assert/strict";
               import { readFileSync } from "node:fs";
-              const tap = readFileSync("/tmp/bin-red.tap", "utf8");
+              const tap = readFileSync("/tmp/bin-green.tap", "utf8");
               const outcomes = [...tap.matchAll(/^(ok|not ok) [0-9]+ - (.+)$/gm)];
-              const expected = [
-                ["UM-05b: successful owned auto-setup delivers exact owner JSON", "UM-05b owner delivery:"],
-                ["UM-05b: existing matching owners are preserved and conflicts are reported", "UM-05b owner conflict:"],
-                ["UM-05b: divergent selectors deliver only to the resolved target home", "UM-05b owner placement:"],
-              ];
-              assert.deepEqual(outcomes.filter((m) => m[1] === "not ok").map((m) => m[2]).sort(), expected.map(([name]) => name).sort());
-              for (const [name, diagnostic] of expected) {
-                const start = tap.indexOf(" - " + name + "\n");
-                const end = tap.indexOf("\n  ...", start);
-                assert.ok(start >= 0 && end > start, name + ": complete diagnostic required");
-                const block = tap.slice(start, end);
-                assert.match(block, /code: .ERR_ASSERTION./, name);
-                assert.ok(block.includes(diagnostic), name + ": owner assertion required");
-              }
+              assert.equal(outcomes.length, 103);
+              assert.ok(outcomes.every((m) => m[1] === "ok"));
               for (const name of [
+                "UM-05b: successful owned auto-setup delivers exact owner JSON",
+                "UM-05b: existing matching owners are preserved and conflicts are reported",
+                "UM-05b: divergent selectors deliver only to the resolved target home",
                 "UM-05b: failed install or cleanup creates no new owner or success marker",
                 "UM-05b: link foreign and default homes never auto-deliver ownership",
                 "first launch auto-provisions the isolated home, writes the marker, then launches pi; stdout carries only pi\u0027s output",
@@ -374,11 +368,10 @@ jobs:
                 "a --home directory gentle-shell itself bootstrapped is retried after its first auto-provision attempt fails",
               ]) assert.equal(outcomes.filter((m) => m[1] === "ok" && m[2] === name).length, 1, name);
               const count = (key) => Number(tap.match(new RegExp("^# " + key + " ([0-9]+)$", "m"))?.[1] ?? NaN);
-              assert.equal(count("fail"), 3);
-              for (const key of ["cancelled", "skipped", "todo"]) assert.equal(count(key), 0, key);
-              assert.equal(count("tests"), outcomes.length);
-              assert.equal(count("pass"), outcomes.length - 3);
-              console.log("Observed hosted UM-05b RED: tests=" + count("tests") + " pass=" + count("pass") + " fail=3; all remaining bin cases pass");
+              for (const key of ["fail", "cancelled", "skipped", "todo"]) assert.equal(count(key), 0, key);
+              assert.equal(count("tests"), 103);
+              assert.equal(count("pass"), 103);
+              console.log("Observed hosted UM-05b GREEN: 103/103 bin passes, all five owner cases, no failures/cancellations/skips/todos");
           NODE
             '
 

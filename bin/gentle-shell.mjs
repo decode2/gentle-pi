@@ -1036,10 +1036,31 @@ async function maybeAutoProvisionHome(home, runtime, { homeHadContentBeforeBoots
 			return undefined;
 		}
 
+		deliverQuestionOwner(home);
+		// If the marker fails, retain the owner: deleting it could race a replacement.
 		writeRawConfig(configPath, recordProvisioned(readRawConfig(configPath), homeKey, pin, gentlePiVersion, new Date().toISOString()));
 		return undefined;
 	} finally {
 		releaseSetupLock(lockPath);
+	}
+}
+
+// Exclusive creation preserves incumbent records, including concurrent arrivals.
+function deliverQuestionOwner(home) {
+	const path = join(home.dir, "gentle-ai", "question-owner.json");
+	mkdirSync(dirname(path), { recursive: true });
+	try {
+		writeFileSync(path, `${JSON.stringify({ version: 1, owner: "gentle-pi", enabled: true })}\n`, { flag: "wx" });
+	} catch (error) {
+		if (error.code !== "EEXIST") throw error;
+		let matching = false;
+		try {
+			const record = JSON.parse(readFileSync(path, "utf8"));
+			matching = record?.version === 1 && record.owner === "gentle-pi" && record.enabled === true;
+		} catch {
+			// Malformed, unreadable and directory incumbents are conflicts too.
+		}
+		if (!matching) process.stderr.write(`gentle-shell: question-owner.json conflict at ${path}; existing record preserved.\n`);
 	}
 }
 
