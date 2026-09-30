@@ -1,0 +1,131 @@
+name: UM06a public SDK registration baseline
+on:
+  push:
+    branches: [feat/questionnaire-current-main-sdk-registration]
+permissions:
+  contents: read
+jobs:
+  sdk-baseline:
+    if: >-
+      (github.repository == 'Gentleman-Programming/gentle-pi' || github.repository == 'decode2/gentle-pi') &&
+      github.event_name == 'push' && github.ref == 'refs/heads/feat/questionnaire-current-main-sdk-registration'
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+    env:
+      BASE: c44a5ed71a34421ac47c5a56d76e3360cd6dbe5a
+      IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4
+      EXPECTED_SHA: ${{ github.sha }}
+    steps:
+      - uses: actions/checkout@34e114876b0b11c390a56381ad16ebd13914f8d5 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Freeze exact event, scope, source identities and budget
+        shell: bash
+        run: |
+          set -euo pipefail
+          test "$GITHUB_EVENT_NAME" = push
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test "$EXPECTED_SHA" != "$BASE"
+          test -z "$(git status --porcelain=v1 --untracked-files=all)"
+          test "$(git merge-base "$BASE" HEAD)" = "$BASE"
+          while IFS= read -r path; do
+            case "$path" in
+              tests/questionnaire-sdk-registration.test.ts|.github/workflows/questionnaire-sdk-registration.yml|odd/tasks/questionnaire-current-main-sdk-registration.md) ;;
+              *) echo "unexpected path: $path" >&2; exit 1 ;;
+            esac
+          done < <(git diff --name-only "$BASE" HEAD)
+          for entry in \
+            extensions/ask-user-question.ts:73e493598f2e4ed568d54facbb4b624feae48155 \
+            tests/ask-user-question.test.ts:34ebf12930c0879ce1d39d43bcab3afa5f7cebdf \
+            bin/gentle-shell.mjs:875574e37053a2f3644e9319238b26909439f5e7 \
+            lib/questionnaire/questionnaire-view.ts:b66717894ff9ea3922222b86a02642197fe06a58 \
+            tests/questionnaire-view.test.ts:6ea13ae1857d9829c7f2ce0fb3b710f73c146386 \
+            lib/gentle-shell-launcher.ts:36e04eb87ebe21d39315d8be140a107e2e9b846e \
+            runtime/gentle-shell-launcher.mjs:3658bec966239c4a6918fc3426ab058a8bb81a61 \
+            package.json:5b3ba5d4a31b5fe92b097e77e9171cac1af6718b \
+            pnpm-lock.yaml:7a29976dd5ad8f488725076057388f73726870b5; do
+            path="${entry%%:*}"; blob="${entry#*:}"
+            test "$(git rev-parse "$BASE:$path")" = "$blob"
+            test "$(git hash-object -- "$path")" = "$blob"
+          done
+          test "$(git hash-object -- tests/questionnaire-sdk-registration.test.ts)" = 44d4b28604929df74b1cc616fbc4547b15254d3a
+          changes=$(git diff --numstat "$BASE" HEAD | awk '{n+=$1+$2} END {print n+0}')
+          test "$changes" -le 400
+          echo "AUTHORED BASELINE checkout=$EXPECTED_SHA lines=$changes"
+          git rev-parse HEAD:tests/questionnaire-sdk-registration.test.ts HEAD:.github/workflows/questionnaire-sdk-registration.yml
+      - name: Acquire independent frozen dependencies (network stage, not evidence)
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker pull --platform linux/amd64 "$IMAGE"
+          test "$(docker image inspect --format '{{.Id}}' "$IMAGE")" = sha256:b795e77f6c253b171f482eff27b9b882dc4cdcb42d773372e298481c7318fbc2
+          test "$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$IMAGE")" = linux/amd64
+          artifact="$RUNNER_TEMP/questionnaire-sdk"
+          test ! -e "$artifact"
+          mkdir -m 0777 "$artifact"
+          docker run --rm --network=bridge --read-only --user 1000:1000 \
+            --mount "type=bind,source=$GITHUB_WORKSPACE,target=/workspace,readonly" \
+            --mount "type=bind,source=$artifact,target=/artifact" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --cap-drop=ALL --security-opt=no-new-privileges "$IMAGE" \
+            env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/artifact/home TMPDIR=/tmp \
+            NPM_CONFIG_CACHE=/artifact/cache NPM_CONFIG_USERCONFIG=/artifact/home/user.npmrc \
+            NPM_CONFIG_GLOBALCONFIG=/artifact/home/global.npmrc GIT_CONFIG_NOSYSTEM=1 \
+            EXPECTED_SHA="$EXPECTED_SHA" /bin/bash -euo pipefail -c '
+              mkdir /artifact/home
+              git config --global --add safe.directory /workspace
+              git config --global --add safe.directory /workspace/.git
+              git clone --no-local --no-checkout /workspace /artifact/source
+              cd /artifact/source
+              git checkout --detach "$EXPECTED_SHA"
+              test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+              npm install --prefix /artifact/bootstrap --no-save --package-lock=false --ignore-scripts --no-audit --no-fund pnpm@11.1.1
+              pnpm=/artifact/bootstrap/node_modules/.bin/pnpm
+              test "$("$pnpm" --version)" = 11.1.1
+              "$pnpm" install --frozen-lockfile --ignore-scripts --ignore-pnpmfile --reporter=append-only
+              test -z "$(git status --porcelain=v1 --untracked-files=all)"
+            '
+      - name: Strict SDK types, ratchet and named baseline offline
+        shell: bash
+        run: |
+          set -euo pipefail
+          docker run --rm --network=none --read-only --user 1000:1000 \
+            --mount "type=bind,source=$RUNNER_TEMP/questionnaire-sdk/source,target=/source,readonly" \
+            --tmpfs /tmp:rw,nosuid,nodev,size=256m --cpus=1 --memory=2g --pids-limit=256 \
+            --cap-drop=ALL --security-opt=no-new-privileges -w /source "$IMAGE" \
+            env -i PATH=/usr/local/bin:/usr/bin:/bin HOME=/tmp/home TMPDIR=/tmp \
+            NODE_OPTIONS=--max-old-space-size=1536 /bin/bash -euo pipefail -c '
+              mkdir /tmp/home
+              if touch /source/.read-only-probe 2>/dev/null; then exit 1; fi
+              node -e '\''const fs=require("node:fs"),path=require("node:path"),assert=require("node:assert/strict");let p=require.resolve("@earendil-works/pi-coding-agent");while(!fs.existsSync(path.join(p,"package.json")))p=path.dirname(p);assert.equal(JSON.parse(fs.readFileSync(path.join(p,"package.json"))).version,"0.87.1");'\''
+              node /source/node_modules/typescript/bin/tsc --noEmit --strict --skipLibCheck \
+                --target ESNext --module ESNext --moduleResolution bundler --allowImportingTsExtensions \
+                --lib ESNext,DOM --typeRoots /source/node_modules/@types --types node \
+                /source/tests/questionnaire-sdk-registration.test.ts /source/extensions/ask-user-question.ts /source/lib/questionnaire/questionnaire-view.ts
+              node /source/scripts/check-types.mjs | tee /tmp/types.tap
+              grep -F "types: 188 recorded diagnostic(s), no regressions" /tmp/types.tap
+              node --experimental-strip-types --test --test-reporter=tap /source/tests/questionnaire-sdk-registration.test.ts | tee /tmp/sdk.tap
+              test "$(grep -Ec "^ok [0-9]+ - UM06a SDK:" /tmp/sdk.tap)" -eq 8
+              for name in \
+                "enabled selected owner registers only at TUI bind and remains unique" \
+                "missing owner does not register" \
+                "disabled owner does not register" \
+                "external owner does not register" \
+                "wrong-home owner does not register" \
+                "enabled owner does not register in json mode" \
+                "enabled owner does not register in rpc mode" \
+                "inactive configured incumbent is retained without replacement"; do
+                test "$(grep -Ec "^ok [0-9]+ - UM06a SDK: $name$" /tmp/sdk.tap)" -eq 1
+              done
+              for expected in "# tests 8" "# pass 8" "# fail 0" "# cancelled 0" "# skipped 0" "# todo 0"; do
+                grep -Fx "$expected" /tmp/sdk.tap
+              done
+            '
+      - name: Recheck exact clean checkout
+        if: always()
+        shell: bash
+        run: |
+          test "$(git rev-parse HEAD)" = "$EXPECTED_SHA"
+          test -z "$(GIT_OPTIONAL_LOCKS=0 git status --porcelain=v1 --untracked-files=all)"
