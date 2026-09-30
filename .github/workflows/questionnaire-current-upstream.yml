@@ -379,7 +379,7 @@ jobs:
               assert.equal(count("tests"), outcomes.length);
               assert.equal(count("pass"), outcomes.length - 3);
               console.log("Observed hosted UM-05b RED: tests=" + count("tests") + " pass=" + count("pass") + " fail=3; all remaining bin cases pass");
-              NODE
+          NODE
             '
 
       - name: Recheck exact checkout and cleanliness
