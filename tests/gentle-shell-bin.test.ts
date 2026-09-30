@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawn, spawnSync } from "node:child_process";
+import { type ChildProcessByStdio, spawn, spawnSync } from "node:child_process";
 import {
 	chmodSync,
 	existsSync,
@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { delimiter, dirname, join } from "node:path";
+import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
@@ -1661,10 +1662,10 @@ test("UM-05b: divergent selectors deliver only to the resolved target home", (t)
 // Waits until `child`'s stderr has emitted a line matching `pattern`, so a
 // test can send a signal only once the flow has actually started (never
 // racing the signal against the child process not existing yet).
-function waitForStderrMatch(child, pattern) {
+function waitForStderrMatch(child: ChildProcessByStdio<null, Readable, Readable>, pattern: RegExp) {
 	return new Promise((resolve, reject) => {
 		let buffer = "";
-		const onData = (chunk) => {
+		const onData = (chunk: Buffer) => {
 			buffer += chunk.toString("utf8");
 			if (pattern.test(buffer)) {
 				child.stderr.off("data", onData);
@@ -1682,7 +1683,7 @@ function waitForExit(child: ReturnType<typeof spawn>): Promise<{ code: number | 
 	});
 }
 
-function delay(ms) {
+function delay(ms: number) {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }
 

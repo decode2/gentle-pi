@@ -20,7 +20,7 @@ jobs:
     timeout-minutes: 35
     env:
       BASE: 710ceb37b44d18f4bed8f34e0111cf8df026ef23
-      UM05B_RED_TEST_BLOB: c09090228196b287a6d3e59a4d80580ac23174b2
+      UM05B_RED_TEST_BLOB: 1395979d24220f5902377f91dc7ae42eb0090054
       IMAGE: node@sha256:64af3819f9275802414d7cdc38c27e9d82bd564dec4d4da87d008255d36c63b4 # previously hosted-verified Node 24 image
       UM05A_RED_TEST_BLOB: 34ebf12930c0879ce1d39d43bcab3afa5f7cebdf
       UM05A_PRODUCER_BLOB: 73e493598f2e4ed568d54facbb4b624feae48155
