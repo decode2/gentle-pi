@@ -268,13 +268,13 @@ jobs:
               node scripts/check-types.mjs | tee /tmp/types.tap
               grep -F "recorded diagnostic(s), no regressions" /tmp/types.tap
               set +e
-              baseline=$(node --experimental-strip-types --test tests/questionnaire-view.test.ts 2>&1)
+              baseline=$(node --experimental-strip-types --test --test-reporter=tap tests/questionnaire-view.test.ts 2>&1)
               baseline_exit=$?
               set -e
               printf "%s\n" "$baseline" | tee /tmp/baseline.tap
               node /guard/tap.mjs baseline /tmp/baseline.tap "$baseline_exit"
               set +e
-              submit=$(node --experimental-strip-types --test tests/questionnaire-pi1-submit.test.ts 2>&1)
+              submit=$(node --experimental-strip-types --test --test-reporter=tap tests/questionnaire-pi1-submit.test.ts 2>&1)
               submit_exit=$?
               set -e
               printf "%s\n" "$submit" | tee /tmp/submit.tap
