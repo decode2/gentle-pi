@@ -1,0 +1,68 @@
+# UM09b: contained Pi 1.0 explicit Submit behavioral RED lane
+
+**STATIC GUARDED RED LANE ACCEPTED; HOSTED RESULTS PENDING.** User authorized continuing the questionnaire feature; expected tests are committed, no production fix until an actual intended hosted behavioral RED. Owned-fork delivery is allowed by standing grant; official delivery/native consent/merge/operator/local execution is not.
+
+## Exact accepted parent and allowed surfaces
+
+- BASE/initial HEAD `d81e27e4ecdfefda511ca4d9388a413d24b32d79`, direct child of current upstream5d75; tree `9fadcf6fdb3872e78e7c8cd321dbfa67a772460a`, index manifest `1104d526cea1e05b69abbcffee183993cbbf915f`, 766 tracked parent files protected.
+- Dedicated root `questionnaire-pi1-submit-red-evidence-d81e27e4`, new branch `feat/questionnaire-pi1-submit-red-evidence`. Only writes: new `.github/workflows/questionnaire-pi1-submit-red.yml` and this new record. No parent fixture, existing tests, production, package/lock/SDK/core/generated/native-adapter/external-editor or prior workflow/record mutation.
+- A fixture180/blob `2d2a54d8b9c72255b9163e2ab8b9661bc19fd455`, A record68/blob `c15cda99075ec016d73420da90b4639206c61a63`, A unit248 lines. Static acceptance covered fixture180+record60/c3cd0267 snapshot only; later A annotations outside it. No observed RED/GREEN.
+- Current old view tests446/blob `9ea1ebae3d9a42d3e1281352adb10c337ec9846a`, source20 top-level tests; view603/61284f, producer338/ad0e38, package8cb0b729, locke4d9a3c, checker9b8303c2, baselinee68a3f remain protected. All immutable complete hashes come from the accepted parent, not path-name assumptions.
+- Hard cumulative400 additions+deletions for entire two new files and closure. Forecast workflow190–230 + final record50–65 + closure reserve30 =270–325. Stop/split honestly before overage, no compressed code/docs or weakened controls.
+
+## ODD plan
+
+- [x] B1 ISOLATE: exact accepted A commit copied into a dedicated new worktree, current766-parent graph and source test20 count identified; no source retarget/main-current ownership sharing.
+- [x] B2 AUTHOR (TEXT ONLY): new source-only lane and manual source review; stored clone/freeze/type/ratchet/baseline20/Submit7 gates. Hosted behavior and compatibility remain UNKNOWN; own record only.
+- [x] B3 VERIFY: post-writer assessment stayed unassessable/HIGH without candidate/authority; independent static guarded-lane spec accepted the frozen356-line snapshot. No parser/compiler/runtime execution locally.
+- [ ] B4 DELIVER/OBSERVE: owned-fork non-force exact new feature push; independent bounded terminal exact-SHA/event/ref/attempt/job receipts, no polling/sleep loops. Distinguish infrastructure success from suite's deliberately observed RED.
+- [ ] B5 AUTHORIZE NEXT UNIT: only after valid actual RED may a separate view+six affected legacy test expectations+record production unit implement Submit; any runner/SDK/type/acquisition failure stops before a Submit fix.
+
+## Retained acquisition and source controls
+
+- Exact canonical repository `Gentleman-Programming/gentle-shell` or verified owned fork `decode2/gentle-pi`, only push on new feature/ref/event SHA; pinned checkout full fetch/read-only contents/credentials false; correct ancestry/base tree/index766, exactly two added paths and whole≤400 gate.
+- Complete source/index/regular-file/mode/normalized blob protection before/after independent exact-SHA clone. Scoped `git -c safe.directory="$root" ... hash-object --path` across ownership boundaries; raw hash strict except exactly three declared CRLF PowerShell paths. All parent files, new fixture/A record and protected config frozen, no source modifications by runner.
+- Use proven pinned Node image/digest/Linux-amd64-ID and pnpm11.1.1, networked acquisition only with frozen lock/install/pnpmfile scripts disabled; global trust for both `/workspace` and `/workspace/.git` only inside isolated acquisition `HOME=/artifact/home` before independent clone. No host/operator Git changes or test/setup scripts during install.
+- Separate offline network-none/nonroot1000/read-only root/source/guard with dropped capabilities/no-new-privileges/CPU1/memory2g/pids256/noexec,nosuid,nodev tmpfs and `env -i` isolated homes/PI/XDG/auth/cache before imports. Clean exact independent clone, immutable original/clone/index/modes and readonly identity-script seals including always-final; no source fallback or local execution exception.
+- Source-only view tests are not an archive/installed-package test boundary. Do not remove/reuse/weaken the old SDK artifact workflow, helper/extraction/SRI controls or claim its f4 evidence covers new Submit source. No package archive is required by this new source runner; packaging/integration remains separate.
+
+## Semantic and type gates
+
+- Authenticate package dependencies SDK/AI/TUI1.0.0, root TypeBox1.1.38/SDK TypeBox1.3.27 using public root resolution, not unexported package.json imports. Source package4.0.0 metadata remains pinned. Strict focused compiler gate covers the new fixture and its static view/schema graph; protected dynamic types ratchet/no update/no regressions/pipefail, unchanged ceiling200, current count must be observed not assumed187.
+- Run unchanged `tests/questionnaire-view.test.ts` first on the real pinned dependency graph using the current Node strip-types runner: exact20/pass20/fail0/cancelled0/skipped0/todo0. A compatibility failure here is not Submit RED.
+- Then execute only new `tests/questionnaire-pi1-submit.test.ts`, retain actual raw TAP and exit status. Expected source hypothesis: exit1, seven exact ordered labels, tests7/pass1/fail6/cancelled0/skipped0/todo0; each of cases1–6 must fail its intended assertion with ERR_ASSERTION in this fixture, not missing imports, class/Editor construction, parser, helper-row lookup, unexpected thrown errors or infrastructure failure. Case7 cancellation control passes. Any changed count/title/order/reason must be investigated, not accepted by exit status alone.
+- Fixed labels: single choice waits for explicit Submit; nonempty MULTI waits and preserves option order; custom editor save waits for explicit Submit; Next navigates before ordered final Submit; empty optional MULTI submits an empty selection; mouse edits remain pending and Submit sends latest answer; unanswered Escape cancels once without submitting. Prefix exactly `UM09a Pi1 Submit:`; no test mutation, private-state driving, bypass, skip or weakening.
+- Expected assertions prove stored answer/edit/navigation not delivery, Next stays explicit, final Submit once with ordered indices/latest payload, empty MULTI distinct Cancel; actual RED must arise in these behaviors. Infrastructure lane may report success only after strict expected-RED validation; that is never a production GREEN claim. No model/tool/render dispatch, human UI/full autoload/owner/Abort/RPC/installed-integration claims.
+
+## Process limits and receipts
+
+- FIRST read this record completely in four-line pages before workflow/source/metadata access. Other source reads roughly4KB; each response roughly≤10KB. All ordinary command/API stdout/stderr including failures captured in one complete shell-memory group and byte-metered before emission hard4096; no temporary spool files. Not an aggregate task-output or file-write-input ceiling.
+- No local Node/npm/pnpm/SDK/compiler/parser/tests/build/formatter/Docker/PTY/runtime/import/helper/stored-workflow execution, installs/project hooks/generated CodeGraph index. Author text/manual indentation and Bash/JS flow only, not syntax-parser validation; hosted scratch/test artifacts are not local log-retrieval spools.
+- Retain historical planning CodeGraph failure/own-parent notification/oversized memory-search response, worker withheld104943-byte bad hash loop then corrected, verifier corrected wrong docs/odd path. None is retroactively compliant or covered by the old UM08-only native-envelope exception.
+- No nested delegation/session messaging/installer teams or unrelated sessions especially `01a09bc4-6d1c-77b5-a17c-7811f026506a`; no operator/provider/profile setup/activation/reload/restart/native recovery. Official Gentle AI/Shell delivery asks; no main/PR merge/auto-merge/main push/merge API authority.
+
+## B2 writer self-receipt (source text, not runtime proof)
+
+- First complete own-record read: sequential four-line pages, offsets1–41, before any other source/metadata.
+- Workflow296 lines/blob `cd120f852597c384470ab89b45aa6ab3195dea9f`; final record60 lines. Earlier190–230 workflow forecast was too low.
+- Current two-file additions356/deletions0; closure reserve30 gives386≤400. Stop/split if later edits exceed400; do not weaken controls.
+- BASE HEAD/tree/index and branch match B1. Static complete scan: normalized/index766, raw763 plus exactly3 permitted CRLF mismatches, physical regular-file/modes766; failures0.
+- Tracked working/index diff exits0; exactly the two permitted untracked paths; no ignored files. All766 parent files remain untouched, including fixture/A-record/config/lock/checker/baseline.
+- Current baseline source20 tests; Submit7 names and first causal assertion lines73/91/112/126/151/163 verified from actual fixture, not approximate parent lines.
+- Stored TAP guard requires baseline20/pass20/exit0, then Submit7/pass1/fail6/exit1, all other counts0, ordered names, assertion codes/reasons and each own-line stack.
+- Errors from imports, compiler, acquisition, SDK constructors/editor or helper lookup are harness failures, never sufficient RED; positive cancellation control must pass.
+- Public-root metadata resolution pins SDK/AI/TUI1.0.0, root/SDK TypeBox1.1.38/1.3.27 and package4.0.0. Actual metadata/import/type/ratchet/test results UNKNOWN.
+- Manual whole-workflow indentation/Bash quoting/heredoc/JS flow review only. No parser, syntax checker, stored guard/helper, compiler, SDK, Docker or test executed locally.
+- Exit status is captured immediately in shell memory before raw TAP emission; pipeline gates retain pipefail. Sealed shared guards/configs and always-final freezes propagate failures.
+- Clone config manifests use relative paths with matching acquisition/host directories; source and dependency mounts stay readonly offline, without fallback/overrides.
+- Prior external SDK workflow hash `e4cdba178e93dcbce39dcf81c7f78841c1e64f96` unchanged. Old artifact/native-f4 receipts are not Submit/installed-package evidence.
+- Output incident: a4129-byte metadata group was withheld before emission, then narrowed; maximum emitted command payload1320 bytes. One incorrect old-workflow HEAD-path probe failed and was corrected to the external path.
+- Writer stopped before parent-owned B3/B4/B5; no local runtime/RED/GREEN or delivery/native-authority claim and no stage/commit/push/CI/contact action. Later parent verification below does not expand the writer snapshot.
+
+## B3 limited static closure
+
+- Independent ACCEPT STATIC GUARDED RED LANE SPEC ONLY: workflow296/blob `cd120f852597c384470ab89b45aa6ab3195dea9f` + record60/blob `aba74cf5a231da33b33ee6c8a3f4177484c11267` =356 additions/zero deletions, 44 headroom. Original workflow forecast exceeded honestly, hard400 preserved; these later annotations are outside the accepted60-line record snapshot.
+- Full296/manual quoting plus fixture180 reviewed; strict metadata/import/compiler/protected dynamic200 ratchet gates precede unchanged20/20 baseline, then seven exact cases/exit1/6 own-assertion ERR_ASSERTION failures at73/91/112/126/151/163 and passing cancellation. Helper44/import/constructor errors cannot satisfy RED. Actual runtime/SDK1.0/TAP formatting remain UNKNOWN.
+- Repeated766 indexed/normalized/regular executable modes matched, raw763 plus exactly three declared CRLF files, zero errors; full before/after raw-byte/mode/index SHA256 `b7ad33384b0b5bc08234d221166b5b321752b1bb6d3b1f8ef002276893277e38` stable. Exact HEAD/tree/index and fixture/A-record/config pins, tracked/cached clean, only two allowed untracked/no ignored paths, whitespace expected new-file exit1/no diagnostics.
+- Verifier FIRST fifteen limit4 record pages, all ordinary whole-group stdout/stderr byte-metered; maximum3,575, one43,102-byte scan withheld then narrowed, initial incorrect docs/odd read corrected. Retain prior incidents, not retroactive compliance. No parser/compiler/SDK/test/Docker/runtime/writes/delivery/native operation by verifier.
+- Source-only acquisition/offline/read-only/env/caps/noexec/scoped normalization/config/script seals and always-final boundaries accepted statically, not execution proof. All old artifact/installed/native receipts remain separate and unchanged. Parent may next commit/non-force push only the owned fork feature branch, then observe real compatibility and behavioral RED; no official/main/PR/merge/native consent authority.
