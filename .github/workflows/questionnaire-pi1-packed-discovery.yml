@@ -112,6 +112,7 @@ jobs:
               mkdir /artifact/home /artifact/cache /artifact/data /artifact/state /artifact/selected /artifact/sdk /artifact/packed
               source /identity.sh
               git config --global --add safe.directory /workspace
+              git config --global --add safe.directory /workspace/.git
               git clone --no-local --no-checkout /workspace /artifact/source
               cd /artifact/source
               git checkout --detach "$EXPECTED_SHA"
