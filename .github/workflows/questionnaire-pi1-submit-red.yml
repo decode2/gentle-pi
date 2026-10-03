@@ -197,11 +197,12 @@ jobs:
               freeze /workspace; freeze /artifact/source yes
               (cd /artifact/source; sha256sum --check /artifact/clone.sha256)
               (cd /artifact/home; sha256sum --check /artifact/home.sha256)
+              chmod 0444 /artifact/clone.sha256 /artifact/home.sha256
             '
           freeze "$GITHUB_WORKSPACE"
           freeze "$artifact/source" yes
           sha256sum --check "$RUNNER_TEMP/submit-original.sha256"
-          chmod 0444 "$artifact/clone.sha256" "$artifact/home.sha256" "$RUNNER_TEMP/submit-original.sha256"
+          chmod 0444 "$RUNNER_TEMP/submit-original.sha256"
       - name: Offline compatibility, baseline GREEN and guarded expected RED
         shell: bash
         run: |
