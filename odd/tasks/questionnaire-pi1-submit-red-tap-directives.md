@@ -1,6 +1,6 @@
 # UM09c — distinguish TAP directives from zero-count summaries
 
-**STATIC GUARDED LANE ACCEPTED; ACTUAL SUBMIT BEHAVIORAL RED STILL PENDING.**
+**GUARDED INTENDED SUBMIT BEHAVIORAL RED VERIFIED; PRODUCTION GREEN PENDING.**
 
 ## Outcome and non-outcome
 
@@ -36,8 +36,8 @@ odd/tasks/questionnaire-pi1-submit-red-tap-directives.md
 - [x] C1 PLAN: retain the three honest prior harness failures; freeze8065/all768 and scope only a new corrected guarded lane. Baseline readiness is not Submit RED.
 - [x] C2 AUTHOR: copied/retargeted only stored workflow source; status-line case-insensitive/indented SKIP/TODO distinguished from summary lines, bailout rejection and exact zero counters/exit/titles/assert-location checks preserved; remote-only positive/negative controls authored.
 - [x] C3 VERIFY: native assessment unassessable/untracked, candidate=null/RDDon/outcomeUNKNOWN; large/runtime writer self-verification and separate HIGH independent verification required. Static guarded spec accepted; no local syntax parser/runtime or native approval.
-- [ ] C4 DELIVER: parent ordinary commit/non-force push only owned new feature branch after accepted static spec; no duplicate active work, sleeps, periodic polling, CI rerun/dispatch or authority replay.
-- [ ] C5 OBSERVE: first complete own record in four-line pages; one exact-SHA metadata snapshot, terminal jobs/logs fully consumed through premetered bounded windows. Do not call acquisition/compiler/import/SDK/helper/parser failures behavioral RED.
+- [x] C4 DELIVER: ordinary commit0ee00df44d30583bfcea42367d765d8a87dd94fc/non-force push only owned new feature branch after accepted static spec; remote readback exact/root clean. No PR/main/merge, duplicate work, polling/rerun/dispatch or authority replay.
+- [x] C5 OBSERVE: fresh bounded independent intended-RED receipts accepted on exact0ee. FIRST16 own-record four-line pages, one terminal metadata/jobs snapshot, full1117 log lines consumed premetered; compatibility20 PASS before six intended own Submit assertions and positive cancellation.
 
 ## Required evidence boundaries
 
@@ -61,4 +61,13 @@ odd/tasks/questionnaire-pi1-submit-red-tap-directives.md
 
 - Independent ACCEPT STATIC GUARDED DIRECTIVE LANE SPEC ONLY on workflow312/blob9589cd7a4f09b669bafccd307ee7a30f5d626b83 + record58/blobb54506d95330bed62edaaec7fdd7cd9ef1813279 =370. Full old297/new312 comparison and in-memory literal reversal reproduced old16a4 byte-for-byte; only identity retargets and directive grammar/self-controls changed, zero-counter/duplicate rejection and strict20-before7 assert-location gates intact, controls not executed.
 - FIRST15 four-line record pages/full sources; repeated768 indexed/normalized/regular executable modes/raw765 plus exactly three CRLF exceptions, no tracked/cached/ignored changes and only two allowed regular untracked files, pins stable; maximum3,457 emitted, no fresh execution/write/contact/public-fetch incident. Parent initial malformed allowed-surface heading was rejected before queue and corrected; writer generic final TDD-toggle phrasing is absent from record and not governing: harness production RED/GREEN N/A, applicable production TDD still requires observed intended RED.
-- These later annotations/status are outside accepted58-line record snapshot. Whole new-file unit remains≤400 with honest remaining host/native evidence reserve; native candidate/outcome/approval remain null/unknown/unapproved. Parent may next ordinary commit/non-force push only owned new feature, then observe actual baseline20/Submit7/compiler/metadata/controls/always-final; no production fix until validated behavioral RED.
+- These later annotations/status are outside accepted58-line record snapshot. Whole new-file unit remains≤400 with honest remaining evidence reserve; native candidate/outcome/approval remain null/unknown/unapproved. Actual hosted results below authorize no native verdict and do not expand static58 or hosted64 record coverage.
+
+## Actual guarded intended RED receipt
+
+- Exact candidate0ee00df44d30583bfcea42367d765d8a87dd94fc, source312+record64 =376; owned new feature push run37160895949/attempt1/job111313917818 SUCCESS2026-10-03T23:10:23–23:12:33Z/job23:10:26–23:12:32Z. All eight steps succeeded, always-final23:12:21–30Z; CI success means expected behavioral RED, not production GREEN.
+- Pinned independent clone/image/platform/frozen pnpm11.1.1 acquisition187 packages/offline net-none/RO UID1000 caps/noexec/resources/private env/write-denial probes completed. SDK/AI/TUI1.0.0/rootTB1.1.38/SDKTB1.3.27/package4 metadata assertions, runtime imports and strict focused NodeNext compiler passed; values/mode0444 bits not separately printed, seal commands passed. Ratchet186/no regressions/12 improved/unchanged200/no update.
+- Actual TAP13 baseline20 ordered PASS/zero others/exit0 guard-verified; unchanged Submit7 exact titles, first six ERR_ASSERTION own fixture73:9/91:9/112:9 premature single/MULTI/custom callback,126:9 premature[2/2] navigation,151:9 missing empty-MULTI Submit,163:9 premature mouse callback; no helper44/import/constructor failures. Seventh unanswered Escape/late-input inertness PASS; totals7/pass1/fail6/other0/exit1 guard-verified.
+- Both actual TAP_DIRECTIVE_NEGATIVE_CONTROLS verified markers accepted zero summaries/rejected status directives/bailout/nonzero counters; final SUBMIT_BEHAVIOR_RED verified marker followed complete strict7-case gates. All original/clone/config/home/identity/guard/script always-final seals OK, numeric SHA values not separately logged; source-only, no archive/installed UI/native authority claim.
+- Fresh observer FIRST16 limit4 record pages/full sources/one terminal metadata and attempt-jobs query/full1117-line logs drained in20-line windows; maximum2,391, no fresh process incident or local runtime/write/delivery. BEFORE/AFTER768 protected/770 current, raw765+three CRLF exceptions/index b12099c93c8da0ed9556f55c9bd3a0f1a86397d8/modes/pins/exact2 additions376 unchanged and clean. Prior incidents remain historical, unseen actor compliance not asserted.
+- These later receipt/status annotations are outside static370/record58 and hosted376/record64 snapshots; closure docs stay local to avoid redundant CI. Actual intended RED now supports a separately scoped coherent view/legacy-expectations production unit≤400; producer/ownership/delivery/Abort/RPC/fullscreen/Herdr and whole-feature validation remain separate, no production GREEN or native consumed approval inferred.
