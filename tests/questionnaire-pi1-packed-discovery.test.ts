@@ -166,10 +166,18 @@ async function withSession(
 		const interactions: PropertyKey[] = [];
 		const errors: unknown[] = [];
 		// The public typed target supplies Theme metadata without constructing an
-		// incomplete UI interface. Even a swallowed forbidden access is recorded.
+		// incomplete UI interface. SDK binding may copy method references, not call
+		// them. Even swallowed forbidden calls or property reads remain recorded.
 		const uiContext = new Proxy(live.extensionRunner.getUIContext(), {
 			get(target, key) {
 				if (key === "theme") return Reflect.get(target, key, target);
+				const value = Reflect.get(target, key, target);
+				if (typeof value === "function") {
+					return () => {
+						interactions.push(key);
+						throw new Error(`Discovery attempted UI call: ${String(key)}`);
+					};
+				}
 				interactions.push(key);
 				throw new Error(`Discovery attempted UI access: ${String(key)}`);
 			},
