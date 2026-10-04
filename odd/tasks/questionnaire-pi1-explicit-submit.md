@@ -41,7 +41,7 @@ odd/tasks/questionnaire-pi1-explicit-submit.md
 - [x] D1 PLAN/RED: dedicated exact-parent root, observed six intended own behavior assertions plus positive cancel/old20 baseline, concrete source seams177–258/265–402/456–580 and legacy completion129–266/352–407, causal boundaries/forecast recorded before writer.
 - [x] D2 AUTHOR (static only): staged-answer/action focus and owned mouse-action footer authored; same confirm binding, Next navigation/final all-ready ordered Submit once, empty optional MULTI and dirty-answer invalidation. Coherent legacy expectations/event sequences/titles updated; functional GREEN remains unknown.
 - [x] D3 VERIFY: post-writer assessments unassessable/untracked, large/runtime writer/HIGH/self+independent required; corrected source accepted independently, then fresh byte-metered static readback accepted. Candidate=null/outcomeUNKNOWN/RDDon, no native approval; no local parser/compiler/runtime.
-- [ ] D4 COMMIT: ordinary local work-unit commit after static acceptance; exact next GREEN evidence lane separately≤400, no official PR/main or native delivery authority inferred.
+- [x] D4 COMMIT: ordinary local a9e636ec293686e64d1c4b62f13a3b65e5b56ca2, source55/tests126/record74 =255 changed lines, exact source6255869f/legacy75bbbfe3; root clean, not pushed. Next GREEN evidence lane separately≤400; no official PR/main or native delivery authority.
 - [ ] D5 GREEN: actual SDK1.0/compiler/type ratchet/updated truthful20 baseline plus unchanged seven-case fixture allPASS through exact-parent new contained hosted lane. No GREEN claimed until actual strict receipts; no tests failing or partial work marked production complete.
 
 ## Additional review boundaries
