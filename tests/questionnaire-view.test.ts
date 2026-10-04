@@ -161,7 +161,10 @@ test("real key sequences drive the cursor and commit in legacy and application-c
 		view.handleInput(down);
 		assert.match(render(view), /❯ Beta/, `down sequence ${JSON.stringify(down)} should move the cursor`);
 		view.handleInput(KEY.enter);
-		assert.equal(completed.length, 1, `enter after ${JSON.stringify(down)} should commit`);
+		assert.equal(completed.length, 0, "choice confirmation only stages the answer");
+		assert.match(render(view), /\[Submit\]/);
+		view.handleInput(KEY.enter);
+		assert.equal(completed.length, 1, `explicit Submit after ${JSON.stringify(down)} should deliver`);
 		assert.deepEqual(view.getResult().answers, [
 			{ questionIndex: 0, question: "Proceed?", kind: "option", answer: "Beta" },
 		]);
@@ -184,20 +187,38 @@ test("the injected KeybindingsManager drives the same navigation and commit", ()
 	view.handleInput(KEY.down[0]);
 	assert.match(render(view), /❯ Beta/);
 	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 0);
+	assert.match(render(view), /\[Submit\]/);
+	view.handleInput(KEY.enter);
 	assert.equal(completed.length, 1);
 	assert.equal(view.getResult().answers[0]?.answer, "Beta");
 });
 
-test("single-select commits on Enter and advances to the next unanswered question", () => {
+test("single-select stages on Enter and explicit Next advances before final Submit", () => {
 	const { view, completed } = viewWithResult(two());
 
+	view.handleInput(KEY.tab);
+	view.handleInput(KEY.enter); // Stage the last question before the first is ready.
 	view.handleInput(KEY.enter);
-	assert.equal(completed.length, 0, "the questionnaire is not done while a question is unanswered");
-	assert.equal(view.getResult().answers.length, 1);
-	assert.equal(view.activeQuestion, 1, "a commit advances to the next unanswered question");
+	assert.equal(completed.length, 0, "Submit cannot deliver an incomplete answer array");
+	assert.equal(view.activeQuestion, 1);
+	view.handleInput(KEY.shiftTab);
+	assert.equal(completed.length, 0, "navigation never delivers staged answers");
+
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 0, "staging all answers still requires explicit Submit");
+	assert.equal(view.getResult().answers.length, 2, "navigation retains the staged last answer");
+	assert.equal(view.activeQuestion, 0, "staging stays on the current question");
+	assert.match(render(view), /\[Next\]/);
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 0, "Next only navigates");
+	assert.equal(view.activeQuestion, 1, "explicit Next advances to the next question");
 	assert.match(render(view), /\[2\/2\]/);
 	assert.match(render(view), /❯ Gamma/);
 
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 0, "even the last answer only stages");
+	assert.match(render(view), /\[Submit\]/);
 	view.handleInput(KEY.enter);
 	assert.equal(completed.length, 1);
 	assert.deepEqual(view.getResult().answers, [
@@ -206,18 +227,34 @@ test("single-select commits on Enter and advances to the next unanswered questio
 	]);
 });
 
-test("multi-select toggles with space and requires a non-empty selection to commit", () => {
+test("multi-select stages empty selections and toggles with space before explicit Submit", () => {
+	const empty = viewWithResult([question("Pick?", [option("One"), option("Two")], { multiSelect: true })]);
+	empty.view.handleInput(KEY.enter);
+	assert.equal(empty.completed.length, 0, "an empty selection stages without delivery");
+	assert.match(render(empty.view), /\[Submit\]/);
+	assert.deepEqual(empty.view.getResult().answers, [
+		{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: [] },
+	]);
+	empty.view.handleInput(KEY.enter);
+	assert.deepEqual(empty.completed, [{
+		cancelled: false,
+		answers: [{ questionIndex: 0, question: "Pick?", kind: "multi", answer: null, selected: [] }],
+	}]);
+
 	const { view, completed } = viewWithResult([
 		question("Pick?", [option("One"), option("Two")], { multiSelect: true }),
 	]);
 	assert.match(render(view), /\[ \] One/);
 
-	view.handleInput(KEY.enter);
-	assert.equal(completed.length, 0, "an empty multiSelect commit is a no-op");
-	assert.equal(view.getResult().answers.length, 0);
-
+	view.handleInput(KEY.enter); // Stage empty, then dirty it with a toggle.
 	view.handleInput(KEY.space);
 	assert.match(render(view), /\[x\] One/);
+	const dirty = view.render(100);
+	const actionRow = dirty.findIndex((line) => line.includes("[Submit]"));
+	assert.ok(actionRow >= 0);
+	view.handleMouse(mouseEvent(dirty, actionRow, "click"));
+	assert.equal(completed.length, 0, "dirty toggles invalidate the previously staged answer");
+	assert.deepEqual(view.getResult().answers, []);
 
 	view.handleInput(KEY.down[0]);
 	view.handleInput(KEY.space);
@@ -226,6 +263,9 @@ test("multi-select toggles with space and requires a non-empty selection to comm
 	view.handleInput(KEY.space);
 	assert.match(render(view), /\[ \] Two/);
 
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 0);
+	assert.match(render(view), /\[Submit\]/);
 	view.handleInput(KEY.enter);
 	assert.equal(completed.length, 1);
 	assert.deepEqual(view.getResult().answers, [
@@ -265,8 +305,8 @@ test("custom row opens the editor, empty submit returns, and the draft survives 
 	]);
 });
 
-test("multi-select can commit a custom answer with the toggled options", () => {
-	const { view } = viewWithResult([question("Pick?", [option("One"), option("Two")], { multiSelect: true })]);
+test("multi-select can stage a custom answer with the toggled options before Submit", () => {
+	const { view, completed } = viewWithResult([question("Pick?", [option("One"), option("Two")], { multiSelect: true })]);
 	view.handleInput(KEY.space);
 	view.handleInput(KEY.down[0]);
 	view.handleInput(KEY.down[0]);
@@ -275,6 +315,10 @@ test("multi-select can commit a custom answer with the toggled options", () => {
 	assert.match(render(view), /Custom response/);
 	view.handleInput("free note");
 	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 0, "editor save only stages");
+	assert.match(render(view), /\[Submit\]/);
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 1);
 
 	assert.deepEqual(view.getResult().answers, [
 		{ questionIndex: 0, question: "Pick?", kind: "custom", answer: "free note", selected: ["One"] },
@@ -364,7 +408,7 @@ test("a committed option carries its preview on the answer row", () => {
 	]);
 });
 
-test("pointer press focuses a row and click commits it", () => {
+test("pointer press focuses rows and actions; click stages or explicitly advances/submits", () => {
 	const { view, completed } = viewWithResult(single());
 	const lines = view.render(100);
 	const betaRow = lines.findIndex((line) => line.includes("Beta"));
@@ -375,8 +419,59 @@ test("pointer press focuses a row and click commits it", () => {
 	const afterPress = view.render(100);
 	const betaRowAfterPress = afterPress.findIndex((line) => line.includes("Beta"));
 	assert.equal(view.handleMouse(mouseEvent(afterPress, betaRowAfterPress, "click"))?.handled, true);
-	assert.equal(completed.length, 1);
+	assert.equal(completed.length, 0, "choice click stages without delivery");
+	const staged = view.render(100);
+	const submitRow = staged.findIndex((line) => line.includes("[Submit]"));
+	assert.ok(submitRow >= 0);
+	assert.equal(view.handleMouse(mouseEvent(staged, submitRow, "press"))?.handled, true);
+	assert.equal(completed.length, 0, "action press only focuses");
+	const focused = view.render(100);
+	view.handleMouse(mouseEvent(focused, focused.findIndex((line) => line.includes("[Submit]")), "click"));
+	assert.equal(completed.length, 1, "action click submits once");
 	assert.equal(view.getResult().answers[0]?.answer, "Beta");
+
+	for (const pressFirst of [false, true]) {
+		const { view, completed } = viewWithResult(two());
+		view.handleInput(KEY.tab);
+		view.handleInput(KEY.enter); // Stage last first: all-ready must not mask a double activation.
+		view.handleInput(KEY.shiftTab);
+		view.handleInput(KEY.enter);
+		assert.equal(view.getResult().answers.length, 2);
+		assert.equal(completed.length, 0);
+		let lines = view.render(100);
+		const nextRow = lines.findIndex((line) => line.includes("[Next]"));
+		assert.ok(nextRow >= 0);
+		if (pressFirst) {
+			assert.equal(view.handleMouse(mouseEvent(lines, nextRow, "press"))?.handled, true);
+			lines = view.render(100);
+			assert.match(lines.join("\n"), /\[1\/2\]/, "Next press must not advance before click");
+			assert.equal(completed.length, 0);
+		}
+		view.handleMouse(mouseEvent(lines, lines.findIndex((line) => line.includes("[Next]")), "click"));
+		lines = view.render(100);
+		assert.match(lines.join("\n"), /\[2\/2\]/);
+		assert.equal(completed.length, 0, "one Next gesture must never submit staged answers");
+		const submitRow = lines.findIndex((line) => line.includes("[Submit]"));
+		assert.ok(submitRow >= 0);
+		assert.equal(submitRow, nextRow, "equal-sized questions reuse the footer coordinate");
+		if (pressFirst) {
+			view.handleMouse(mouseEvent(lines, submitRow, "press"));
+			lines = view.render(100);
+			assert.equal(completed.length, 0, "separate Submit press still only focuses");
+		}
+		view.handleMouse(mouseEvent(lines, lines.findIndex((line) => line.includes("[Submit]")), "click"));
+		assert.deepEqual(completed, [{
+			cancelled: false,
+			answers: [
+				{ questionIndex: 0, question: "First?", kind: "option", answer: "Alpha" },
+				{ questionIndex: 1, question: "Second?", kind: "option", answer: "Gamma" },
+			],
+		}]);
+		view.handleMouse(mouseEvent(lines, submitRow, "click"));
+		view.handleInput(KEY.enter);
+		view.handleInput(KEY.escape);
+		assert.equal(completed.length, 1, "late click and keys are inert");
+	}
 });
 
 test("pointer click toggles a multi-select option instead of committing", () => {
@@ -403,6 +498,9 @@ test("pointer click toggles a multi-select option instead of committing", () => 
 	assert.match(render(view), /\[x\] One/);
 	assert.match(render(view), /\[x\] Two/);
 
+	view.handleInput(KEY.enter);
+	assert.equal(completed.length, 0, "keyboard confirmation only stages the toggles");
+	assert.match(render(view), /\[Submit\]/);
 	view.handleInput(KEY.enter);
 	assert.equal(completed.length, 1);
 	assert.deepEqual(view.getResult().answers, [

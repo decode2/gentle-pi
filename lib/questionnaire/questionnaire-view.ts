@@ -144,6 +144,7 @@ export class QuestionnaireView extends Container implements Focusable {
 	private readonly editor: CustomTextEditor;
 	private focusedQuestion = 0;
 	private editingQuestion: number | undefined;
+	private actionFocused = false;
 	private completed = false;
 	private result: QuestionnaireResult | undefined;
 	private lineOwners: Array<LineOwner | undefined> = [];
@@ -242,7 +243,8 @@ export class QuestionnaireView extends Container implements Focusable {
 		}
 
 		if (this.matches(data, "tui.select.confirm")) {
-			this.commit();
+			if (this.actionFocused) this.activateAction();
+			else this.commit();
 		}
 	}
 
@@ -251,7 +253,15 @@ export class QuestionnaireView extends Container implements Focusable {
 		if (this.editingQuestion !== undefined) return this.editor.handleMouse(event);
 
 		const owner = this.lineOwners[event.y];
-		if (!owner || owner.rowIndex < 0 || event.button !== "left") return undefined;
+		if (!owner || event.button !== "left") return undefined;
+		if (owner.rowIndex === -2 && (event.type === "press" || event.type === "click")) {
+			if (event.type === "press") {
+				if (this.states[this.focusedQuestion]?.answer) this.stageAction();
+			}
+			else this.activateAction();
+			return { handled: true as const, focus: true, render: true, target: this.mouseTarget(event) };
+		}
+		if (owner.rowIndex < 0) return undefined;
 
 		if (event.type === "press") {
 			const changed = this.focusRow(owner.questionIndex, owner.rowIndex);
@@ -313,6 +323,12 @@ export class QuestionnaireView extends Container implements Focusable {
 		}
 
 		push("");
+		if (this.editingQuestion === undefined) {
+			const label = this.focusedQuestion === this.questions.length - 1 ? "Submit" : "Next";
+			const action = `[${label}]`;
+			push(this.actionFocused ? this.accent(`❯ ${action}`) : `  ${action}`,
+				{ questionIndex: this.focusedQuestion, rowIndex: -2 });
+		}
 		push(this.hint());
 
 		this.lineOwners = owners;
@@ -418,6 +434,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		const total = this.questions.length;
 		if (total === 0) return;
 		this.focusedQuestion = (this.focusedQuestion + delta + total) % total;
+		this.actionFocused = false;
 		this.invalidate();
 	}
 
@@ -427,6 +444,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		if (!question || !state) return;
 		const total = question.options.length + 1;
 		state.cursor = Math.max(0, Math.min(total - 1, state.cursor + delta));
+		this.clearAnswer(state);
 		this.invalidate();
 	}
 
@@ -440,6 +458,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		}
 		if (state.toggled.has(state.cursor)) state.toggled.delete(state.cursor);
 		else state.toggled.add(state.cursor);
+		this.clearAnswer(state);
 		this.invalidate();
 	}
 
@@ -450,6 +469,7 @@ export class QuestionnaireView extends Container implements Focusable {
 		const changed = this.focusedQuestion !== questionIndex || state.cursor !== rowIndex;
 		this.focusedQuestion = questionIndex;
 		state.cursor = Math.max(0, Math.min(question.options.length, rowIndex));
+		this.clearAnswer(state);
 		this.invalidate();
 		return changed;
 	}
@@ -469,7 +489,6 @@ export class QuestionnaireView extends Container implements Focusable {
 			const toggled = [...state.toggled]
 				.filter((index) => index < customIndex)
 				.sort((a, b) => a - b);
-			if (toggled.length === 0) return;
 			state.answer = {
 				questionIndex: this.focusedQuestion,
 				question: question.question,
@@ -477,7 +496,7 @@ export class QuestionnaireView extends Container implements Focusable {
 				answer: null,
 				selected: toggled.map((index) => question.options[index]!.label),
 			};
-			this.afterCommit(this.focusedQuestion);
+			this.stageAction();
 			return;
 		}
 
@@ -490,12 +509,13 @@ export class QuestionnaireView extends Container implements Focusable {
 			answer: option.label,
 			...(option.preview !== undefined ? { preview: option.preview } : {}),
 		};
-		this.afterCommit(this.focusedQuestion);
+		this.stageAction();
 	}
 
 	private openEditor(questionIndex: number): void {
 		const state = this.states[questionIndex];
 		if (!state) return;
+		this.clearAnswer(state);
 		this.editingQuestion = questionIndex;
 		this.editor.setValue(state.customDraft);
 		this.editor.setFocused(this._focused);
@@ -541,19 +561,28 @@ export class QuestionnaireView extends Container implements Focusable {
 			...(question.multiSelect && selected.length > 0 ? { selected } : {}),
 		};
 		this.closeEditor();
-		this.afterCommit(questionIndex);
+		this.stageAction();
 	}
 
-	private afterCommit(questionIndex: number): void {
-		if (this.states.every((state) => state.answer !== undefined)) {
-			this.finish({ cancelled: false, answers: this.collectedAnswers() });
+	private clearAnswer(state: QuestionState): void {
+		state.answer = undefined;
+		this.actionFocused = false;
+	}
+
+	private stageAction(): void {
+		this.actionFocused = true;
+		this.invalidate();
+	}
+
+	private activateAction(): void {
+		if (!this.states[this.focusedQuestion]?.answer) return;
+		if (this.focusedQuestion < this.questions.length - 1) {
+			this.moveFocus(1);
 			return;
 		}
-		// Advance to the first unanswered question so a commit is visible and the
-		// tab strip keeps moving; committed answers stay reachable with Tab.
-		const next = this.states.findIndex((state) => state.answer === undefined);
-		if (next !== -1 && next !== questionIndex) this.focusedQuestion = next;
-		this.invalidate();
+		if (this.states.every((state) => state.answer !== undefined)) {
+			this.finish({ cancelled: false, answers: this.collectedAnswers() });
+		}
 	}
 
 	private collectedAnswers(): AnswerRow[] {
